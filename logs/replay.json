@@ -1,0 +1,242 @@
+[
+  {
+    "frame": 0,
+    "t_ms": 1320,
+    "name": "unfreeze",
+    "thisPtr": "0x7f5760d82028",
+    "snap": {
+      "vt_rel": "0x1ff6700",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": -1865772144,
+      "ground_84": 32599
+    },
+    "vt": "0x7f5616474700",
+    "vt_rel": "0x1ff6700"
+  },
+  {
+    "frame": 15,
+    "t_ms": 1571,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": 1,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 51,
+    "t_ms": 2183,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 97,
+    "t_ms": 2945,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 2,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 194,
+    "t_ms": 4558,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": 1,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 240,
+    "t_ms": 5329,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 312,
+    "t_ms": 6521,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": 1,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 342,
+    "t_ms": 7021,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 1,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 372,
+    "t_ms": 7521,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 2,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 404,
+    "t_ms": 8063,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 2,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 461,
+    "t_ms": 9009,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 0,
+      "cooldown_b0": 0,
+      "ground_80": 1,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 475,
+    "t_ms": 9238,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 1,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 484,
+    "t_ms": 9392,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 1,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 494,
+    "t_ms": 9559,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 1,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 504,
+    "t_ms": 9734,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 1,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  },
+  {
+    "frame": 512,
+    "t_ms": 9863,
+    "name": "jump",
+    "thisPtr": "0x7f574199d890",
+    "snap": {
+      "vt_rel": "0x2049048",
+      "state_a0": 1,
+      "cooldown_b0": 0,
+      "ground_80": 0,
+      "ground_84": 0
+    },
+    "vt": "0x7f56164c7048",
+    "vt_rel": "0x2049048"
+  }
+]
