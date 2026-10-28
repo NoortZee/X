@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-import frida, sys, json, time, os, threading
+import frida, sys, json, os, threading
 
 PKG = "com.zeptolab.thieves.google"
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+LOG_PATH = os.path.join(LOG_DIR, "replay.json")
 
 _done_event = threading.Event()
 _done_status = {"error": None}
@@ -13,7 +14,7 @@ PRINT_TYPES = {
     "pump_installed", "pump_already",
     "module_base", "fatal",
     "hero_resolved",
-    "jumps_analysis", "jumps_plan", "jumps_timeline", "jumps_filter",
+    "jumps_analysis", "jumps_plan",
     "jumps_waiting_first_update",
     "jumps_armed", "jumps_ready",
     "jumps_progress",
@@ -53,7 +54,7 @@ def attach():
     with open(agent_path) as f:
         script = session.create_script(f.read())
 
-    def on_msg(msg, data):
+    def on_msg(msg, _data):
         if msg["type"] == "send":
             p = msg["payload"]
             t = p.get("type") if isinstance(p, dict) else None
@@ -71,8 +72,21 @@ def attach():
 
     script.on("message", on_msg)
     script.load()
+
+    # install + detect прицепляем один раз за сессию
+    script.exports_sync.pump_install()
+    script.exports_sync.detect_install()
+    try:
+        script.exports_sync.pump_resume()
+    except Exception:
+        pass
+
     return session, script
 
+
+# ------------------------------------------------------------
+# I/O helpers
+# ------------------------------------------------------------
 
 def prompt(msg):
     try:
@@ -83,68 +97,68 @@ def prompt(msg):
 
 def save_log(events, body_frames):
     os.makedirs(LOG_DIR, exist_ok=True)
-    path = os.path.join(LOG_DIR, "replay.json")
     data = {
         "version": REPLAY_FORMAT_VERSION,
         "events": events,
         "body_frames": body_frames or [],
     }
-    with open(path, "w") as f:
+    with open(LOG_PATH, "w") as f:
         json.dump(data, f)
-    return path
+    return LOG_PATH
 
 
-def load_log(path):
+def load_log(path=None):
+    path = path or LOG_PATH
+    if not os.path.exists(path):
+        return [], []
     with open(path) as f:
         data = json.load(f)
     if isinstance(data, list):
-        return data, []          # старый формат — без body_frames
+        return data, []
     return data.get("events", []), data.get("body_frames", [])
 
 
-def interactive_record(script):
-    print("[..] pump_install", flush=True)
-    script.exports_sync.pump_install()
-    try: script.exports_sync.pump_resume()
-    except Exception: pass
-    print("[..] detect_install", flush=True)
-    script.exports_sync.detect_install()
+# ------------------------------------------------------------
+# ACTIONS
+# ------------------------------------------------------------
 
+def do_record(script):
     print()
-    print("═══ RECORD (with body-state) ═══", flush=True)
-    print("В игре: зайдите в уровень, дождитесь ЗАМОРОЖЕННОГО состояния.", flush=True)
-
+    print("═══ RECORD (with body-state) ═══")
+    print("В игре: зайдите в уровень, дождитесь ЗАМОРОЖЕННОГО состояния.")
     if not prompt("Enter — НАЧАТЬ запись... "):
+        print("Отменено.")
         return None
 
     script.exports_sync.detect_start()
-
     print()
-    print("🔴 ЗАПИСЬ ИДЁТ — тапните по экрану в игре и играйте.", flush=True)
+    print("🔴 ЗАПИСЬ ИДЁТ — тапните по экрану и играйте.")
     prompt("Enter — ОСТАНОВИТЬ запись... ")
 
     events = script.exports_sync.detect_stop()
     body_frames = script.exports_sync.detect_get_body_frames()
 
     if not events:
-        print("❌ событий нет.", flush=True)
+        print("❌ событий нет.")
         return None
 
-    path = save_log(events, body_frames)
+    save_log(events, body_frames)
 
     print()
-    print(f"✅ Записано {len(events)} событий + {len(body_frames)} body_frames:", flush=True)
+    print(f"✅ Записано {len(events)} событий + {len(body_frames)} body_frames")
 
     unfreeze_f = None
     first_update_f = None
     effective_jumps = 0
     total_jumps = 0
+
     for e in events:
         snap = e.get("snap") or {}
         marker = ""
         if e['name'] in ('unfreeze', 'unfreeze_attack'):
             marker = " ← якорь-fallback"
-            if unfreeze_f is None: unfreeze_f = e['frame']
+            if unfreeze_f is None:
+                unfreeze_f = e['frame']
         if e['name'] == 'first_hero_update':
             marker = " ← ЯКОРЬ"
             first_update_f = e['frame']
@@ -154,103 +168,156 @@ def interactive_record(script):
                 isinstance(snap.get('state_a0'), int) and (snap['state_a0'] & 7) == 0
                 and (snap.get('ground_80', 0) or 0) + (snap.get('ground_84', 0) or 0) > 0
             )
-            if eff: effective_jumps += 1
+            if eff:
+                effective_jumps += 1
             marker = " ← эффективный" if eff else " (no-op)"
         print(
             f"   frame {e['frame']:4d}  t={e.get('t_ms', 0):5d}ms  {e['name']:20s}  "
             f"state={snap.get('state_a0','?')} ground={snap.get('ground_80','?')}/{snap.get('ground_84','?')} "
-            f"cd={snap.get('cooldown_b0','?')}{marker}", flush=True)
+            f"cd={snap.get('cooldown_b0','?')}{marker}"
+        )
 
     if first_update_f is not None and unfreeze_f is not None:
-        spawn_delay = first_update_f - unfreeze_f
         print()
-        print(f"   ⏱  unfreeze → first_hero_update: {spawn_delay} кадров", flush=True)
+        print(f"   ⏱  unfreeze → first_hero_update: {first_update_f - unfreeze_f} кадров")
 
     if body_frames:
-        f_first = body_frames[0].get("frame")
-        f_last = body_frames[-1].get("frame")
         sample = body_frames[0]
         print()
-        print(f"   📦 body_frames: {len(body_frames)} записей, диапазон кадров {f_first}..{f_last}", flush=True)
+        print(f"   📦 body_frames: {len(body_frames)} записей, "
+              f"кадры {body_frames[0].get('frame')}..{body_frames[-1].get('frame')}")
         print(f"      sample[0]: px={sample.get('px'):.2f} py={sample.get('py'):.2f} "
-              f"ang={sample.get('ang'):.3f} vx={sample.get('vx'):.2f} vy={sample.get('vy'):.2f}", flush=True)
+              f"ang={sample.get('ang'):.3f} vx={sample.get('vx'):.2f} vy={sample.get('vy'):.2f}")
 
     print()
-    print(f"   📊 Прыжков всего: {total_jumps}, эффективных: {effective_jumps}", flush=True)
-    print(f"   → {path}", flush=True)
+    print(f"   📊 Прыжков всего: {total_jumps}, эффективных: {effective_jumps}")
+    print(f"   → {LOG_PATH}")
     return events, body_frames
 
 
-def interactive_jumps(script, events, body_frames, only_effective=False):
-    mode_label = "ONLY-EFFECTIVE" if only_effective else "ALL-JUMPS"
+def do_play(script, events, body_frames):
+    if not events:
+        print("Нет данных для воспроизведения (сначала сделайте record).")
+        return
+
     print()
-    print(f"═══ JUMPS-ONLY PLAY ({mode_label}, body-force) ═══", flush=True)
-    print("В игре:", flush=True)
-    print("  1. Выйдите в лобби → зайдите в уровень заново", flush=True)
-    print("  2. Дождитесь ЗАМОРОЖЕННОГО состояния", flush=True)
-    print("  3. НЕ тапайте, пока программа не скажет «готово»", flush=True)
-    print()
-    print("⚠️  Игру НЕ перезапускайте — только уровень.", flush=True)
+    print("═══ JUMPS-ONLY PLAY (body-force) ═══")
+    print("В игре:")
+    print("  1. Выйдите в лобби → зайдите в уровень заново")
+    print("  2. Дождитесь ЗАМОРОЖЕННОГО состояния")
+    print("  3. НЕ тапайте, пока программа не скажет «готово»")
+    print("⚠️  Игру НЕ перезапускайте — только уровень.")
 
     if not prompt("Enter — программа встанет на слежку... "):
-        print("Отменено.", flush=True)
+        print("Отменено.")
         return
 
     _done_event.clear()
     _done_status["error"] = None
 
-    opts = {"only_effective": only_effective, "body_frames": body_frames or []}
-    script.exports_sync.replay_jumps_only(events, opts)
+    script.exports_sync.replay_jumps_only(events, {"body_frames": body_frames or []})
 
     print()
-    print("🟢 Программа готова. СЕЙЧАС тапните ОДИН раз по экрану в игре.", flush=True)
-    print("   Anchor = first_hero_update; body state форсится каждый кадр.", flush=True)
+    print("🟢 Программа готова. СЕЙЧАС тапните ОДИН раз по экрану в игре.")
+    print("   Anchor = first_hero_update; body state форсится каждый кадр.")
 
     while not _done_event.wait(timeout=1.0):
         pass
 
     if _done_status["error"]:
-        print(f"\n❌ Ошибка: {_done_status['error']}", flush=True)
+        print(f"\n❌ Ошибка: {_done_status['error']}")
     else:
-        print("\n✅ Jumps playback завершён.", flush=True)
+        print("\n✅ Jumps playback завершён.")
 
+
+def do_rehearse(script):
+    res = do_record(script)
+    if not res:
+        return None, [], []
+    events, body_frames = res
+    do_play(script, events, body_frames)
+    return events, body_frames
+
+
+def do_clear():
+    if os.path.exists(LOG_PATH):
+        try:
+            os.remove(LOG_PATH)
+            print(f"Удалено: {LOG_PATH}")
+        except Exception as e:
+            print(f"Не удалось удалить: {e}")
+    else:
+        print("Лог уже пуст.")
+    return [], []
+
+
+# ------------------------------------------------------------
+# MENU LOOP
+# ------------------------------------------------------------
+
+def print_menu(in_memory_events, in_memory_body):
+    log_exists = os.path.exists(LOG_PATH)
+    print()
+    print("─────────────────────────────────────────────────")
+    print(f"  Лог: {'есть ' + str(len(in_memory_events)) + ' событий / ' + str(len(in_memory_body)) + ' body_frames' if in_memory_events else ('есть на диске' if log_exists else 'пусто')}")
+    print("─────────────────────────────────────────────────")
+    print("  Enter / rehearse   — запись + воспроизведение")
+    print("  record             — только запись")
+    print("  play               — только воспроизведение")
+    print("  clear              — удалить лог")
+    print("  exit / q           — выход")
+    print("─────────────────────────────────────────────────")
+
+
+def main_loop(script):
+    events, body_frames = load_log()
+    if events:
+        print(f"[main] загружен существующий лог: {len(events)} событий, {len(body_frames)} body_frames")
+
+    while True:
+        print_menu(events, body_frames)
+        try:
+            cmd = input("> ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[main] выход")
+            return
+
+        try:
+            if cmd in ("", "rehearse", "r"):
+                events, body_frames = do_rehearse(script) or (events, body_frames)
+            elif cmd in ("record", "rec"):
+                res = do_record(script)
+                if res:
+                    events, body_frames = res
+            elif cmd in ("play", "p"):
+                if not events:
+                    events, body_frames = load_log()
+                do_play(script, events, body_frames)
+            elif cmd in ("clear", "c"):
+                events, body_frames = do_clear()
+            elif cmd in ("exit", "quit", "q"):
+                print("[main] выход")
+                return
+            else:
+                print(f"Неизвестная команда: '{cmd}'")
+        except frida.InvalidOperationError as e:
+            print(f"\n[!] Frida сессия потеряна: {e}")
+            print("[!] Перезапустите игру и запустите скрипт заново.")
+            return
+        except Exception as e:
+            print(f"\n[!] Ошибка: {e}")
+
+
+# ------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("[main] start", flush=True)
-
-    if len(sys.argv) < 2:
-        print("Usage:", flush=True)
-        print("  main.py rehearse [--only-effective]   — запись + jumps-playback", flush=True)
-        print("  main.py record                        — только запись", flush=True)
-        print("  main.py jumps [log] [--only-effective] — только jumps-playback", flush=True)
-        print()
-        print("  С body-force (по умолчанию, если в логе есть body_frames).", flush=True)
-        print("  --only-effective: только эффективные (state=0, на земле).", flush=True)
+    print("[main] start")
+    print("[main] attaching to King of Thieves...")
+    try:
+        _session, _script = attach()
+    except Exception as e:
+        print(f"[main] не удалось подключиться: {e}")
+        print("[main] Убедитесь, что игра запущена и frida-server активен.")
         sys.exit(1)
-
-    mode_cmd = sys.argv[1]
-    print(f"[main] mode={mode_cmd}", flush=True)
-
-    only_effective = "--only-effective" in sys.argv
-
-    session, script = attach()
-    print("[main] attached & script loaded", flush=True)
-
-    if mode_cmd == "rehearse":
-        res = interactive_record(script)
-        if res:
-            events, body_frames = res
-            interactive_jumps(script, events, body_frames, only_effective)
-
-    elif mode_cmd == "record":
-        interactive_record(script)
-
-    elif mode_cmd == "jumps":
-        args = [a for a in sys.argv[2:] if not a.startswith("--")]
-        log_path = args[0] if args else os.path.join(LOG_DIR, "replay.json")
-        events, body_frames = load_log(log_path)
-        print(f"[main] загружено {len(events)} событий, {len(body_frames)} body_frames из {log_path}", flush=True)
-        interactive_jumps(script, events, body_frames, only_effective)
-
-    else:
-        print(f"Unknown mode: {mode_cmd}", flush=True)
+    print("[main] готово. Интерактивный режим.")
+    main_loop(_script)

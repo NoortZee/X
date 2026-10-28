@@ -1,5 +1,5 @@
 // agent.js — TAS agent for King of Thieves 2.84.1 x86_64
-// С записью и форсом физического состояния тела (полноценный TAS).
+// Запись + форс физического состояния тела (полноценный TAS).
 // ------------------------------------------------------------
 
 const MODULE_NAME = 'libthieves.so';
@@ -27,23 +27,22 @@ const VTABLE = {
     ATTACK_STATE: MODULE_BASE.add(0x1FF54C8),
 };
 
-// Смещения полей b2Body / KTPhysicsBody
 const BODY = {
-    FLAGS:     0x04,    // uint32, bit 1 = awake
-    XF_PX:     0x0C,    // float
-    XF_PY:     0x10,    // float
-    XF_QS:     0x14,    // float (sin)
-    XF_QC:     0x18,    // float (cos)
-    SW_C0X:    0x24,    // float
-    SW_C0Y:    0x28,    // float
-    SW_CX:     0x2C,    // float
-    SW_CY:     0x30,    // float
-    SW_A0:     0x34,    // float
-    SW_A:      0x38,    // float (angle)
-    SW_ALPHA0: 0x3C,    // float
-    VX:        0x40,    // float
-    VY:        0x44,    // float
-    AV:        0x48,    // float
+    FLAGS:     0x04,
+    XF_PX:     0x0C,
+    XF_PY:     0x10,
+    XF_QS:     0x14,
+    XF_QC:     0x18,
+    SW_C0X:    0x24,
+    SW_C0Y:    0x28,
+    SW_CX:     0x2C,
+    SW_CY:     0x30,
+    SW_A0:     0x34,
+    SW_A:      0x38,
+    SW_ALPHA0: 0x3C,
+    VX:        0x40,
+    VY:        0x44,
+    AV:        0x48,
 };
 
 const FPS_LOG_EVERY_N_FRAMES = 60;
@@ -51,26 +50,26 @@ const JUMP_DEFER_MAX_FRAMES  = 20;
 const PROGRESS_LOG_EVERY_MS  = 1000;
 
 // ------------------------------------------------------------
-// BODY STATE — helpers
+// BODY STATE
 // ------------------------------------------------------------
 
 function readBodyState(bodyPtr) {
     if (!bodyPtr || bodyPtr.isNull()) return null;
     if (!Process.findRangeByAddress(bodyPtr)) return null;
     try {
-        const px = bodyPtr.add(BODY.XF_PX).readFloat();
-        const py = bodyPtr.add(BODY.XF_PY).readFloat();
+        const px  = bodyPtr.add(BODY.XF_PX).readFloat();
+        const py  = bodyPtr.add(BODY.XF_PY).readFloat();
         const ang = bodyPtr.add(BODY.SW_A).readFloat();
-        const vx = bodyPtr.add(BODY.VX).readFloat();
-        const vy = bodyPtr.add(BODY.VY).readFloat();
-        const av = bodyPtr.add(BODY.AV).readFloat();
+        const vx  = bodyPtr.add(BODY.VX).readFloat();
+        const vy  = bodyPtr.add(BODY.VY).readFloat();
+        const av  = bodyPtr.add(BODY.AV).readFloat();
 
-        if (!isFinite(px) || Math.abs(px) > 1e5) return null;
-        if (!isFinite(py) || Math.abs(py) > 1e5) return null;
+        if (!isFinite(px)  || Math.abs(px)  > 1e5) return null;
+        if (!isFinite(py)  || Math.abs(py)  > 1e5) return null;
         if (!isFinite(ang) || Math.abs(ang) > 1e3) return null;
-        if (!isFinite(vx) || Math.abs(vx) > 1e4) return null;
-        if (!isFinite(vy) || Math.abs(vy) > 1e4) return null;
-        if (!isFinite(av) || Math.abs(av) > 1e4) return null;
+        if (!isFinite(vx)  || Math.abs(vx)  > 1e4) return null;
+        if (!isFinite(vy)  || Math.abs(vy)  > 1e4) return null;
+        if (!isFinite(av)  || Math.abs(av)  > 1e4) return null;
 
         return { px, py, ang, vx, vy, av };
     } catch (_) { return null; }
@@ -83,28 +82,23 @@ function writeBodyState(bodyPtr, rec) {
         const s = Math.sin(rec.ang);
         const c = Math.cos(rec.ang);
 
-        // m_xf.p
         bodyPtr.add(BODY.XF_PX).writeFloat(rec.px);
         bodyPtr.add(BODY.XF_PY).writeFloat(rec.py);
-        // m_xf.q (sin, cos)
         bodyPtr.add(BODY.XF_QS).writeFloat(s);
         bodyPtr.add(BODY.XF_QC).writeFloat(c);
-        // m_sweep.c0
+
         bodyPtr.add(BODY.SW_C0X).writeFloat(rec.px);
         bodyPtr.add(BODY.SW_C0Y).writeFloat(rec.py);
-        // m_sweep.c
         bodyPtr.add(BODY.SW_CX).writeFloat(rec.px);
         bodyPtr.add(BODY.SW_CY).writeFloat(rec.py);
-        // m_sweep.a0 / a
         bodyPtr.add(BODY.SW_A0).writeFloat(rec.ang);
         bodyPtr.add(BODY.SW_A).writeFloat(rec.ang);
-        // m_sweep.alpha0
         bodyPtr.add(BODY.SW_ALPHA0).writeFloat(0);
-        // velocities
+
         bodyPtr.add(BODY.VX).writeFloat(rec.vx);
         bodyPtr.add(BODY.VY).writeFloat(rec.vy);
         bodyPtr.add(BODY.AV).writeFloat(rec.av);
-        // Wake up (bit 1 в m_flags)
+
         try {
             const f = bodyPtr.add(BODY.FLAGS).readU32();
             bodyPtr.add(BODY.FLAGS).writeU32(f | 2);
@@ -114,7 +108,7 @@ function writeBodyState(bodyPtr, rec) {
 }
 
 // ------------------------------------------------------------
-// PUMP (с записью/форсом тела в onLeave)
+// PUMP
 // ------------------------------------------------------------
 
 const pump = {
@@ -127,14 +121,12 @@ const pump = {
     _lastHero: null,
     _lastHeroFrame: null,
 
-    // detect-запись тела
     _detectBodyRecord: false,
     _detectBodyFrames: [],
 
-    // replay-форс тела
-    _playbackBodyMap: null,           // Map<recordedFrame, {px,py,ang,vx,vy,av}>
-    _playbackAnchorFrame: null,       // abs frame в playback
-    _playbackAnchorRecFrame: null,    // abs frame в логе
+    _playbackBodyMap: null,
+    _playbackAnchorFrame: null,
+    _playbackAnchorRecFrame: null,
     _forceStats: { attempted: 0, applied: 0, missed: 0 },
 
     install() {
@@ -163,7 +155,6 @@ const pump = {
                     pump._lastHeroFrame = pump._frame;
                 } catch (_) {}
 
-                // DETECT: первый HeroBody::update после unfreeze
                 if (detectRec && detectWaitFirstHeroUpdate) {
                     try {
                         if (isValidHeroStrict(args[0])) {
@@ -181,7 +172,6 @@ const pump = {
                     } catch (_) {}
                 }
 
-                // REPLAY: callback для playback (устанавливает anchor)
                 if (pump._onFirstUpdate) {
                     try { pump._onFirstUpdate(args[0], pump._frame); } catch (_) {}
                 }
@@ -192,7 +182,7 @@ const pump = {
                 }
             },
 
-            onLeave(retval) {
+            onLeave(_retval) {
                 const hero = this._hero;
                 if (!hero) return;
                 if (!isReadablePtr(hero)) return;
@@ -201,7 +191,6 @@ const pump = {
                 try { body = hero.add(0x20).readPointer(); } catch (_) { return; }
                 if (!isReadablePtr(body)) return;
 
-                // ---- DETECT: запись body state ----
                 if (pump._detectBodyRecord) {
                     const rec = readBodyState(body);
                     if (rec) {
@@ -210,7 +199,6 @@ const pump = {
                     }
                 }
 
-                // ---- REPLAY: форс body state ----
                 if (pump._playbackBodyMap && pump._playbackAnchorFrame !== null) {
                     const recFrame = pump._playbackAnchorRecFrame +
                     (pump._frame - pump._playbackAnchorFrame);
@@ -242,12 +230,10 @@ const pump = {
     setOnFirstUpdate(fn) { pump._onFirstUpdate = fn; },
     clearOnFirstUpdate() { pump._onFirstUpdate = null; },
 
-    // detect body
     detectBodyStart() { pump._detectBodyFrames = []; pump._detectBodyRecord = true; },
     detectBodyStop()  { pump._detectBodyRecord = false; },
     detectBodyGet()   { return pump._detectBodyFrames; },
 
-    // replay body
     setPlaybackBody(framesArray) {
         if (!framesArray || !framesArray.length) {
             pump._playbackBodyMap = null;
@@ -272,7 +258,7 @@ const pump = {
 };
 
 // ------------------------------------------------------------
-// POINTER HELPERS
+// HELPERS
 // ------------------------------------------------------------
 
 function isReadablePtr(p) {
@@ -306,6 +292,14 @@ function heroSnapshot(p) {
     try { s.ground_80   = p.add(0x80).readS32(); } catch (_) { s.ground_80   = 'err'; }
     try { s.ground_84   = p.add(0x84).readS32(); } catch (_) { s.ground_84   = 'err'; }
     return s;
+}
+
+function isEffectiveJump(snap) {
+    if (!snap) return false;
+    if (typeof snap.state_a0 !== 'number' || (snap.state_a0 & 7) !== 0) return false;
+    const g = (typeof snap.ground_80 === 'number' ? snap.ground_80 : 0)
+    + (typeof snap.ground_84 === 'number' ? snap.ground_84 : 0);
+    return g > 0;
 }
 
 // ------------------------------------------------------------
@@ -394,8 +388,7 @@ function ensureJumpFn() {
 
 function replayJumpsOnly(events, opts) {
     opts = opts || {};
-    const onlyEffective = !!opts.only_effective;
-    const bodyFramesIn  = Array.isArray(opts.body_frames) ? opts.body_frames : null;
+    const bodyFramesIn = Array.isArray(opts.body_frames) ? opts.body_frames : null;
 
     ensureJumpFn();
     pump.install();
@@ -417,14 +410,7 @@ function replayJumpsOnly(events, opts) {
     if (!unfreezeEvent) { send({ type: 'jumps_error', msg: 'no unfreeze in log' }); return; }
     if (!allJumps.length) { send({ type: 'jumps_error', msg: 'no jumps in log' }); return; }
 
-    const candidates = onlyEffective
-    ? allJumps.filter(e => isEffectiveJump(e.snap || {}))
-    : allJumps;
-
-    if (!candidates.length) {
-        send({ type: 'jumps_error', msg: 'нет подходящих прыжков (только_эффективные=' + onlyEffective + ')' });
-        return;
-    }
+    const candidates = allJumps;
 
     const useAnchor      = !!firstHeroUpdate;
     const anchorRecFrame = useAnchor ? firstHeroUpdate.frame : unfreezeEvent.frame;
@@ -438,7 +424,6 @@ function replayJumpsOnly(events, opts) {
                                                         (anchorRecTms != null ? anchorRecTms : anchorRecFrame * 1000 / 60))),
     }));
 
-    // ---- body force setup ----
     let bodyMapSize = 0;
     let bodyRange   = null;
     if (bodyFramesIn && bodyFramesIn.length) {
@@ -452,22 +437,20 @@ function replayJumpsOnly(events, opts) {
         type: 'jumps_analysis',
         total_in_log:      allJumps.length,
         effective_in_log:  allJumps.filter(e => isEffectiveJump(e.snap || {})).length,
-         entrance_skipped:  false,
          unfreeze_frame:    unfreezeEvent.frame,
          first_hero_update: firstHeroUpdate ? firstHeroUpdate.frame : null,
          anchor:            useAnchor ? 'first_hero_update' : 'unfreeze (fallback)',
-         mode:              onlyEffective ? 'only_effective' : 'all',
          body_frames:       bodyRange,
          replay_count:      plan.length,
          per_jump: plan.map(p => ({
-             frame:        p.ev.frame,
-             frame_delta:  p.frameDelta,
-             ms_delta:     Math.round(p.msDelta),
-                                  state_a0:     (p.ev.snap || {}).state_a0,
-                                  ground_80:    (p.ev.snap || {}).ground_80,
-                                  ground_84:    (p.ev.snap || {}).ground_84,
-                                  cooldown_b0:  (p.ev.snap || {}).cooldown_b0,
-                                  effective:    isEffectiveJump(p.ev.snap || {}),
+             frame:       p.ev.frame,
+             frame_delta: p.frameDelta,
+             ms_delta:    Math.round(p.msDelta),
+                                  state_a0:    (p.ev.snap || {}).state_a0,
+                                  ground_80:   (p.ev.snap || {}).ground_80,
+                                  ground_84:   (p.ev.snap || {}).ground_84,
+                                  cooldown_b0: (p.ev.snap || {}).cooldown_b0,
+                                  effective:   isEffectiveJump(p.ev.snap || {}),
          })),
     });
 
@@ -560,14 +543,14 @@ function replayJumpsOnly(events, opts) {
         if (nextIdx < total && lastProgressLogMs !== null &&
             (Date.now() - lastProgressLogMs) >= PROGRESS_LOG_EVERY_MS) {
             lastProgressLogMs = Date.now();
-        const targetFrame = anchorFrame + plan[nextIdx].frameDelta;
+        const progressTarget = anchorFrame + plan[nextIdx].frameDelta;
         const snap = heroPtr ? heroSnapshot(heroPtr) : {};
         send({
             type: 'jumps_progress',
             frame: f,
             next_idx: nextIdx,
-            target_frame: targetFrame,
-            remaining_frames: Math.max(0, targetFrame - f),
+            target_frame: progressTarget,
+            remaining_frames: Math.max(0, progressTarget - f),
              state_a0:  snap.state_a0,
              ground_80: snap.ground_80,
              force_stats: bodyMapSize > 0 ? pump.forceStats() : null,
@@ -629,14 +612,6 @@ function replayJumpsOnly(events, opts) {
         ? 'Тапните ОДИН раз. Anchor = first_hero_update. Body force включён.'
         : 'Тапните ОДИН раз. Anchor = unfreeze (fallback).',
     });
-}
-
-function isEffectiveJump(snap) {
-    if (!snap) return false;
-    if (typeof snap.state_a0 !== 'number' || (snap.state_a0 & 7) !== 0) return false;
-    const g = (typeof snap.ground_80 === 'number' ? snap.ground_80 : 0)
-    + (typeof snap.ground_84 === 'number' ? snap.ground_84 : 0);
-    return g > 0;
 }
 
 // ------------------------------------------------------------
