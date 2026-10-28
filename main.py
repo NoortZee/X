@@ -13,7 +13,8 @@ PRINT_TYPES = {
     "pump_installed", "pump_already",
     "module_base", "fatal",
     "hero_resolved", "hero_rescanned",
-    "jumps_analysis", "jumps_plan", "jumps_timeline",
+    "jumps_analysis", "jumps_plan", "jumps_timeline", "jumps_filter",
+    "jumps_waiting_first_update",
     "jumps_armed", "jumps_ready",
     "jumps_progress",
     "jumps_done", "jumps_error",
@@ -73,8 +74,7 @@ def attach():
 
 def prompt(msg):
     try:
-        input(msg)
-        return True
+        input(msg); return True
     except (EOFError, KeyboardInterrupt):
         return False
 
@@ -82,22 +82,16 @@ def prompt(msg):
 def save_events(events):
     os.makedirs(LOG_DIR, exist_ok=True)
     path = os.path.join(LOG_DIR, "replay.json")
-
     with open(path, "w") as f:
         json.dump(events, f, indent=2)
-
     return path
 
 
 def interactive_record(script):
     print("[..] pump_install", flush=True)
     script.exports_sync.pump_install()
-
-    try:
-        script.exports_sync.pump_resume()
-    except Exception:
-        pass
-
+    try: script.exports_sync.pump_resume()
+    except Exception: pass
     print("[..] detect_install", flush=True)
     script.exports_sync.detect_install()
 
@@ -111,11 +105,11 @@ def interactive_record(script):
     script.exports_sync.detect_start()
 
     print()
-    print("🔴 ЗАПИСЬ ИДЁТ — тапните ОДИН РАЗ чтобы начать уровень, потом ещё N тапов с паузами.", flush=True)
+    print("🔴 ЗАПИСЬ ИДЁТ — тапните по экрану в игре и играйте.", flush=True)
+    print("   Каждый тап = один прыжок. Ждите приземления перед следующим.", flush=True)
     prompt("Enter — ОСТАНОВИТЬ запись... ")
 
     events = script.exports_sync.detect_stop()
-
     if not events:
         print("❌ событий нет.", flush=True)
         return None
@@ -126,26 +120,50 @@ def interactive_record(script):
     avg = round(df * 1000 / dt, 1) if df > 0 and dt > 0 else "n/a"
 
     path = save_events(events)
-
     print()
     print(f"✅ Записано {len(events)} событий (avg_fps ~{avg}):", flush=True)
 
+    unfreeze_f = None
+    first_update_f = None
+    effective_jumps = 0
     for e in events:
         snap = e.get("snap") or {}
+        marker = ""
+        if e['name'] == 'unfreeze' or e['name'] == 'unfreeze_attack':
+            marker = " ← якорь-fallback"
+            if unfreeze_f is None:
+                unfreeze_f = e['frame']
+        if e['name'] == 'first_hero_update':
+            marker = " ← ЯКОРЬ"
+            first_update_f = e['frame']
+        if e['name'] == 'jump':
+            eff = (
+                isinstance(snap.get('state_a0'), int) and (snap['state_a0'] & 7) == 0
+                and (snap.get('ground_80', 0) or 0) + (snap.get('ground_84', 0) or 0) > 0
+            )
+            if eff: effective_jumps += 1
+            marker = " ← эффективный" if eff else " (no-op)"
         print(
-            f"   frame {e['frame']:4d}  t={e.get('t_ms', 0):5d}ms  "
-            f"{e['name']:16s}  state={snap.get('state_a0','?')} "
-            f"ground={snap.get('ground_80','?')}/{snap.get('ground_84','?')} "
-            f"cd={snap.get('cooldown_b0','?')}", flush=True
-        )
+            f"   frame {e['frame']:4d}  t={e.get('t_ms', 0):5d}ms  {e['name']:20s}  "
+            f"state={snap.get('state_a0','?')} ground={snap.get('ground_80','?')}/{snap.get('ground_84','?')} "
+            f"cd={snap.get('cooldown_b0','?')}{marker}", flush=True)
 
+    if first_update_f is not None and unfreeze_f is not None:
+        spawn_delay = first_update_f - unfreeze_f
+        print()
+        print(f"   ⏱  unfreeze → first_hero_update: {spawn_delay} кадров", flush=True)
+
+    print()
+    print(f"   📊 Прыжков всего: {sum(1 for e in events if e['name']=='jump')}, "
+          f"эффективных: {effective_jumps}", flush=True)
     print(f"   → {path}", flush=True)
     return events
 
 
-def interactive_jumps(script, events):
+def interactive_jumps(script, events, only_effective=False):
+    mode_label = "ONLY-EFFECTIVE" if only_effective else "ALL-JUMPS"
     print()
-    print("═══ JUMPS-ONLY PLAY ═══", flush=True)
+    print(f"═══ JUMPS-ONLY PLAY ({mode_label}) ═══", flush=True)
     print("В игре:", flush=True)
     print("  1. Выйдите в лобби → зайдите в уровень заново", flush=True)
     print("  2. Дождитесь ЗАМОРОЖЕННОГО состояния", flush=True)
@@ -160,12 +178,11 @@ def interactive_jumps(script, events):
     _done_event.clear()
     _done_status["error"] = None
 
-    script.exports_sync.replay_jumps_only(events, {})
+    script.exports_sync.replay_jumps_only(events, {"only_effective": only_effective})
 
     print()
-    print("🟢 Программа готова. СЕЙЧАС тапните ОДИН РАЗ по экрану в игре.", flush=True)
-    print("   После unfreeze будут прыжки по таймлайну. НЕ тапайте сами.", flush=True)
-    print("   Прогресс показывается раз в секунду.", flush=True)
+    print("🟢 Программа готова. СЕЙЧАС тапните ОДИН раз по экрану в игре.", flush=True)
+    print("   Ждём: unfreeze → first HeroBody::update → прыжки по якорю.", flush=True)
 
     while not _done_event.wait(timeout=1.0):
         pass
@@ -181,13 +198,18 @@ if __name__ == "__main__":
 
     if len(sys.argv) < 2:
         print("Usage:", flush=True)
-        print("  main.py rehearse    — запись + jumps-playback (time-based)", flush=True)
-        print("  main.py record      — только запись", flush=True)
-        print("  main.py jumps [log] — только jumps-playback", flush=True)
+        print("  main.py rehearse [--only-effective]   — запись + jumps-playback", flush=True)
+        print("  main.py record                        — только запись", flush=True)
+        print("  main.py jumps [log] [--only-effective] — только jumps-playback", flush=True)
+        print()
+        print("  По умолчанию: воспроизводятся ВСЕ jump из лога (для точной траектории).", flush=True)
+        print("  --only-effective: только эффективные (state=0, на земле) — короче, но может разойтись.", flush=True)
         sys.exit(1)
 
     mode_cmd = sys.argv[1]
     print(f"[main] mode={mode_cmd}", flush=True)
+
+    only_effective = "--only-effective" in sys.argv
 
     session, script = attach()
     print("[main] attached & script loaded", flush=True)
@@ -195,19 +217,18 @@ if __name__ == "__main__":
     if mode_cmd == "rehearse":
         events = interactive_record(script)
         if events:
-            interactive_jumps(script, events)
+            interactive_jumps(script, events, only_effective)
 
     elif mode_cmd == "record":
         interactive_record(script)
 
     elif mode_cmd == "jumps":
-        log_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(LOG_DIR, "replay.json")
-
+        args = [a for a in sys.argv[2:] if not a.startswith("--")]
+        log_path = args[0] if args else os.path.join(LOG_DIR, "replay.json")
         with open(log_path) as f:
             events = json.load(f)
-
         print(f"[main] загружено {len(events)} событий из {log_path}", flush=True)
-        interactive_jumps(script, events)
+        interactive_jumps(script, events, only_effective)
 
     else:
         print(f"Unknown mode: {mode_cmd}", flush=True)
