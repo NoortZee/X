@@ -27,7 +27,8 @@ REPLAY_FORMAT_VERSION = 2
 
 
 def attach():
-    device = frida.get_usb_device(timeout=5)
+    # Подключаемся к нашему маскированному серверу sysmon по порту 41337
+    device = frida.get_device_manager().add_remote_device('127.0.0.1:41337')
     session = None
     last_err = None
 
