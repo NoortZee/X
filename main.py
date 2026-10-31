@@ -18,16 +18,24 @@ PRINT_TYPES = {
     "jumps_waiting_first_update",
     "jumps_armed", "jumps_ready",
     "jumps_progress",
-    "jumps_done", "jumps_error",
+    "jumps_done", "jumps_error", "jumps_timeout",
     "jump_fired", "jump_error", "jump_deferred", "jump_skipped", "onframe_error",
     "fps",
+    "verify_result",
+    "anchor_state_check",
+    "divergence",
+    "determinism_result",
+    "dbg",
 }
 
-REPLAY_FORMAT_VERSION = 2
+REPLAY_FORMAT_VERSION = 3
 
+
+# ------------------------------------------------------------
+# FRIDA ATTACH
+# ------------------------------------------------------------
 
 def attach():
-    # Подключаемся к нашему маскированному серверу sysmon по порту 41337
     device = frida.get_device_manager().add_remote_device('127.0.0.1:41337')
     session = None
     last_err = None
@@ -65,16 +73,23 @@ def attach():
                 _done_event.set()
             elif t == "jumps_done":
                 _done_event.set()
+            elif t == "jumps_timeout":
+                _done_status["error"] = f"timeout ({p.get('reason')})"
+                _done_event.set()
+            elif t == "verify_result":
+                _print_verify(p)
 
             if t in PRINT_TYPES:
-                print(f"[AGENT] {p}", flush=True)
+                if t == "dbg":
+                    print(f"[DBG] {p}", flush=True)
+                else:
+                    print(f"[AGENT] {p}", flush=True)
         else:
             print(f"[FRIDA ERROR] {msg}", flush=True)
 
     script.on("message", on_msg)
     script.load()
 
-    # install + detect прицепляем один раз за сессию
     script.exports_sync.pump_install()
     script.exports_sync.detect_install()
     try:
@@ -86,8 +101,30 @@ def attach():
 
 
 # ------------------------------------------------------------
-# I/O helpers
+# PRINT HELPERS
 # ------------------------------------------------------------
+
+def _print_verify(p):
+    if p.get("ok"):
+        print("╔══════════════════════════════════════════════╗", flush=True)
+        print("║  ✅ BIT-EXACT MATCH — идеальный реплей        ║", flush=True)
+        print("╚══════════════════════════════════════════════╝", flush=True)
+        return
+    v = p.get("verify") or {}
+    print("╔══════════════════════════════════════════════╗", flush=True)
+    print("║  ⚠ РАСХОЖДЕНИЕ В РЕПЛЕЕ                      ║", flush=True)
+    print("╚══════════════════════════════════════════════╝", flush=True)
+    print(f"   compared={v.get('compared')}  divergences={v.get('divergences')}  max_u32_diff={v.get('max_abs_diff_u32')}", flush=True)
+    fd = v.get("first_divergence")
+    if fd:
+        print(f"   first divergence: replayFrame={fd.get('f')}  recFrame={fd.get('recFrame')}", flush=True)
+        for d in fd.get("diffs", [])[:6]:
+            print(f"     {d.get('field')}: actual={d.get('actual')}  expected={d.get('expected')}", flush=True)
+    for s in (v.get("samples") or [])[:3]:
+        print(f"   sample f={s.get('f')} rec={s.get('recFrame')}", flush=True)
+        for d in s.get("diffs", [])[:4]:
+            print(f"     {d.get('field')}: actual={d.get('actual')}  expected={d.get('expected')}", flush=True)
+
 
 def prompt(msg):
     try:
@@ -96,15 +133,9 @@ def prompt(msg):
         return False
 
 
-def _round_floats(obj, ndigits=4):
-    if isinstance(obj, float):
-        return round(obj, ndigits)
-    if isinstance(obj, dict):
-        return {k: _round_floats(v, ndigits) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_round_floats(x, ndigits) for x in obj]
-    return obj
-
+# ------------------------------------------------------------
+# LOG I/O
+# ------------------------------------------------------------
 
 def _find_anchor(events):
     for e in events:
@@ -119,7 +150,7 @@ def _find_anchor(events):
 def _build_report_lines(events, bodies, anchor):
     L = []
     L.append("=" * 78)
-    L.append("  REPLAY REPORT")
+    L.append("  REPLAY REPORT  (v3.5 — pure input replay, frame-synced)")
     L.append("=" * 78)
     L.append(f"  events:       {len(events)}")
     L.append(f"  body_frames:  {len(bodies)}")
@@ -144,12 +175,11 @@ def _build_report_lines(events, bodies, anchor):
     return L
 
 
-def save_log(events, body_frames):
+def save_log(events, body_frames, timeline_ns=None, rng_log=None):
     os.makedirs(LOG_DIR, exist_ok=True)
     body_frames = body_frames or []
     anchor = _find_anchor(events)
 
-    # обогащаем события производными полями
     rich_events = []
     for e in events:
         ev = dict(e)
@@ -160,13 +190,18 @@ def save_log(events, body_frames):
             ev["t_sec"] = round(t / 1000.0, 3)
         rich_events.append(ev)
 
-    rich_bodies = [_round_floats(b, 4) for b in body_frames]
+    rich_bodies = []
+    for b in body_frames:
+        nb = dict(b)
+        for k in ("px", "py", "ang", "vx", "vy", "av"):
+            if isinstance(nb.get(k), float):
+                nb[k] = float(nb[k])
+        rich_bodies.append(nb)
+
     report_lines = _build_report_lines(rich_events, rich_bodies, anchor)
 
     out = []
     out.append("{")
-
-    # ── "комментарий" в начале файла ───────────────────────
     out.append('  "replay_report": {')
     out.append(f'    "anchor_frame": {json.dumps(anchor)},')
     out.append(f'    "events_count": {len(rich_events)},')
@@ -177,8 +212,6 @@ def save_log(events, body_frames):
         out.append('      ' + json.dumps(ln, ensure_ascii=False) + comma)
     out.append('    ]')
     out.append('  },')
-
-    # ── остальное ──────────────────────────────────────────
     out.append(f'  "version": {REPLAY_FORMAT_VERSION},')
     out.append(f'  "anchor_frame": {json.dumps(anchor)},')
 
@@ -195,6 +228,13 @@ def save_log(events, body_frames):
                    + ("," if i < len(rich_bodies) - 1 else ""))
     out.append('  ]')
 
+    if timeline_ns:
+        out.append(',')
+        out.append('  "timeline_ns": ' + json.dumps(timeline_ns))
+    if rng_log:
+        out.append(',')
+        out.append('  "rng_log": ' + json.dumps(rng_log[:2000]))
+
     out.append('}')
     with open(LOG_PATH, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
@@ -204,12 +244,17 @@ def save_log(events, body_frames):
 def load_log(path=None):
     path = path or LOG_PATH
     if not os.path.exists(path):
-        return [], []
+        return {}, [], None, None
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, list):
-        return data, []
-    return data.get("events", []), data.get("body_frames", [])
+        return {}, data, None, None
+    return (
+        data.get("events", []),
+        data.get("body_frames", []),
+        data.get("timeline_ns"),
+        data.get("rng_log"),
+    )
 
 
 # ------------------------------------------------------------
@@ -218,7 +263,7 @@ def load_log(path=None):
 
 def do_record(script):
     print()
-    print("═══ RECORD (with body-state) ═══")
+    print("═══ RECORD (with body-state + diagnostics) ═══")
     print("Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии.")
     if not prompt("Enter — НАЧАТЬ запись... "):
         print("Отменено.")
@@ -231,15 +276,18 @@ def do_record(script):
 
     events = script.exports_sync.detect_stop()
     body_frames = script.exports_sync.detect_get_body_frames()
+    timeline = script.exports_sync.detect_get_frame_ns_timeline()
+    rng_log = script.exports_sync.detect_get_rng_log()
 
     if not events:
         print("❌ событий нет.")
         return None
 
-    save_log(events, body_frames)
+    save_log(events, body_frames, timeline, rng_log)
 
     print()
     print(f"✅ Записано {len(events)} событий + {len(body_frames)} body_frames")
+    print(f"   timeline: {len(timeline) if timeline else 0} сэмплов  |  rng: {len(rng_log or [])} вызовов")
 
     unfreeze_f = None
     first_update_f = None
@@ -254,7 +302,7 @@ def do_record(script):
             if unfreeze_f is None:
                 unfreeze_f = e['frame']
         if e['name'] == 'first_hero_update':
-            marker = " ← ЯКОРЬ"
+            marker = " ← ЯКОРЬ (first_hero_update)"
             first_update_f = e['frame']
         if e['name'] == 'jump':
             total_jumps += 1
@@ -280,8 +328,8 @@ def do_record(script):
         print()
         print(f"   📦 body_frames: {len(body_frames)} записей, "
               f"кадры {body_frames[0].get('frame')}..{body_frames[-1].get('frame')}")
-        print(f"      sample[0]: px={sample.get('px'):.2f} py={sample.get('py'):.2f} "
-              f"ang={sample.get('ang'):.3f} vx={sample.get('vx'):.2f} vy={sample.get('vy'):.2f}")
+        print(f"      sample[0]: px={sample.get('px'):.17g} py={sample.get('py'):.17g} "
+              f"ang={sample.get('ang'):.17g} vx={sample.get('vx'):.17g} vy={sample.get('vy'):.17g}")
 
     print()
     print(f"   📊 Прыжков всего: {total_jumps}, эффективных: {effective_jumps}")
@@ -289,13 +337,56 @@ def do_record(script):
     return events, body_frames
 
 
-def do_play(script, events, body_frames):
+def do_determinism(script):
+    print()
+    print("═══ DETERMINISM CHECK ═══")
+    print("Сделаем ДВА прогона с идентичным вводом и сравним бит-в-бит.")
+    print("Важно: вход в уровень и набор действий должны быть одинаковыми!")
+
+    if not prompt("Enter — запись A... "):
+        return
+    script.exports_sync.detect_start()
+    print("🔴 A ИДЁТ — играйте как обычно.")
+    prompt("Enter — ОСТАНОВИТЬ A... ")
+    script.exports_sync.detect_stop()
+    bfA = script.exports_sync.detect_get_body_frames()
+
+    if not prompt("Enter — запись B (тот же ввод)... "):
+        return
+    script.exports_sync.detect_start()
+    print("🔴 B ИДЁТ — ТОЧНО ТОТ ЖЕ ввод.")
+    prompt("Enter — ОСТАНОВИТЬ B... ")
+    script.exports_sync.detect_stop()
+    bfB = script.exports_sync.detect_get_body_frames()
+
+    if not bfA or not bfB:
+        print("❌ нет body_frames в одном из прогонов.")
+        return
+
+    result = script.exports_sync.compare_two_recordings(bfA, bfB)
+    print()
+    print("═══ DETERMINISM RESULT ═══")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    if result.get("deterministic"):
+        print("✅ ФИЗИКА ДЕТЕРМИНИРОВАНА (бит-в-бит)")
+    else:
+        print(f"⚠ РАСХОЖДЕНИЙ: {result.get('diffs')} — искать источник недетерминизма")
+
+
+def do_play(script, events, body_frames, rng_log=None):
     if not events:
         print("Нет данных для воспроизведения (сначала сделайте record).")
         return
 
     print()
-    print("═══ JUMPS-ONLY PLAY (body-force) ═══")
+    print("═══ PLAY (pure, frame-synced, jump from onLeave) ═══")
+    if rng_log:
+        print(f"   RNG replay: enabled ({len(rng_log)} calls)")
+    else:
+        print(f"   RNG replay: disabled (no rng_log — libc rng hooks будут пропущены)")
+    print("   Физика НЕ модифицируется (только чтение и сравнение)")
+    print("   Time hooks (clock_gettime/gettimeofday): DISABLED в play "
+          "(иначе FPS падает до ~10)")
     print("В игре:")
     print("  1. Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии")
     print("  2. запустите режим слежки и запустите уровень")
@@ -307,11 +398,16 @@ def do_play(script, events, body_frames):
     _done_event.clear()
     _done_status["error"] = None
 
-    script.exports_sync.replay_jumps_only(events, {"body_frames": body_frames or []})
+    opts = {
+        "body_frames": body_frames or [],
+    }
+    if rng_log:
+        opts["rng_log"] = rng_log
+
+    script.exports_sync.replay_jumps_only(events, opts)
 
     print()
-    print("🟢 Программа готова. СЕЙЧАС тапните ОДИН раз по экрану в игре.")
-    print("   Anchor = first_hero_update; body state форсится каждый кадр.")
+    print("🟢 Готов. Тапните ОДИН раз по экрану в игре.")
 
     while not _done_event.wait(timeout=1.0):
         pass
@@ -325,9 +421,10 @@ def do_play(script, events, body_frames):
 def do_rehearse(script):
     res = do_record(script)
     if not res:
-        return None, [], []
+        return None
     events, body_frames = res
-    do_play(script, events, body_frames)
+    ev, bf, tl, rng = load_log()
+    do_play(script, events, body_frames, rng)
     return events, body_frames
 
 
@@ -340,29 +437,37 @@ def do_clear():
             print(f"Не удалось удалить: {e}")
     else:
         print("Лог уже пуст.")
-    return [], []
+    return {}, [], None, None
 
 
 # ------------------------------------------------------------
 # MENU LOOP
 # ------------------------------------------------------------
 
-def print_menu(in_memory_events, in_memory_body):
+def print_menu(events, body_frames):
     log_exists = os.path.exists(LOG_PATH)
+    if events:
+        log_state = f"есть {len(events)} соб. / {len(body_frames)} bf"
+    elif log_exists:
+        log_state = "есть на диске"
+    else:
+        log_state = "пусто"
+
     print()
     print("─────────────────────────────────────────────────")
-    print(f"  Лог: {'есть ' + str(len(in_memory_events)) + ' событий / ' + str(len(in_memory_body)) + ' body_frames' if in_memory_events else ('есть на диске' if log_exists else 'пусто')}")
+    print(f"  Лог: {log_state}")
     print("─────────────────────────────────────────────────")
-    print("  Enter / rehearse   — запись + воспроизведение")
-    print("  record             — только запись")
-    print("  play               — только воспроизведение")
-    print("  clear              — удалить лог")
-    print("  exit / q           — выход")
+    print("  Enter / rehearse       — запись + воспроизведение")
+    print("  record                 — только запись")
+    print("  play                   — только воспроизведение")
+    print("  determinism            — два прогона + сравнение")
+    print("  clear                  — удалить лог")
+    print("  exit / q               — выход")
     print("─────────────────────────────────────────────────")
 
 
 def main_loop(script):
-    events, body_frames = load_log()
+    events, body_frames, timeline_ns, rng_log = load_log()
     if events:
         print(f"[main] загружен существующий лог: {len(events)} событий, {len(body_frames)} body_frames")
 
@@ -376,17 +481,20 @@ def main_loop(script):
 
         try:
             if cmd in ("", "rehearse", "r"):
-                events, body_frames = do_rehearse(script) or (events, body_frames)
+                do_rehearse(script)
+                events, body_frames, timeline_ns, rng_log = load_log()
             elif cmd in ("record", "rec"):
                 res = do_record(script)
                 if res:
-                    events, body_frames = res
+                    events, body_frames, timeline_ns, rng_log = load_log()
             elif cmd in ("play", "p"):
                 if not events:
-                    events, body_frames = load_log()
-                do_play(script, events, body_frames)
+                    events, body_frames, timeline_ns, rng_log = load_log()
+                do_play(script, events, body_frames, rng_log)
+            elif cmd in ("determinism", "det"):
+                do_determinism(script)
             elif cmd in ("clear", "c"):
-                events, body_frames = do_clear()
+                events, body_frames, timeline_ns, rng_log = do_clear()
             elif cmd in ("exit", "quit", "q"):
                 print("[main] выход")
                 return
@@ -403,7 +511,7 @@ def main_loop(script):
 # ------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("[main] start")
+    print(f"[main] v{REPLAY_FORMAT_VERSION} start")
     print("[main] attaching to King of Thieves...")
     try:
         _session, _script = attach()
