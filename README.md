@@ -73,8 +73,8 @@ https://github.com/NoortZee/phantom-frida/releases/tag/x86
 3.  **Запустите сервер от имени root в фоне (на порту 41337):**
     
     ```bash
- adb shell "su -c '/data/local/tmp/sysmon -l unix:/data/local/tmp/sysmon.sock &'"
-adb forward tcp:41337 localabstract:/data/local/tmp/sysmon.sock
+    adb shell "su -c '/data/local/tmp/sysmon -l unix:/data/local/tmp/sysmon.sock &'"
+    adb forward tcp:41337 localabstract:/data/local/tmp/sysmon.sock
     ```
     
     _Проверить, что процесс жив: `adb shell "su -c 'ps -A | grep sysmon'"`_
