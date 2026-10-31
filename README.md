@@ -61,9 +61,9 @@ https://github.com/NoortZee/phantom-frida/releases/tag/x86
 
 1.  **Загрузите бинарник в Waydroid:**
     
-```bash
+    ```bash
     adb push sysmon-server-17.16.4-android-x86\_64 /data/local/tmp/sysmon
-```
+    ```
 2.  **Дайте права на выполнение:**
     
     ```bash
