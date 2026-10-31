@@ -95,15 +95,108 @@ def prompt(msg):
         return False
 
 
+def _round_floats(obj, ndigits=4):
+    if isinstance(obj, float):
+        return round(obj, ndigits)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, ndigits) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_round_floats(x, ndigits) for x in obj]
+    return obj
+
+
+def _find_anchor(events):
+    for e in events:
+        if e.get("name") == "first_hero_update":
+            return e["frame"]
+    for e in events:
+        if e.get("name") in ("unfreeze", "unfreeze_attack"):
+            return e["frame"]
+    return None
+
+
+def _build_report_lines(events, bodies, anchor):
+    L = []
+    L.append("=" * 78)
+    L.append("  REPLAY REPORT")
+    L.append("=" * 78)
+    L.append(f"  events:       {len(events)}")
+    L.append(f"  body_frames:  {len(bodies)}")
+    L.append(f"  anchor_frame: {anchor}")
+    if bodies:
+        L.append(f"  body range:   {bodies[0]['frame']}..{bodies[-1]['frame']}")
+    L.append("")
+    L.append("-" * 78)
+    L.append(f"  {'frame':>6}  {'rel':>5}  {'t_ms':>6}  {'name':<22}  details")
+    L.append("-" * 78)
+    for e in events:
+        snap = e.get("snap") or {}
+        details = ""
+        if e["name"] == "jump":
+            g = (snap.get("ground_80") or 0) + (snap.get("ground_84") or 0)
+            details = f"state={snap.get('state_a0')}  ground={g}  cd={snap.get('cooldown_b0')}"
+        elif "state_a0" in snap:
+            details = f"state={snap['state_a0']}"
+        rel = e.get("rel_frame")
+        L.append(f"  {e['frame']:>6}  {str(rel):>5}  {int(e.get('t_ms', 0)):>6}  "
+                 f"{e['name']:<22}  {details}")
+    return L
+
+
 def save_log(events, body_frames):
     os.makedirs(LOG_DIR, exist_ok=True)
-    data = {
-        "version": REPLAY_FORMAT_VERSION,
-        "events": events,
-        "body_frames": body_frames or [],
-    }
-    with open(LOG_PATH, "w") as f:
-        json.dump(data, f)
+    body_frames = body_frames or []
+    anchor = _find_anchor(events)
+
+    # обогащаем события производными полями
+    rich_events = []
+    for e in events:
+        ev = dict(e)
+        f, t = ev.get("frame"), ev.get("t_ms")
+        if isinstance(f, int) and isinstance(anchor, int):
+            ev["rel_frame"] = f - anchor
+        if isinstance(t, (int, float)):
+            ev["t_sec"] = round(t / 1000.0, 3)
+        rich_events.append(ev)
+
+    rich_bodies = [_round_floats(b, 4) for b in body_frames]
+    report_lines = _build_report_lines(rich_events, rich_bodies, anchor)
+
+    out = []
+    out.append("{")
+
+    # ── "комментарий" в начале файла ───────────────────────
+    out.append('  "replay_report": {')
+    out.append(f'    "anchor_frame": {json.dumps(anchor)},')
+    out.append(f'    "events_count": {len(rich_events)},')
+    out.append(f'    "body_frames_count": {len(rich_bodies)},')
+    out.append('    "lines": [')
+    for i, ln in enumerate(report_lines):
+        comma = "," if i < len(report_lines) - 1 else ""
+        out.append('      ' + json.dumps(ln, ensure_ascii=False) + comma)
+    out.append('    ]')
+    out.append('  },')
+
+    # ── остальное ──────────────────────────────────────────
+    out.append(f'  "version": {REPLAY_FORMAT_VERSION},')
+    out.append(f'  "anchor_frame": {json.dumps(anchor)},')
+
+    out.append('  "events": [')
+    for i, e in enumerate(rich_events):
+        pretty = json.dumps(e, indent=2, ensure_ascii=False)
+        pretty = "\n".join("    " + line for line in pretty.split("\n"))
+        out.append(pretty + ("," if i < len(rich_events) - 1 else ""))
+    out.append('  ],')
+
+    out.append('  "body_frames": [')
+    for i, b in enumerate(rich_bodies):
+        out.append('    ' + json.dumps(b, ensure_ascii=False)
+                   + ("," if i < len(rich_bodies) - 1 else ""))
+    out.append('  ]')
+
+    out.append('}')
+    with open(LOG_PATH, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
     return LOG_PATH
 
 
@@ -111,7 +204,7 @@ def load_log(path=None):
     path = path or LOG_PATH
     if not os.path.exists(path):
         return [], []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     if isinstance(data, list):
         return data, []
@@ -125,7 +218,7 @@ def load_log(path=None):
 def do_record(script):
     print()
     print("═══ RECORD (with body-state) ═══")
-    print("В игре: зайдите в уровень, дождитесь ЗАМОРОЖЕННОГО состояния.")
+    print("Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии.")
     if not prompt("Enter — НАЧАТЬ запись... "):
         print("Отменено.")
         return None
@@ -203,10 +296,8 @@ def do_play(script, events, body_frames):
     print()
     print("═══ JUMPS-ONLY PLAY (body-force) ═══")
     print("В игре:")
-    print("  1. Выйдите в лобби → зайдите в уровень заново")
-    print("  2. Дождитесь ЗАМОРОЖЕННОГО состояния")
-    print("  3. НЕ тапайте, пока программа не скажет «готово»")
-    print("⚠️  Игру НЕ перезапускайте — только уровень.")
+    print("  1. Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии")
+    print("  2. запустите режим слежки и запустите уровень")
 
     if not prompt("Enter — программа встанет на слежку... "):
         print("Отменено.")
