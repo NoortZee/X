@@ -73,7 +73,8 @@ https://github.com/NoortZee/phantom-frida/releases/tag/x86
 3.  **Запустите сервер от имени root в фоне (на порту 41337):**
     
     ```bash
-    adb shell "su -c '/data/local/tmp/sysmon -l 0.0.0.0:41337 &'"
+ adb shell "su -c '/data/local/tmp/sysmon -l unix:/data/local/tmp/sysmon.sock &'"
+adb forward tcp:41337 localabstract:/data/local/tmp/sysmon.sock
     ```
     
     _Проверить, что процесс жив: `adb shell "su -c 'ps -A | grep sysmon'"`_
@@ -135,7 +136,7 @@ cd ~/memory_replay
 
 *   Убедитесь, что `sysmon` запущен внутри Waydroid: `adb shell "su -c 'ps -A | grep sysmon'"`.
     
-*   Проверьте, что порт проброшен: `adb forward --list` (должна быть строка `tcp:41337 tcp:41337`). Если нет — выполните `adb forward tcp:41337 tcp:41337`.
+*   Проверьте, что проброшен unix-сокет: `adb forward --list` (должна быть строка `tcp:41337 localabstract:/data/local/tmp/sysmon.sock`)
     
 *   Перезапустите сервер: `adb shell "su -c 'pkill sysmon'"`, затем запустите снова.
     
