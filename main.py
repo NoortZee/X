@@ -244,11 +244,29 @@ def save_log(events, body_frames, timeline_ns=None, rng_log=None):
 def load_log(path=None):
     path = path or LOG_PATH
     if not os.path.exists(path):
-        return {}, [], None, None
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
+        return [], [], None, None
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        print(f"[main] WARN: не удалось открыть {path}: {e}", flush=True)
+        return [], [], None, None
+
+    if not text.strip():
+        print(f"[main] WARN: {path} пустой — пропускаю загрузку", flush=True)
+        return [], [], None, None
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"[main] WARN: {path} повреждён ({e}) — пропускаю загрузку",
+              flush=True)
+        return [], [], None, None
+
     if isinstance(data, list):
-        return {}, data, None, None
+        return [], data, None, None
+
     return (
         data.get("events", []),
         data.get("body_frames", []),
