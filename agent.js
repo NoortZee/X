@@ -1,7 +1,9 @@
 // agent.js — TAS agent for King of Thieves 2.84.1 x86_64
-// v3.5: только pure input replay. Force и temporal полностью удалены.
-//       Jumps привязаны к номеру кадра, физика не модифицируется,
-//       libc time-хуки в play не ставятся (иначе FPS падает до ~10).
+// v3.6: C.1/C.2 fix — ноль send() во время play. Все диагностические
+//       сообщения за флагом verbose (default false). В конце — один
+//       send({jumps_done}), в который слиты verify и буферизованный
+//       fired_log. Убраны: jumps_ready, verify_result, per-frame fps,
+//       jumps_progress, jump_fired (теперь буфер).
 // ------------------------------------------------------------
 
 'use strict';
@@ -95,7 +97,7 @@ function fnv1a32(bytes) {
 }
 
 // ------------------------------------------------------------
-// ВРЕМЯ (наносекунды через syscall) — используется только для диагностики
+// ВРЕМЯ (наносекунды через syscall) — только для диагностики
 // ------------------------------------------------------------
 
 const CLOCK_MONOTONIC = 1;
@@ -129,7 +131,7 @@ function isReadablePtr(p) {
     return Process.findRangeByAddress(p) !== null;
 }
 
-function _nz(v) { return v === 0 ? 0 : v; }   // -0.0 → +0.0
+function _nz(v) { return v === 0 ? 0 : v; }
 
 function readBodyState(bodyPtr) {
     if (!bodyPtr || bodyPtr.isNull()) return null;
@@ -210,7 +212,7 @@ function isEffectiveJump(snap) {
 }
 
 // ------------------------------------------------------------
-// LIBC HOOKS (RNG + TIME) — разделены, чтобы не ронять FPS в play
+// LIBC HOOKS (RNG + TIME)
 // ------------------------------------------------------------
 
 const _libcHooks = {
@@ -448,8 +450,6 @@ const pump = {
                     if (h !== null) pump._detectBodyHash.set(pump._frame, h);
                 }
 
-                // ВАЖНО: сравнение до _onLeave (пользовательский колбэк может дёргать jumpFn,
-                // который изменит состояние уже после того, как мы снимем actual).
                 if (pump._playbackBodyMap && pump._playbackAnchorFrame !== null) {
                     const recFrame = pump._playbackAnchorRecFrame
                     + (pump._frame - pump._playbackAnchorFrame);
@@ -467,11 +467,9 @@ const pump = {
                             div.actual = pickFields(actual);
                             pump._divergences.push(div);
                         }
-                        // Физика НЕ модифицируется — только читаем и сравниваем.
                     }
                 }
 
-                // Jump scheduling — ПОСЛЕ сравнения, чтобы мы сняли pre-jump state.
                 if (pump._onLeave) {
                     try { pump._onLeave(pump._frame, body, rec, extra); } catch (_) {}
                 }
@@ -697,6 +695,7 @@ function replayJumpsOnly(events, opts) {
     opts = opts || {};
     const bodyFramesIn = Array.isArray(opts.body_frames) ? opts.body_frames : null;
     const rngLogIn     = Array.isArray(opts.rng_log) ? opts.rng_log : null;
+    const verbose      = !!opts.verbose;                  // default false = stealth
 
     ensureJumpFn();
     pump.install();
@@ -707,12 +706,10 @@ function replayJumpsOnly(events, opts) {
     pump.clearPlaybackBody();
     pump.resetHero();
 
-    // Time-хуки в play не ставим (clock_gettime зовётся сотни раз за кадр,
-    // Interceptor-трамплин роняет FPS до ~10). RNG-хуки — только если есть
-    // что воспроизводить.
+    // Time-хуки в play не ставим. RNG-хуки — только если есть что воспроизводить.
     if (rngLogIn && rngLogIn.length) {
         installRngHooks();
-    } else {
+    } else if (verbose) {
         send({ type: 'dbg', where: 'replay',
             msg: 'rng_log absent — libc rng hooks skipped (play stays fast)' });
     }
@@ -746,7 +743,7 @@ function replayJumpsOnly(events, opts) {
         return;
     }
 
-    // План прыжков — привязан ТОЛЬКО к номеру кадра. Wall-clock не учитывается.
+    // План прыжков — привязан ТОЛЬКО к номеру кадра.
     const plan = allJumps.map(e => ({
         ev: e,
         frameDelta: Math.max(0, e.frame - anchorRecFrame),
@@ -777,44 +774,44 @@ function replayJumpsOnly(events, opts) {
         if (j.returnAddressRel) expectedCallSites.add(j.returnAddressRel);
     }
 
-    send({
+    if (verbose) send({
         type: 'jumps_analysis',
         total_in_log:      allJumps.length,
         effective_in_log:  allJumps.filter(e => isEffectiveJump(e.snap || {})).length,
-         unfreeze_frame:    unfreezeEvent ? unfreezeEvent.frame : null,
-         first_hero_update: firstHeroUpdate ? firstHeroUpdate.frame : null,
-         first_body_frame:  firstBodyFrame,
-         anchor:            anchorKind,
-         anchor_rec_frame:  anchorRecFrame,
-         body_frames:       bodyRange,
-         replay_count:      plan.length,
-         expected_callsites: Array.from(expectedCallSites),
-         per_jump: plan.map(p => ({
-             frame: p.ev.frame,
-             frame_delta: p.frameDelta,
-             state_a0:    (p.ev.snap || {}).state_a0,
-                                  ground_80:   (p.ev.snap || {}).ground_80,
-                                  ground_84:   (p.ev.snap || {}).ground_84,
-                                  cooldown_b0: (p.ev.snap || {}).cooldown_b0,
-                                  effective:   isEffectiveJump(p.ev.snap || {}),
-                                  callsite:    p.ev.returnAddressRel || null,
-         })),
+                      unfreeze_frame:    unfreezeEvent ? unfreezeEvent.frame : null,
+                      first_hero_update: firstHeroUpdate ? firstHeroUpdate.frame : null,
+                      first_body_frame:  firstBodyFrame,
+                      anchor:            anchorKind,
+                      anchor_rec_frame:  anchorRecFrame,
+                      body_frames:       bodyRange,
+                      replay_count:      plan.length,
+                      expected_callsites: Array.from(expectedCallSites),
+                      per_jump: plan.map(p => ({
+                          frame: p.ev.frame,
+                          frame_delta: p.frameDelta,
+                          state_a0:    (p.ev.snap || {}).state_a0,
+                                               ground_80:   (p.ev.snap || {}).ground_80,
+                                               ground_84:   (p.ev.snap || {}).ground_84,
+                                               cooldown_b0: (p.ev.snap || {}).cooldown_b0,
+                                               effective:   isEffectiveJump(p.ev.snap || {}),
+                                               callsite:    p.ev.returnAddressRel || null,
+                      })),
     });
 
-    send({
+    if (verbose) send({
         type: 'jumps_plan',
         mode:         anchorKind,
         replay_mode:  'pure (frame-synced)',
-         replay_count: plan.length,
-         frame_deltas: plan.map(p => p.frameDelta),
-         body_verify:  bodyMapSize > 0 ? ('enabled, ' + bodyMapSize + ' recs') : 'disabled',
-         rng_restore:  pump._replayRng ? 'enabled' : 'disabled',
-         jump_from:    'onLeave',
+                      replay_count: plan.length,
+                      frame_deltas: plan.map(p => p.frameDelta),
+                      body_verify:  bodyMapSize > 0 ? ('enabled, ' + bodyMapSize + ' recs') : 'disabled',
+                      rng_restore:  pump._replayRng ? 'enabled' : 'disabled',
+                      jump_from:    'onLeave',
     });
 
     const callsiteHits = { entered: 0, matched: 0, mismatched: 0, errors: 0, other: [] };
+    const firedLog = [];                                  // буфер, не send()
 
-    // Detach любых «зависших» хуков от предыдущего play.
     for (const h of _activeJumpsHooks) { try { h.detach(); } catch (_) {} }
     _activeJumpsHooks = [];
 
@@ -856,7 +853,13 @@ function replayJumpsOnly(events, opts) {
         pump.clearOnFrame();
         pump.clearOnFirstUpdate();
         pump.clearOnLeave();
-        if (reason) send({ type: 'jumps_timeout', reason, fired: nextIdx, total });
+        if (reason) send({
+            type: 'jumps_timeout',
+            reason,
+            fired: nextIdx,
+            total,
+            fired_log: firedLog,
+        });
     }
 
     function onUnfreeze() {
@@ -869,16 +872,16 @@ function replayJumpsOnly(events, opts) {
         if (!useAnchor) {
             anchorFrame = pump.frame();
             if (bodyMapSize > 0) pump.setPlaybackAnchor(anchorFrame, anchorRecFrame);
-            send({
+            if (verbose) send({
                 type: 'jumps_armed',
                 mode: 'unfreeze (fallback)',
-                 anchorFrame, anchorRecFrame,
-                 replay_count: total,
-                 body_verify: bodyMapSize > 0,
-                 jump_from: 'onLeave',
+                              anchorFrame, anchorRecFrame,
+                              replay_count: total,
+                              body_verify: bodyMapSize > 0,
+                              jump_from: 'onLeave',
             });
         } else {
-            send({ type: 'jumps_waiting_first_update',
+            if (verbose) send({ type: 'jumps_waiting_first_update',
                 note: 'Ждём первый HeroBody::update после unfreeze',
                 anchorKind });
         }
@@ -892,14 +895,14 @@ function replayJumpsOnly(events, opts) {
         heroPtr = _hero;
         if (bodyMapSize > 0) pump.setPlaybackAnchor(anchorFrame, anchorRecFrame);
 
-        send({
+        if (verbose) send({
             type: 'jumps_armed',
             mode: anchorKind,
             anchorFrame, anchorRecFrame,
             replay_count: total,
             frame_deltas: plan.map(p => p.frameDelta),
-             body_verify: bodyMapSize > 0,
-             jump_from: 'onLeave',
+                          body_verify: bodyMapSize > 0,
+                          jump_from: 'onLeave',
         });
     }
 
@@ -909,21 +912,22 @@ function replayJumpsOnly(events, opts) {
 
     pump.setOnFirstUpdate(onFirstUpdate);
 
-    // Только fps + progress + watchdog (jumpFn — в _onLeave!)
     pump.setOnFrame((f) => {
+        // Watchdog'и — локальные, не send.
         if (phase !== 'done' && (Date.now() - playStartWall) > PLAY_WALL_LIMIT_MS) {
             cleanupPlay('wall_timeout');
             pump.clearPlaybackBody();
             return;
         }
-
         if (phase !== 'playing') return;
-
         if (anchorFrame !== null && (f - anchorFrame) > maxPlayFrame) {
             cleanupPlay('frame_timeout');
             pump.clearPlaybackBody();
             return;
         }
+
+        // Диагностика — только в verbose.
+        if (!verbose) return;
 
         if (lastFpsFrame !== null && (f - lastFpsFrame) >= 60) {
             const dt = Date.now() - lastFpsWall;
@@ -951,18 +955,17 @@ function replayJumpsOnly(events, opts) {
             }
     });
 
-    // Jump firing — из onLeave (после hero.update, чтобы импульс ушёл на СЛЕДУЮЩИЙ кадр)
     pump.setOnLeave((f, _body, _rec, _extra) => {
         if (phase !== 'playing') return;
 
-        // Резолвим hero ОДИН раз (isValidHeroStrict — только пока heroPtr === null).
+        // Резолвим hero ОДИН раз.
         if (heroPtr === null
             && pump._lastHero
             && pump._lastHeroFrame !== null
             && pump._lastHeroFrame > anchorFrame) {
             if (isValidHeroStrict(pump._lastHero)) {
                 heroPtr = pump._lastHero;
-                send({ type: 'hero_resolved', source: 'pump_lastHero',
+                if (verbose) send({ type: 'hero_resolved', source: 'pump_lastHero',
                     addr: heroPtr.toString(), frame: f });
             }
             }
@@ -975,13 +978,13 @@ function replayJumpsOnly(events, opts) {
         if (!heroPtr || !isValidHeroStrict(heroPtr)) {
             if (deferFrames < 20) {
                 deferFrames++;
-                if (deferFrames === 1) {
+                if (deferFrames === 1 && verbose) {
                     send({ type: 'jump_deferred', idx: nextIdx, frame: f, target_frame: targetFrame,
                         reason: 'hero not resolved yet' });
                 }
                 return;
             }
-            send({ type: 'jump_skipped', idx: nextIdx, frame: f, target_frame: targetFrame,
+            if (verbose) send({ type: 'jump_skipped', idx: nextIdx, frame: f, target_frame: targetFrame,
                 reason: 'hero invalid after 20 frames' });
             nextIdx++; skippedCount++; deferFrames = 0;
         } else {
@@ -989,9 +992,15 @@ function replayJumpsOnly(events, opts) {
             deferFrames = 0;
             try {
                 jumpFn(heroPtr);
-                send({ type: 'jump_fired', idx: nextIdx, absFrame: f, target_frame: targetFrame,
-                    frame_error: f - targetFrame, snap, from: 'onLeave' });
+                firedLog.push({
+                    idx: nextIdx,
+                    absFrame: f,
+                    target_frame: targetFrame,
+                    frame_error: f - targetFrame,
+                    snap,
+                });
             } catch (e) {
+                // Ошибка — критично, шлём сразу (редко).
                 send({ type: 'jump_error', idx: nextIdx, msg: String(e), snap });
             }
             nextIdx++;
@@ -1000,7 +1009,7 @@ function replayJumpsOnly(events, opts) {
         if (nextIdx >= total) {
             const verify = buildVerificationReport(bodyFramesIn, anchorRecFrame, anchorFrame);
             const csSnapshot = { ...callsiteHits, other: callsiteHits.other.slice() };
-            cleanupPlay();
+            cleanupPlay();   // без reason — обычное завершение
 
             send({
                 type: 'jumps_done',
@@ -1009,25 +1018,10 @@ function replayJumpsOnly(events, opts) {
                 total_planned: total,
                 verify,
                 callsite: csSnapshot,
+                fired_log: firedLog,
             });
-            if (verify && verify.max_abs_diff_u32 === 0 && verify.divergences === 0) {
-                send({ type: 'verify_result', ok: true, msg: 'BIT-EXACT MATCH' });
-            } else if (verify) {
-                send({ type: 'verify_result', ok: false, verify });
-            }
             pump.clearPlaybackBody();
         }
-    });
-
-    send({
-        type: 'jumps_ready',
-        replay_count: total,
-        body_verify: bodyMapSize > 0,
-        anchor_kind: anchorKind,
-        jump_from: 'onLeave',
-        msg: useAnchor
-        ? 'Тапните ОДИН раз. Anchor = ' + anchorKind + '.'
-        : 'Тапните ОДИН раз. Anchor = unfreeze (fallback).',
     });
 }
 

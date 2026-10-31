@@ -5,6 +5,8 @@ PKG = "com.zeptolab.thieves.google"
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 LOG_PATH = os.path.join(LOG_DIR, "replay.json")
 
+FRIDA_HOST = os.environ.get("FRIDA_HOST", "127.0.0.1:41337")
+
 _done_event = threading.Event()
 _done_status = {"error": None}
 
@@ -16,12 +18,11 @@ PRINT_TYPES = {
     "hero_resolved",
     "jumps_analysis", "jumps_plan",
     "jumps_waiting_first_update",
-    "jumps_armed", "jumps_ready",
+    "jumps_armed",
     "jumps_progress",
     "jumps_done", "jumps_error", "jumps_timeout",
     "jump_fired", "jump_error", "jump_deferred", "jump_skipped", "onframe_error",
     "fps",
-    "verify_result",
     "anchor_state_check",
     "divergence",
     "determinism_result",
@@ -36,7 +37,7 @@ REPLAY_FORMAT_VERSION = 3
 # ------------------------------------------------------------
 
 def attach():
-    device = frida.get_device_manager().add_remote_device('127.0.0.1:41337')
+    device = frida.get_device_manager().add_remote_device(FRIDA_HOST)
     session = None
     last_err = None
 
@@ -72,12 +73,17 @@ def attach():
                 _done_status["error"] = p.get("msg")
                 _done_event.set()
             elif t == "jumps_done":
+                v = p.get("verify")
+                if v:
+                    ok = (v.get("divergences") == 0)
+                    _print_verify({"ok": ok, "verify": v})
+                print(f"[AGENT] jumps_done: fired={p.get('fired')} "
+                      f"skipped={p.get('skipped')} total={p.get('total_planned')}",
+                      flush=True)
                 _done_event.set()
             elif t == "jumps_timeout":
                 _done_status["error"] = f"timeout ({p.get('reason')})"
                 _done_event.set()
-            elif t == "verify_result":
-                _print_verify(p)
 
             if t in PRINT_TYPES:
                 if t == "dbg":
@@ -150,7 +156,7 @@ def _find_anchor(events):
 def _build_report_lines(events, bodies, anchor):
     L = []
     L.append("=" * 78)
-    L.append("  REPLAY REPORT  (v3.5 — pure input replay, frame-synced)")
+    L.append("  REPLAY REPORT  (v3.6 — pure input replay, frame-synced)")
     L.append("=" * 78)
     L.append(f"  events:       {len(events)}")
     L.append(f"  body_frames:  {len(bodies)}")
@@ -236,8 +242,11 @@ def save_log(events, body_frames, timeline_ns=None, rng_log=None):
         out.append('  "rng_log": ' + json.dumps(rng_log[:2000]))
 
     out.append('}')
-    with open(LOG_PATH, "w", encoding="utf-8") as f:
+
+    tmp_path = LOG_PATH + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
+    os.replace(tmp_path, LOG_PATH)
     return LOG_PATH
 
 
@@ -391,20 +400,23 @@ def do_determinism(script):
         print(f"⚠ РАСХОЖДЕНИЙ: {result.get('diffs')} — искать источник недетерминизма")
 
 
-def do_play(script, events, body_frames, rng_log=None):
+def do_play(script, events, body_frames, rng_log=None, verbose=False):
     if not events:
         print("Нет данных для воспроизведения (сначала сделайте record).")
         return
 
     print()
-    print("═══ PLAY (pure, frame-synced, jump from onLeave) ═══")
+    print(f"═══ PLAY (pure, frame-synced, jump from onLeave, verbose={verbose}) ═══")
     if rng_log:
         print(f"   RNG replay: enabled ({len(rng_log)} calls)")
     else:
         print(f"   RNG replay: disabled (no rng_log — libc rng hooks будут пропущены)")
     print("   Физика НЕ модифицируется (только чтение и сравнение)")
-    print("   Time hooks (clock_gettime/gettimeofday): DISABLED в play "
-          "(иначе FPS падает до ~10)")
+    print("   Time hooks (clock_gettime/gettimeofday): DISABLED в play")
+    if verbose:
+        print("   verbose=true: диагностические send() ВКЛЮЧЕНЫ (виден трафик)")
+    else:
+        print("   verbose=false: ноль send() во время игры, только один jumps_done в конце")
     print("В игре:")
     print("  1. Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии")
     print("  2. запустите режим слежки и запустите уровень")
@@ -418,6 +430,7 @@ def do_play(script, events, body_frames, rng_log=None):
 
     opts = {
         "body_frames": body_frames or [],
+        "verbose": bool(verbose),
     }
     if rng_log:
         opts["rng_log"] = rng_log
@@ -436,13 +449,13 @@ def do_play(script, events, body_frames, rng_log=None):
         print("\n✅ Jumps playback завершён.")
 
 
-def do_rehearse(script):
+def do_rehearse(script, verbose=False):
     res = do_record(script)
     if not res:
         return None
     events, body_frames = res
     ev, bf, tl, rng = load_log()
-    do_play(script, events, body_frames, rng)
+    do_play(script, events, body_frames, rng, verbose)
     return events, body_frames
 
 
@@ -455,7 +468,7 @@ def do_clear():
             print(f"Не удалось удалить: {e}")
     else:
         print("Лог уже пуст.")
-    return {}, [], None, None
+    return [], [], None, None
 
 
 # ------------------------------------------------------------
@@ -476,8 +489,10 @@ def print_menu(events, body_frames):
     print(f"  Лог: {log_state}")
     print("─────────────────────────────────────────────────")
     print("  Enter / rehearse       — запись + воспроизведение")
+    print("  rehearse-verbose       — запись + воспроизведение (debug)")
     print("  record                 — только запись")
     print("  play                   — только воспроизведение")
+    print("  play-verbose           — воспроизведение (debug)")
     print("  determinism            — два прогона + сравнение")
     print("  clear                  — удалить лог")
     print("  exit / q               — выход")
@@ -499,7 +514,10 @@ def main_loop(script):
 
         try:
             if cmd in ("", "rehearse", "r"):
-                do_rehearse(script)
+                do_rehearse(script, verbose=False)
+                events, body_frames, timeline_ns, rng_log = load_log()
+            elif cmd in ("rehearse-verbose", "rv"):
+                do_rehearse(script, verbose=True)
                 events, body_frames, timeline_ns, rng_log = load_log()
             elif cmd in ("record", "rec"):
                 res = do_record(script)
@@ -508,7 +526,11 @@ def main_loop(script):
             elif cmd in ("play", "p"):
                 if not events:
                     events, body_frames, timeline_ns, rng_log = load_log()
-                do_play(script, events, body_frames, rng_log)
+                do_play(script, events, body_frames, rng_log, verbose=False)
+            elif cmd in ("play-verbose", "pv"):
+                if not events:
+                    events, body_frames, timeline_ns, rng_log = load_log()
+                do_play(script, events, body_frames, rng_log, verbose=True)
             elif cmd in ("determinism", "det"):
                 do_determinism(script)
             elif cmd in ("clear", "c"):
