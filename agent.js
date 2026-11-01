@@ -1,7 +1,9 @@
 // agent.js — TAS agent for King of Thieves x86_64
-// v4.0: version-independent. AOB-сигнатуры как primary, RTTI+vtable как
-//       secondary, hardcoded offsets как fallback. Правильные функции из
-//       анализа 2.84.1 (HeroBody::update, HeroBody::jump, PlayState::onLevelStarted).
+// v4.4: Interceptor-based pump (60 fps).
+//  - AOB signature resolver → fallback offset
+//  - Structural isValidHeroStrict (version-independent, без typeinfo)
+//  - Fix: onUnfreeze для first_body_frame сразу переходит в playing
+//  - Fix: _detectBodyFrames.push содержит frame
 // ------------------------------------------------------------
 
 'use strict';
@@ -15,14 +17,13 @@ if (libModule === null) {
 
 const MODULE_BASE = libModule.base;
 const MODULE_SIZE = libModule.size;
-send({ type: 'module_base', name: MODULE_NAME, base: MODULE_BASE.toString(), size: MODULE_SIZE });
+send({ type: 'module_base', name: MODULE_NAME,
+    base: MODULE_BASE.toString(), size: MODULE_SIZE });
 
 // ------------------------------------------------------------
-// РЕЗОЛВЕР АДРЕСОВ: AOB -> RTTI/vtable -> fallback offset
+// Address resolver: AOB → fallback offset
 // ------------------------------------------------------------
 
-// AOB-сигнатуры (2.84.1, ?? на rel32/rip-displacement).
-// При обновлении: если AOB не находит — обнови сигнатуру из нового .so.
 const SIGS = {
     FRAME_FUNC:      '48 83 7F 20 00 0F 84 ?? ?? ?? ?? 55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18',
     JUMP:            '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 84 C0 74 ?? 48 89 DF 48 83 C4 08 5B 5D E9 ?? ?? ?? ??',
@@ -30,22 +31,20 @@ const SIGS = {
     UNFREEZE_ATTACK: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 80 BB 48 01 00 00 00 75 ?? 48 8B BB C8 00 00 00',
 };
 
-// Fallback offset'ы (2.84.1). Обновлять только если AOB сломается.
 const FALLBACK = {
-    FRAME_FUNC:      0x1612A20,   // HeroBody::update
-    JUMP:            0x1611F00,   // HeroBody::jump
-    UNFREEZE:        0x13F92C0,   // PlayState::onLevelStarted
-    UNFREEZE_ATTACK: 0x13DA8B0,   // AttackState::onLevelStarted
-};
-
-// RTTI-якоря (2.84.1). Стабильны между минорными версиями.
-const RTTI_OFFSETS = {
-    HeroBody:    0x205A120,   // _ZTI8HeroBody (relocated, на него ссылается vtable)
-    PlayState:   0x200A518,   // _ZTIPlayState
-    AttackState: 0x20068D0,   // _ZTIAttackState
+    FRAME_FUNC:      0x1612A20,
+    JUMP:            0x1611F00,
+    UNFREEZE:        0x13F92C0,
+    UNFREEZE_ATTACK: 0x13DA8B0,
 };
 
 const _resolutionLog = [];
+
+function isReadablePtr(p) {
+    if (p === null || p === undefined) return false;
+    if (p.isNull && p.isNull()) return false;
+    return Process.findRangeByAddress(p) !== null;
+}
 
 function _scanModule(sig) {
     const ranges = Process.enumerateRanges('r-x');
@@ -65,8 +64,10 @@ function _resolveBySig(name) {
     if (!sig) return null;
     const addr = _scanModule(sig);
     if (addr) {
-        _resolutionLog.push({ name, method: 'AOB', addr: addr.toString(),
-            offset: addr.sub(MODULE_BASE).toString() });
+        _resolutionLog.push({
+            name, method: 'AOB', addr: addr.toString(),
+                            offset: addr.sub(MODULE_BASE).toString()
+        });
     }
     return addr;
 }
@@ -75,94 +76,21 @@ function _resolveByFallback(name) {
     const off = FALLBACK[name];
     if (off === undefined) return null;
     const addr = MODULE_BASE.add(off);
-    _resolutionLog.push({ name, method: 'FALLBACK', addr: addr.toString(),
-        offset: '0x' + off.toString(16) });
+    _resolutionLog.push({
+        name, method: 'FALLBACK', addr: addr.toString(),
+                        offset: '0x' + off.toString(16)
+    });
     return addr;
-}
-
-// Ищем vtable по указателю на typeinfo: vtable[0] == typeinfo.
-// Тогда начало vtable = найденный_адрес - 8 (vtable[-1] = offset-to-top).
-function _findVtableByTypeinfo(typeinfoOffset) {
-    const ti = MODULE_BASE.add(typeinfoOffset);
-    if (!isReadablePtr(ti)) return null;
-
-    // Паттерн — little-endian 8 байт адреса typeinfo
-    const tiStr = ti.toString().slice(2).padStart(16, '0');
-    const pattern = tiStr.match(/../g).reverse().join(' ');
-
-    const results = [];
-    try {
-        Memory.scanSync(MODULE_BASE, MODULE_SIZE, pattern, {
-            onMatch(a) {
-                // vtable[0] = typeinfo, значит a = vtable + 0.
-                // Но _ZTV указывает на начало (offset-to-top, потом typeinfo).
-                // То есть a - 8 = начало vtable.
-                results.push(a.sub(8));
-            },
-            onComplete() {}
-        });
-    } catch (_) {}
-
-    // Возвращаем первый найденный (обычно единственный)
-    if (results.length > 0) {
-        _resolutionLog.push({ name: 'VTable_' + typeinfoOffset.toString(16),
-            method: 'RTTI_SCAN', addr: results[0].toString(),
-                            candidates: results.length });
-        return results[0];
-    }
-    return null;
-}
-
-function _resolveFrameFunc() {
-    let a = _resolveBySig('FRAME_FUNC');
-    if (a) return a;
-
-    // Fallback через vtable HeroBody, слот +0x20 = HeroBody::update
-    const ztv = _findVtableByTypeinfo(RTTI_OFFSETS.HeroBody);
-    if (ztv) {
-        try {
-            const updatePtr = ztv.add(0x20).readPointer();
-            if (isReadablePtr(updatePtr) && updatePtr.compare(MODULE_BASE) >= 0
-                && updatePtr.compare(MODULE_BASE.add(MODULE_SIZE)) < 0) {
-                _resolutionLog.push({
-                    name: 'FRAME_FUNC', method: 'VTABLE_SLOT_0x20',
-                    addr: updatePtr.toString(),
-                                    offset: updatePtr.sub(MODULE_BASE).toString()
-                });
-            return updatePtr;
-                }
-        } catch (_) {}
-    }
-
-    return _resolveByFallback('FRAME_FUNC');
 }
 
 function _resolveSimple(name) {
     return _resolveBySig(name) || _resolveByFallback(name);
 }
 
-// ------------------------------------------------------------
-// Разрешение адресов (один раз при загрузке скрипта)
-// ------------------------------------------------------------
-
-const FRAME_FUNC      = _resolveFrameFunc();
-const ADDR_JUMP       = _resolveSimple('JUMP');
-const ADDR_UNFREEZE   = _resolveSimple('UNFREEZE');
+const FRAME_FUNC           = _resolveSimple('FRAME_FUNC');
+const ADDR_JUMP            = _resolveSimple('JUMP');
+const ADDR_UNFREEZE        = _resolveSimple('UNFREEZE');
 const ADDR_UNFREEZE_ATTACK = _resolveSimple('UNFREEZE_ATTACK');
-
-// Резолвим typeinfo HeroBody для isValidHeroStrict
-let HERO_BODY_TYPEINFO = null;
-{
-    const ztv = _findVtableByTypeinfo(RTTI_OFFSETS.HeroBody);
-    if (ztv) {
-        try { HERO_BODY_TYPEINFO = ztv.add(0x08).readPointer(); } catch (_) {}
-    }
-    if (!HERO_BODY_TYPEINFO) {
-        HERO_BODY_TYPEINFO = MODULE_BASE.add(RTTI_OFFSETS.HeroBody);
-        _resolutionLog.push({ name: 'HERO_BODY_TYPEINFO', method: 'FALLBACK',
-            addr: HERO_BODY_TYPEINFO.toString() });
-    }
-}
 
 const ADDR = {
     UNFREEZE:        ADDR_UNFREEZE,
@@ -170,16 +98,14 @@ const ADDR = {
     JUMP:            ADDR_JUMP,
 };
 
-const VTABLE = {
-    HERO_BODY_TYPEINFO: HERO_BODY_TYPEINFO,
-};
-
-send({ type: 'resolved', log: _resolutionLog,
+send({
+    type: 'resolved',
+    log: _resolutionLog,
     FRAME_FUNC: FRAME_FUNC.toString(),
      JUMP: ADDR.JUMP.toString(),
      UNFREEZE: ADDR.UNFREEZE.toString(),
-     UNFREEZE_ATTACK: ADDR.UNFREEZE_ATTACK.toString(),
-     HERO_BODY_TYPEINFO: VTABLE.HERO_BODY_TYPEINFO.toString() });
+     UNFREEZE_ATTACK: ADDR.UNFREEZE_ATTACK.toString()
+});
 
 // ------------------------------------------------------------
 // Frida 17 API shim
@@ -194,10 +120,10 @@ function findExport(moduleName, exportName) {
 }
 
 // ------------------------------------------------------------
-// БИТОВЫЕ ХЕЛПЕРЫ
+// Bit helpers
 // ------------------------------------------------------------
 
-const _f32buf = new ArrayBuffer(4);
+const _f32buf  = new ArrayBuffer(4);
 const _f32view = new Float32Array(_f32buf);
 const _u32view = new Uint32Array(_f32buf);
 
@@ -218,7 +144,7 @@ function fnv1a32(bytes) {
 }
 
 // ------------------------------------------------------------
-// ВРЕМЯ
+// Time
 // ------------------------------------------------------------
 
 const CLOCK_MONOTONIC = 1;
@@ -234,7 +160,7 @@ function nowNs() {
     if (_syscallFn) {
         try {
             _syscallFn(_SYS_clock_gettime_x86_64, CLOCK_MONOTONIC, _tsBuf);
-            const sec = _tsBuf.readS64();
+            const sec  = _tsBuf.readS64();
             const nsec = _tsBuf.add(8).readS64();
             return Number(sec) * 1e9 + Number(nsec);
         } catch (_) {}
@@ -243,14 +169,8 @@ function nowNs() {
 }
 
 // ------------------------------------------------------------
-// BODY STATE
+// Body state
 // ------------------------------------------------------------
-
-function isReadablePtr(p) {
-    if (p === null || p === undefined) return false;
-    if (p.isNull && p.isNull()) return false;
-    return Process.findRangeByAddress(p) !== null;
-}
 
 function _nz(v) { return v === 0 ? 0 : v; }
 
@@ -301,20 +221,15 @@ function heroBodyHash(bodyPtr) {
 }
 
 // ------------------------------------------------------------
-// HERO STRICT CHECK (по typeinfo, не по хардкоду vtable)
+// Hero strict check — structural, version-independent.
+// FRAME_FUNC == HeroBody::update, значит args[0] уже HeroBody*.
+// Проверяем только, что указатель живой (не стал мусором между
+// вызовами) — тело читается и гравитация в разумных пределах.
 // ------------------------------------------------------------
 
 function isValidHeroStrict(p) {
     if (!p || p.isNull() || !isReadablePtr(p)) return false;
     try { if (!p.and(7).isNull()) return false; } catch (_) { return false; }
-
-    let vtable;
-    try { vtable = p.readPointer(); } catch (_) { return false; }
-    if (!isReadablePtr(vtable)) return false;
-
-    let typeinfo;
-    try { typeinfo = vtable.readPointer(); } catch (_) { return false; }
-    if (!typeinfo.equals(VTABLE.HERO_BODY_TYPEINFO)) return false;
 
     let body;
     try { body = p.add(0x20).readPointer(); } catch (_) { return false; }
@@ -352,7 +267,7 @@ function isEffectiveJump(snap) {
 }
 
 // ------------------------------------------------------------
-// LIBC HOOKS (RNG + TIME) — без изменений
+// Libc hooks (RNG + TIME)
 // ------------------------------------------------------------
 
 const _libcHooks = {
@@ -396,20 +311,20 @@ function installTimeHooks() {
         _libcHooks.time.add(name);
         const h = Interceptor.attach(a, {
             onEnter(args) {
-                this._ts = args[name === 'gettimeofday' ? 0 : 1];
+                this._ts  = args[name === 'gettimeofday' ? 0 : 1];
                 this._clk = name === 'gettimeofday' ? -1 : args[0].toInt32();
-                this._fn = name;
+                this._fn  = name;
             },
             onLeave(ret) {
                 if (pump._recordTime && this._ts && isReadablePtr(this._ts)) {
                     try {
                         let ns;
                         if (this._fn === 'gettimeofday') {
-                            const s = this._ts.readS64();
+                            const s  = this._ts.readS64();
                             const us = this._ts.add(8).readS64();
                             ns = Number(s) * 1e9 + Number(us) * 1000;
                         } else {
-                            const s = this._ts.readS64();
+                            const s      = this._ts.readS64();
                             const nsPart = this._ts.add(8).readS64();
                             ns = Number(s) * 1e9 + Number(nsPart);
                         }
@@ -437,40 +352,75 @@ function installTimeHooks() {
 
 function detachRngHooks() {
     for (const h of _libcHooks.rngHandles) { try { h.detach(); } catch (_) {} }
-    _libcHooks.rngHandles = []; _libcHooks.rngInstalled = false; _libcHooks.rng.clear();
+    _libcHooks.rngHandles = [];
+    _libcHooks.rngInstalled = false;
+    _libcHooks.rng.clear();
 }
 
 function detachTimeHooks() {
     for (const h of _libcHooks.timeHandles) { try { h.detach(); } catch (_) {} }
-    _libcHooks.timeHandles = []; _libcHooks.timeInstalled = false; _libcHooks.time.clear();
+    _libcHooks.timeHandles = [];
+    _libcHooks.timeInstalled = false;
+    _libcHooks.time.clear();
 }
 
-function installLibcHooks() { installRngHooks(); installTimeHooks(); }
+function installLibcHooks() {
+    installRngHooks();
+    installTimeHooks();
+}
 
 // ------------------------------------------------------------
-// PUMP
+// Pump (Interceptor)
 // ------------------------------------------------------------
 
 const pump = {
-    _frame: 0, _paused: false, _budget: -1, _installed: false,
-    _onFrame: null, _onFirstUpdate: null, _onLeave: null,
-    _lastHero: null, _lastHeroFrame: null,
-    _detectBodyRecord: false, _detectBodyFrames: [], _detectBodyHash: new Map(),
-    _playbackBodyMap: null, _playbackAnchorFrame: null, _playbackAnchorRecFrame: null,
-    _replayBodyFrames: [], _divergences: [],
-    _ring: [], _ringMax: 60,
-    _recordTime: false, _timeLog: [], _frameNsTimeline: new Map(),
-    _recordRng: false, _rngLog: [],
-    _replayRng: null, _freezeTime: false, _frozenNs: null,
+    _frame: 0,
+    _paused: false,
+    _budget: -1,
+    _installed: false,
+
+    _onFrame: null,
+    _onFirstUpdate: null,
+    _onLeave: null,
+
+    _lastHero: null,
+    _lastHeroFrame: null,
+
+    _detectBodyRecord: false,
+    _detectBodyFrames: [],
+    _detectBodyHash: new Map(),
+
+    _playbackBodyMap: null,
+    _playbackAnchorFrame: null,
+    _playbackAnchorRecFrame: null,
+    _replayBodyFrames: [],
+    _divergences: [],
+
+    _ring: [],
+    _ringMax: 60,
+
+    _recordTime: false,
+    _timeLog: [],
+    _frameNsTimeline: new Map(),
+    _recordRng: false,
+    _rngLog: [],
+
+    _replayRng: null,
+    _freezeTime: false,
+    _frozenNs: null,
+
     _dbgStats: { enter: 0, leave: 0, nullBody: 0, readOk: 0 },
 
     install() {
         if (pump._installed) { send({ type: 'pump_already' }); return; }
-        pump._paused = false; pump._budget = -1; pump._frame = 0;
+        pump._paused = false;
+        pump._budget = -1;
+        pump._frame = 0;
 
         Interceptor.attach(FRAME_FUNC, {
             onEnter(args) {
                 this._hero = args[0];
+
                 let guard = 0;
                 while (pump._paused || pump._budget === 0) {
                     Thread.sleep(0.001);
@@ -532,11 +482,21 @@ const pump = {
                     g80: snap.ground_80, g84: snap.ground_84,
                 };
 
-                pump._ring.push({ frame: pump._frame, ...rec, ...extra });
+                pump._ring.push({
+                    frame: pump._frame,
+                    px: rec.px, py: rec.py, ang: rec.ang,
+                    vx: rec.vx, vy: rec.vy, av: rec.av,
+                    a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
+                });
                 if (pump._ring.length > pump._ringMax) pump._ring.shift();
 
                 if (pump._detectBodyRecord) {
-                    pump._detectBodyFrames.push({ ...rec, ...extra });
+                    pump._detectBodyFrames.push({
+                        frame: pump._frame,
+                        px: rec.px, py: rec.py, ang: rec.ang,
+                        vx: rec.vx, vy: rec.vy, av: rec.av,
+                        a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
+                    });
                     const h = heroBodyHash(body);
                     if (h !== null) pump._detectBodyHash.set(pump._frame, h);
                 }
@@ -545,12 +505,17 @@ const pump = {
                     const recFrame = pump._playbackAnchorRecFrame
                     + (pump._frame - pump._playbackAnchorFrame);
                     const expected = pump._playbackBodyMap.get(recFrame);
-                    const actual = { ...rec, ...extra };
+                    const actual = {
+                        px: rec.px, py: rec.py, ang: rec.ang,
+                        vx: rec.vx, vy: rec.vy, av: rec.av,
+                        a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
+                    };
                     pump._replayBodyFrames.push({ frame: pump._frame, ...actual });
                     if (expected) {
                         const div = compareBodyBit(actual, expected);
                         if (div) {
-                            div.f = pump._frame; div.recFrame = recFrame;
+                            div.f = pump._frame;
+                            div.recFrame = recFrame;
                             div.expected = pickFields(expected);
                             div.actual = pickFields(actual);
                             pump._divergences.push(div);
@@ -565,8 +530,9 @@ const pump = {
         });
 
         pump._installed = true;
-        send({ type: 'pump_installed', func: FRAME_FUNC.toString(),
-            offset: FRAME_FUNC.sub(MODULE_BASE).toString() });
+        send({ type: 'pump_installed', mode: 'interceptor',
+            func: FRAME_FUNC.toString(),
+             offset: FRAME_FUNC.sub(MODULE_BASE).toString() });
     },
 
     resetHero() { pump._lastHero = null; pump._lastHeroFrame = null; },
@@ -614,7 +580,7 @@ const pump = {
 };
 
 // ------------------------------------------------------------
-// COMPARE
+// Compare helpers
 // ------------------------------------------------------------
 
 function pickFields(obj) {
@@ -645,7 +611,7 @@ function compareBodyBit(actual, expected) {
 }
 
 // ------------------------------------------------------------
-// DETECT
+// Detect
 // ------------------------------------------------------------
 
 let detectRec = false;
@@ -721,7 +687,8 @@ function detectStart() {
     pump._recordRng = true;
     pump.setOnFrame(_onFrameRecordTimeline);
 
-    send({ type: 'detect_started', frame: pump.frame(), wall: detectStartWall, ns: detectStartNsVal });
+    send({ type: 'detect_started', frame: pump.frame(),
+        wall: detectStartWall, ns: detectStartNsVal });
 }
 
 function detectStop() {
@@ -747,8 +714,8 @@ function detectStop() {
     return detectEvents;
 }
 
-function detectGetBodyFrames()        { return pump.detectBodyGet(); }
-function detectGetFrameNsTimeline()   {
+function detectGetBodyFrames()      { return pump.detectBodyGet(); }
+function detectGetFrameNsTimeline() {
     if (!pump._frameNsTimeline) return [];
     const out = [];
     for (const [f, ns] of pump._frameNsTimeline) out.push([f, ns]);
@@ -759,7 +726,7 @@ function detectGetRngLog()  { return pump._rngLog; }
 function detectGetTimeLog() { return pump._timeLog; }
 
 // ------------------------------------------------------------
-// REPLAY
+// Replay
 // ------------------------------------------------------------
 
 let jumpFn = null;
@@ -788,7 +755,8 @@ function replayJumpsOnly(events, opts) {
     else if (verbose) send({ type: 'dbg', where: 'replay', msg: 'rng_log absent' });
 
     const allJumps = events.filter(e => e.name === 'jump').sort((a, b) => a.frame - b.frame);
-    const unfreezeEvent = events.filter(e => e.name === 'unfreeze' || e.name === 'unfreeze_attack')
+    const unfreezeEvent = events
+    .filter(e => e.name === 'unfreeze' || e.name === 'unfreeze_attack')
     .sort((a, b) => a.frame - b.frame)[0];
     const firstHeroUpdate = events.find(e => e.name === 'first_hero_update') || null;
     const firstBodyFrame = (bodyFramesIn && bodyFramesIn.length) ? bodyFramesIn[0].frame : null;
@@ -797,22 +765,39 @@ function replayJumpsOnly(events, opts) {
 
     let useAnchor, anchorRecFrame, anchorKind;
     if (firstHeroUpdate) {
-        useAnchor = true; anchorRecFrame = firstHeroUpdate.frame; anchorKind = 'first_hero_update';
+        useAnchor = true;
+        anchorRecFrame = firstHeroUpdate.frame;
+        anchorKind = 'first_hero_update';
     } else if (firstBodyFrame !== null) {
-        useAnchor = true; anchorRecFrame = firstBodyFrame; anchorKind = 'first_body_frame';
+        useAnchor = true;
+        anchorRecFrame = firstBodyFrame;
+        anchorKind = 'first_body_frame';
     } else if (unfreezeEvent) {
-        useAnchor = false; anchorRecFrame = unfreezeEvent.frame; anchorKind = 'unfreeze (fallback)';
+        useAnchor = false;
+        anchorRecFrame = unfreezeEvent.frame;
+        anchorKind = 'unfreeze (fallback)';
     } else {
-        send({ type: 'jumps_error', msg: 'no anchor available' }); return;
+        send({ type: 'jumps_error', msg: 'no anchor available' });
+        return;
     }
 
-    const plan = allJumps.map(e => ({ ev: e, frameDelta: Math.max(0, e.frame - anchorRecFrame) }));
+    // true только если в логе есть first_hero_update — тогда ждём его
+    // через onFirstUpdate. Иначе играем сразу с frame=unfreeze.
+    const waitForFirstUpdate = (anchorKind === 'first_hero_update');
+
+    const plan = allJumps.map(e => ({
+        ev: e,
+        frameDelta: Math.max(0, e.frame - anchorRecFrame),
+    }));
 
     let bodyMapSize = 0, bodyRange = null;
     if (bodyFramesIn && bodyFramesIn.length) {
         bodyMapSize = pump.setPlaybackBody(bodyFramesIn);
-        bodyRange = { first: bodyFramesIn[0].frame, last: bodyFramesIn[bodyFramesIn.length - 1].frame,
-            count: bodyFramesIn.length };
+        bodyRange = {
+            first: bodyFramesIn[0].frame,
+            last: bodyFramesIn[bodyFramesIn.length - 1].frame,
+            count: bodyFramesIn.length,
+        };
     }
 
     if (rngLogIn && rngLogIn.length) {
@@ -830,29 +815,40 @@ function replayJumpsOnly(events, opts) {
     const expectedCallSites = new Set();
     for (const j of allJumps) if (j.returnAddressRel) expectedCallSites.add(j.returnAddressRel);
 
-    if (verbose) send({
-        type: 'jumps_analysis',
-        total_in_log: allJumps.length,
-        effective_in_log: allJumps.filter(e => isEffectiveJump(e.snap || {})).length,
-                      anchor: anchorKind, anchor_rec_frame: anchorRecFrame,
-                      body_frames: bodyRange, replay_count: plan.length,
-                      per_jump: plan.map(p => ({
-                          frame: p.ev.frame, frame_delta: p.frameDelta,
-                          state_a0: (p.ev.snap || {}).state_a0,
-                                               ground_80: (p.ev.snap || {}).ground_80,
-                                               ground_84: (p.ev.snap || {}).ground_84,
-                                               cooldown_b0: (p.ev.snap || {}).cooldown_b0,
-                                               effective: isEffectiveJump(p.ev.snap || {}),
-                                               callsite: p.ev.returnAddressRel || null,
-                      })),
-    });
+    if (verbose) {
+        send({
+            type: 'jumps_analysis',
+            total_in_log: allJumps.length,
+            effective_in_log: allJumps.filter(e => isEffectiveJump(e.snap || {})).length,
+             anchor: anchorKind,
+             anchor_rec_frame: anchorRecFrame,
+             wait_for_first_update: waitForFirstUpdate,
+             body_frames: bodyRange,
+             replay_count: plan.length,
+             per_jump: plan.map(p => ({
+                 frame: p.ev.frame,
+                 frame_delta: p.frameDelta,
+                 state_a0: (p.ev.snap || {}).state_a0,
+                                      ground_80: (p.ev.snap || {}).ground_80,
+                                      ground_84: (p.ev.snap || {}).ground_84,
+                                      cooldown_b0: (p.ev.snap || {}).cooldown_b0,
+                                      effective: isEffectiveJump(p.ev.snap || {}),
+                                      callsite: p.ev.returnAddressRel || null,
+             })),
+        });
 
-    if (verbose) send({
-        type: 'jumps_plan', mode: anchorKind, replay_mode: 'pure (frame-synced)',
-                      replay_count: plan.length, frame_deltas: plan.map(p => p.frameDelta),
-                      body_verify: bodyMapSize > 0 ? ('enabled, ' + bodyMapSize + ' recs') : 'disabled',
-                      rng_restore: pump._replayRng ? 'enabled' : 'disabled', jump_from: 'onLeave',
-    });
+        send({
+            type: 'jumps_plan',
+            mode: anchorKind,
+            replay_mode: 'pure (frame-synced)',
+             replay_count: plan.length,
+             frame_deltas: plan.map(p => p.frameDelta),
+             body_verify: bodyMapSize > 0 ? ('enabled, ' + bodyMapSize + ' recs') : 'disabled',
+             rng_restore: pump._replayRng ? 'enabled' : 'disabled',
+             jump_from: 'onLeave',
+             wait_for_first_update: waitForFirstUpdate,
+        });
+    }
 
     const callsiteHits = { entered: 0, matched: 0, mismatched: 0, errors: 0, other: [] };
     const firedLog = [];
@@ -895,33 +891,58 @@ function replayJumpsOnly(events, opts) {
         phase = 'done';
         for (const h of _activeJumpsHooks) { try { h.detach(); } catch (_) {} }
         _activeJumpsHooks = [];
-        pump.clearOnFrame(); pump.clearOnFirstUpdate(); pump.clearOnLeave();
-        if (reason) send({ type: 'jumps_timeout', reason, fired: nextIdx, total, fired_log: firedLog });
+        pump.clearOnFrame();
+        pump.clearOnFirstUpdate();
+        pump.clearOnLeave();
+        if (reason) {
+            send({ type: 'jumps_timeout', reason,
+                fired: nextIdx, total, fired_log: firedLog });
+        }
+    }
+
+    function _armPlaying(frameForAnchor) {
+        phase = 'playing';
+        anchorFrame = frameForAnchor;
+        if (bodyMapSize > 0) pump.setPlaybackAnchor(anchorFrame, anchorRecFrame);
+        lastFpsFrame = pump.frame();
+        lastFpsWall = Date.now();
+        lastProgressLogMs = Date.now();
     }
 
     function onUnfreeze() {
         if (phase !== 'waiting_unfreeze') return;
-        phase = useAnchor ? 'waiting_first_update' : 'playing';
-        lastFpsFrame = pump.frame(); lastFpsWall = Date.now(); lastProgressLogMs = Date.now();
-        if (!useAnchor) {
-            anchorFrame = pump.frame();
-            if (bodyMapSize > 0) pump.setPlaybackAnchor(anchorFrame, anchorRecFrame);
-            if (verbose) send({ type: 'jumps_armed', mode: 'unfreeze (fallback)',
-                anchorFrame, anchorRecFrame, replay_count: total, jump_from: 'onLeave' });
-        } else {
+
+        if (waitForFirstUpdate) {
+            // Есть first_hero_update в логе — ждём его
+            phase = 'waiting_first_update';
+            lastFpsFrame = pump.frame();
+            lastFpsWall = Date.now();
+            lastProgressLogMs = Date.now();
             if (verbose) send({ type: 'jumps_waiting_first_update', anchorKind });
+            return;
         }
+
+        // Нет first_hero_update — стартуем сразу по frame unfreeze
+        _armPlaying(pump.frame());
+        if (verbose) send({
+            type: 'jumps_armed',
+            mode: anchorKind,
+            anchorFrame, anchorRecFrame,
+            replay_count: total, jump_from: 'onLeave'
+        });
     }
 
     function onFirstUpdate(_hero, frame) {
-        if (phase !== 'waiting_first_update' && phase !== 'waiting_unfreeze') return;
+        if (phase !== 'waiting_first_update') return;
         if (!isValidHeroStrict(_hero)) return;
-        phase = 'playing';
-        anchorFrame = frame;
+        _armPlaying(frame);
         heroPtr = _hero;
-        if (bodyMapSize > 0) pump.setPlaybackAnchor(anchorFrame, anchorRecFrame);
-        if (verbose) send({ type: 'jumps_armed', mode: anchorKind,
-            anchorFrame, anchorRecFrame, replay_count: total, jump_from: 'onLeave' });
+        if (verbose) send({
+            type: 'jumps_armed',
+            mode: anchorKind,
+            anchorFrame, anchorRecFrame,
+            replay_count: total, jump_from: 'onLeave'
+        });
     }
 
     const h1 = Interceptor.attach(ADDR.UNFREEZE,        { onEnter() { onUnfreeze(); } });
@@ -932,28 +953,35 @@ function replayJumpsOnly(events, opts) {
 
     pump.setOnFrame((f) => {
         if (phase !== 'done' && (Date.now() - playStartWall) > PLAY_WALL_LIMIT_MS) {
-            cleanupPlay('wall_timeout'); pump.clearPlaybackBody(); return;
+            cleanupPlay('wall_timeout');
+            pump.clearPlaybackBody();
+            return;
         }
         if (phase !== 'playing') return;
         if (anchorFrame !== null && (f - anchorFrame) > maxPlayFrame) {
-            cleanupPlay('frame_timeout'); pump.clearPlaybackBody(); return;
+            cleanupPlay('frame_timeout');
+            pump.clearPlaybackBody();
+            return;
         }
         if (!verbose) return;
         if (lastFpsFrame !== null && (f - lastFpsFrame) >= 60) {
             const dt = Date.now() - lastFpsWall;
             send({ type: 'fps', frame: f,
                 fps: dt > 0 ? Number(((f - lastFpsFrame) * 1000 / dt).toFixed(1)) : 0 });
-            lastFpsFrame = f; lastFpsWall = Date.now();
+            lastFpsFrame = f;
+            lastFpsWall = Date.now();
         }
         if (nextIdx < total && lastProgressLogMs !== null &&
             (Date.now() - lastProgressLogMs) >= 1000) {
             lastProgressLogMs = Date.now();
         const progressTarget = anchorFrame + plan[nextIdx].frameDelta;
         const snap = heroPtr ? heroSnapshot(heroPtr) : {};
-        send({ type: 'jumps_progress', frame: f, next_idx: nextIdx,
+        send({ type: 'jumps_progress',
+            frame: f, next_idx: nextIdx,
             target_frame: progressTarget,
             remaining_frames: Math.max(0, progressTarget - f),
-             state_a0: snap.state_a0, ground_80: snap.ground_80,
+             state_a0: snap.state_a0,
+             ground_80: snap.ground_80,
              divergences: pump._divergences.length });
             }
     });
@@ -964,8 +992,10 @@ function replayJumpsOnly(events, opts) {
             && pump._lastHeroFrame > anchorFrame) {
             if (isValidHeroStrict(pump._lastHero)) {
                 heroPtr = pump._lastHero;
-                if (verbose) send({ type: 'hero_resolved', source: 'pump_lastHero',
-                    addr: heroPtr.toString(), frame: f });
+                if (verbose) {
+                    send({ type: 'hero_resolved', source: 'pump_lastHero',
+                        addr: heroPtr.toString(), frame: f });
+                }
             }
             }
             if (nextIdx >= total) return;
@@ -976,19 +1006,30 @@ function replayJumpsOnly(events, opts) {
             if (deferFrames < 20) {
                 deferFrames++;
                 if (deferFrames === 1 && verbose) {
-                    send({ type: 'jump_deferred', idx: nextIdx, frame: f, target_frame: targetFrame });
+                    send({ type: 'jump_deferred', idx: nextIdx, frame: f,
+                        target_frame: targetFrame });
                 }
                 return;
             }
-            if (verbose) send({ type: 'jump_skipped', idx: nextIdx, frame: f, target_frame: targetFrame });
-            nextIdx++; skippedCount++; deferFrames = 0;
+            if (verbose) {
+                send({ type: 'jump_skipped', idx: nextIdx, frame: f,
+                    target_frame: targetFrame });
+            }
+            nextIdx++;
+            skippedCount++;
+            deferFrames = 0;
         } else {
             const snap = heroSnapshot(heroPtr);
             deferFrames = 0;
             try {
                 jumpFn(heroPtr);
-                firedLog.push({ idx: nextIdx, absFrame: f, target_frame: targetFrame,
-                    frame_error: f - targetFrame, snap });
+                firedLog.push({
+                    idx: nextIdx,
+                    absFrame: f,
+                    target_frame: targetFrame,
+                    frame_error: f - targetFrame,
+                    snap,
+                });
             } catch (e) {
                 send({ type: 'jump_error', idx: nextIdx, msg: String(e), snap });
             }
@@ -999,8 +1040,15 @@ function replayJumpsOnly(events, opts) {
             const verify = buildVerificationReport(bodyFramesIn, anchorRecFrame, anchorFrame);
             const csSnapshot = { ...callsiteHits, other: callsiteHits.other.slice() };
             cleanupPlay();
-            send({ type: 'jumps_done', fired: nextIdx - skippedCount, skipped: skippedCount,
-                total_planned: total, verify, callsite: csSnapshot, fired_log: firedLog });
+            send({
+                type: 'jumps_done',
+                fired: nextIdx - skippedCount,
+                skipped: skippedCount,
+                total_planned: total,
+                verify,
+                callsite: csSnapshot,
+                fired_log: firedLog,
+            });
             pump.clearPlaybackBody();
         }
     });
@@ -1026,16 +1074,26 @@ function buildVerificationReport(bodyFramesIn, anchorRecFrame, anchorPlaybackFra
                 const diff = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
                 if (diff > maxAbsU32) maxAbsU32 = diff;
             }
-            if (samples.length < 5) samples.push({ f: rf.frame, recFrame, diffs: div.diffs.slice(0, 6) });
+            if (samples.length < 5) {
+                samples.push({ f: rf.frame, recFrame, diffs: div.diffs.slice(0, 6) });
+            }
         }
     }
-    return { compared, total_replay_frames: pump._replayBodyFrames.length, divergences,
-        max_abs_diff_u32: maxAbsU32, first_divergence: firstDiv, samples,
-        ring: pump._ring.slice(-5) };
+    return {
+        compared,
+        total_replay_frames: pump._replayBodyFrames.length,
+        divergences,
+        max_abs_diff_u32: maxAbsU32,
+        first_divergence: firstDiv,
+        samples,
+        ring: pump._ring.slice(-5),
+    };
 }
 
 function compareTwoRecordings(a, b) {
-    if (!Array.isArray(a) || !Array.isArray(b)) return { error: 'both args must be arrays' };
+    if (!Array.isArray(a) || !Array.isArray(b)) {
+        return { error: 'both args must be arrays' };
+    }
     const mapB = new Map(b.map(r => [r.frame, r]));
     let compared = 0, diffs = 0, maxU32 = 0;
     const samples = [];
@@ -1046,7 +1104,9 @@ function compareTwoRecordings(a, b) {
         const div = compareBodyBit(ra, rb);
         if (div) {
             diffs++;
-            if (samples.length < 10) samples.push({ f: ra.frame, diffs: div.diffs.slice(0, 6) });
+            if (samples.length < 10) {
+                samples.push({ f: ra.frame, diffs: div.diffs.slice(0, 6) });
+            }
             for (const d of div.diffs) {
                 if (d.int) continue;
                 const diff = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
@@ -1054,8 +1114,15 @@ function compareTwoRecordings(a, b) {
             }
         }
     }
-    return { compared, a_len: a.length, b_len: b.length, diffs,
-        max_abs_diff_u32: maxU32, samples, deterministic: diffs === 0 };
+    return {
+        compared,
+        a_len: a.length,
+        b_len: b.length,
+        diffs,
+        max_abs_diff_u32: maxU32,
+        samples,
+        deterministic: diffs === 0,
+    };
 }
 
 // ------------------------------------------------------------
@@ -1064,44 +1131,47 @@ function compareTwoRecordings(a, b) {
 
 rpc.exports = {
     pumpInstall: () => pump.install(),
-    pumpFrame: () => pump.frame(),
-    pumpReset: () => pump.reset(),
-    pumpPause: () => pump.pause(),
-    pumpResume: () => pump.resume(),
-    pumpStep: (n) => pump.step(n),
+    pumpFrame:   () => pump.frame(),
+    pumpReset:   () => pump.reset(),
+    pumpPause:   () => pump.pause(),
+    pumpResume:  () => pump.resume(),
+    pumpStep:    (n) => pump.step(n),
     pumpDbgStats: () => pump._dbgStats,
 
-    detectInstall: () => detectInstall(),
-    detectStart: () => detectStart(),
-    detectStop: () => detectStop(),
+    detectInstall:       () => detectInstall(),
+    detectStart:         () => detectStart(),
+    detectStop:          () => detectStop(),
     detectGetBodyFrames: () => detectGetBodyFrames(),
-    detectGetBodyHash: () => {
+    detectGetBodyHash:   () => {
         const out = [];
         for (const [f, h] of pump._detectBodyHash) out.push([f, h]);
         return out;
     },
     detectGetFrameNsTimeline: () => detectGetFrameNsTimeline(),
-    detectGetRngLog: () => detectGetRngLog(),
-    detectGetTimeLog: () => detectGetTimeLog(),
+    detectGetRngLog:     () => detectGetRngLog(),
+    detectGetTimeLog:    () => detectGetTimeLog(),
 
     replayJumpsOnly: (events, opts) => replayJumpsOnly(events, opts),
     compareTwoRecordings: (a, b) => compareTwoRecordings(a, b),
 
-    libcHooksInstall: () => { installLibcHooks();
-        return { rng: Array.from(_libcHooks.rng), time: Array.from(_libcHooks.time) }; },
-        libcHooksDetachRng: () => { detachRngHooks(); return true; },
-        libcHooksDetachTime: () => { detachTimeHooks(); return true; },
-        setFreezeTime: (enabled, ns) => {
-            pump._freezeTime = !!enabled;
-            pump._frozenNs = (ns != null) ? Number(ns) : null;
-            if (pump._freezeTime) installTimeHooks();
-            else detachTimeHooks();
-        },
-        setReplayRng: (obj) => {
-            const m = new Map();
-            for (const k of Object.keys(obj || {})) m.set(k, (obj[k] || []).slice());
-            pump._replayRng = m;
-            installRngHooks();
-        },
-        clearReplayRng: () => { pump._replayRng = null; },
+    libcHooksInstall: () => {
+        installLibcHooks();
+        return { rng: Array.from(_libcHooks.rng), time: Array.from(_libcHooks.time) };
+    },
+    libcHooksDetachRng:  () => { detachRngHooks();  return true; },
+    libcHooksDetachTime: () => { detachTimeHooks(); return true; },
+
+    setFreezeTime: (enabled, ns) => {
+        pump._freezeTime = !!enabled;
+        pump._frozenNs = (ns != null) ? Number(ns) : null;
+        if (pump._freezeTime) installTimeHooks();
+        else detachTimeHooks();
+    },
+    setReplayRng: (obj) => {
+        const m = new Map();
+        for (const k of Object.keys(obj || {})) m.set(k, (obj[k] || []).slice());
+        pump._replayRng = m;
+        installRngHooks();
+    },
+    clearReplayRng: () => { pump._replayRng = null; },
 };
