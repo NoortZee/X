@@ -1,0 +1,35 @@
+phantom:
+  host: "127.0.0.1"
+  port: 27183
+  connect_timeout_ms: 2000
+  ping_timeout_ms: 1000
+  sync_mode: "async"             # ← ключевое: клиент не ждёт доставки
+  tap_down_to_up_ms: 1           # 1 ms = мгновенный tap
+  post_tap_wait_ms: 0
+  slot: 0
+  reconnect_attempts: 1
+
+tap:
+  position: "explicit"
+  x: 540
+  y: 960
+
+orchestrator:
+  nominal_fps: 60
+  predict_lead_ms: 0
+  predict_margin_ms: 0
+  poll_interval_ms: 2
+  post_tap_check_ms: 150
+  retry_on_miss: true
+  retry_delay_ms: 50
+  fire_hard_deadline_s: 15
+  wall_timeout_s: 300
+  verify_body_frames: false
+
+frida:
+  device: "127.0.0.1:41337"
+  package: "com.zeptolab.thieves.google"
+
+logging:
+  level: "INFO"
+  log_dir: "logs"

@@ -1,0 +1,76 @@
+2026-11-02 14:02:54,242 INFO main: log → /home/noort/memory_replay/logs/run_20261102_140254.log
+2026-11-02 14:02:54,264 INFO main: attached by name: King of Thieves
+2026-11-02 14:02:54,269 INFO main: [agent] {'type': 'module_base', 'name': 'libthieves.so', 'base': '0x7f5014d02000', 'size': 35942400}
+2026-11-02 14:02:54,330 INFO main: [agent] {'type': 'pump_installed', 'mode': 'interceptor', 'func': '0x7f501631d7c0', 'offset': '0x161b7c0'}
+2026-11-02 14:02:54,371 INFO main: [agent] {'type': 'detect_installed', 'n': 3}
+2026-11-02 14:02:55,831 INFO main: === RECORD ===
+2026-11-02 14:02:56,303 INFO main: [agent] {'type': 'detect_started', 'frame': 0, 'wall': 1793617376303, 'ns': 1793617376303000000}
+2026-11-02 14:02:59,583 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 3276, 't_ns': 3276000000, 'name': 'unfreeze', 'thisPtr': '0x7f515f5c2728', 'snap': {'vt_rel': '0x2007ea8', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': -1884376400, 'ground_84': 32593}, 'vt': '0x7f5016d09ea8', 'vt_rel': '0x2007ea8'}}
+2026-11-02 14:02:59,655 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 3349, 't_ns': 3348999936, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:00,405 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 4099, 't_ns': 4098999808, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:02,157 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 5850, 't_ns': 5849999872, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:02,357 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 6050, 't_ns': 6049999872, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 2, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:03,406 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 7100, 't_ns': 7100000000, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:04,106 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 7800, 't_ns': 7800000000, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:05,990 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 9684, 't_ns': 9684000000, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:06,191 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 9884, 't_ns': 9884000000, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 2, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:06,990 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 10683, 't_ns': 10682999808, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 1, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:07,824 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 11517, 't_ns': 11516999936, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:08,324 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 12018, 't_ns': 12017999872, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:08,825 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 12518, 't_ns': 12517999872, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:09,540 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 13234, 't_ns': 13233999872, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:11,007 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 14701, 't_ns': 14700999936, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:12,508 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 16201, 't_ns': 16200999936, 'name': 'jump', 'thisPtr': '0x7f51400e45b0', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:03:16,484 INFO main: [agent] {'type': 'detect_stopped', 'count': 16, 'body_frames': 0, 'body_hashes': 0, 'time_samples': 0, 'rng_samples': 0, 'duration_ms': 20180, 'avg_fps': '0.0', 'jump_callsites': ['0x171d3f7']}
+2026-11-02 14:03:16,486 INFO main: saved replay: 16 events, 0 body_frames, anchor=unfreeze@0
+2026-11-02 14:04:08,570 INFO main: [agent] {'type': 'pump_already'}
+2026-11-02 14:04:08,570 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_unfreeze'}
+2026-11-02 14:04:08,570 INFO orch: playSetup: anchor=unfreeze@0 jumps=15 lead=0ms check=150ms retry=True
+2026-11-02 14:04:08,570 INFO orch: tap position: (540, 960)
+2026-11-02 14:04:12,342 INFO main: [agent] {'type': 'play_armed', 'anchor': 0, 'anchorRec': 0, 'kind': 'unfreeze', 'count': 15, 'body_verify': 0}
+2026-11-02 14:04:12,384 INFO orch: fire idx=0 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:12,386 INFO phantom: connected to Phantom 127.0.0.1:27183
+2026-11-02 14:04:13,549 WARNING orch: fired idx=0 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:13,752 WARNING orch: fired idx=0 MISSED target=0 taps=2 tap_ms=1004.66
+2026-11-02 14:04:13,753 INFO orch: fire idx=1 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:13,915 WARNING orch: fired idx=1 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:14,118 WARNING orch: fired idx=1 MISSED target=0 taps=2 tap_ms=2.24
+2026-11-02 14:04:14,119 INFO orch: fire idx=2 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:14,282 WARNING orch: fired idx=2 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:14,485 WARNING orch: fired idx=2 MISSED target=0 taps=2 tap_ms=2.23
+2026-11-02 14:04:14,486 INFO orch: fire idx=3 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:14,648 WARNING orch: fired idx=3 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:14,852 WARNING orch: fired idx=3 MISSED target=0 taps=2 tap_ms=2.22
+2026-11-02 14:04:14,853 INFO orch: fire idx=4 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:15,016 WARNING orch: fired idx=4 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:15,219 WARNING orch: fired idx=4 MISSED target=0 taps=2 tap_ms=2.24
+2026-11-02 14:04:15,220 INFO orch: fire idx=5 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:15,382 WARNING orch: fired idx=5 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:15,585 WARNING orch: fired idx=5 MISSED target=0 taps=2 tap_ms=2.23
+2026-11-02 14:04:15,586 INFO orch: fire idx=6 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:15,749 WARNING orch: fired idx=6 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:15,952 WARNING orch: fired idx=6 MISSED target=0 taps=2 tap_ms=2.23
+2026-11-02 14:04:15,953 INFO orch: fire idx=7 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:16,116 WARNING orch: fired idx=7 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:16,319 WARNING orch: fired idx=7 MISSED target=0 taps=2 tap_ms=2.22
+2026-11-02 14:04:16,320 INFO orch: fire idx=8 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:16,482 WARNING orch: fired idx=8 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:16,686 WARNING orch: fired idx=8 MISSED target=0 taps=2 tap_ms=2.24
+2026-11-02 14:04:16,687 INFO orch: fire idx=9 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:16,849 WARNING orch: fired idx=9 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:17,052 WARNING orch: fired idx=9 MISSED target=0 taps=2 tap_ms=2.23
+2026-11-02 14:04:17,053 INFO orch: fire idx=10 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:17,216 WARNING orch: fired idx=10 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:17,419 WARNING orch: fired idx=10 MISSED target=0 taps=2 tap_ms=2.22
+2026-11-02 14:04:17,420 INFO orch: fire idx=11 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:17,583 WARNING orch: fired idx=11 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:17,786 WARNING orch: fired idx=11 MISSED target=0 taps=2 tap_ms=2.23
+2026-11-02 14:04:17,787 INFO orch: fire idx=12 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:17,949 WARNING orch: fired idx=12 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:18,152 WARNING orch: fired idx=12 MISSED target=0 taps=2 tap_ms=2.24
+2026-11-02 14:04:18,153 INFO orch: fire idx=13 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:18,315 WARNING orch: fired idx=13 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:18,518 WARNING orch: fired idx=13 MISSED target=0 taps=2 tap_ms=2.23
+2026-11-02 14:04:18,519 INFO orch: fire idx=14 cur=0 target=0 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:04:18,682 WARNING orch: fired idx=14 attempt=1 no jumpFn, retry in 50ms
+2026-11-02 14:04:18,885 WARNING orch: fired idx=14 MISSED target=0 taps=2 tap_ms=2.22

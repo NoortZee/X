@@ -1,17 +1,24 @@
 // agent.js — TAS agent for King of Thieves x86_64
-// v4.4: Interceptor-based pump (60 fps).
-//  - AOB signature resolver → fallback offset
-//  - Structural isValidHeroStrict (version-independent, без typeinfo)
-//  - Fix: onUnfreeze для first_body_frame сразу переходит в playing
-//  - Fix: _detectBodyFrames.push содержит frame
-// ------------------------------------------------------------
-
+// v5.4 — FPS-optimized hot path:
+//        * lazy install (main.py вызывает pump_install только в record/play)
+//        * readBodyState/heroSnapshot: 1 try/catch, без findRangeByAddress
+//        * onLeave: fast path + _ringActive флаг
+//        * heroBodyHash: 1/5 кадров (было каждый)
+//        * _onFrameRecordTimeline: 1/5 кадров
+//        * strict FRAME_FUNC resolver (AOB mismatch → fallback)
+//        * JUMP monitor + rpc pumpJumpCount/pumpJumpLogSince
 'use strict';
 
 const MODULE_NAME = 'libthieves.so';
-const libModule = Process.findModuleByName(MODULE_NAME);
+
+let libModule = null;
+for (let i = 0; i < 100; i++) {
+    libModule = Process.findModuleByName(MODULE_NAME);
+    if (libModule !== null) break;
+    Thread.sleep(0.1);
+}
 if (libModule === null) {
-    send({ type: 'fatal', msg: MODULE_NAME + ' not loaded' });
+    send({ type: 'fatal', msg: MODULE_NAME + ' not loaded after 10s' });
     throw new Error(MODULE_NAME + ' not loaded');
 }
 
@@ -21,31 +28,25 @@ send({ type: 'module_base', name: MODULE_NAME,
     base: MODULE_BASE.toString(), size: MODULE_SIZE });
 
 // ------------------------------------------------------------
-// Address resolver: AOB → fallback offset
+// Address resolver
 // ------------------------------------------------------------
-
 const SIGS = {
     FRAME_FUNC:      '48 83 7F 20 00 0F 84 ?? ?? ?? ?? 55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18',
     JUMP:            '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 84 C0 74 ?? 48 89 DF 48 83 C4 08 5B 5D E9 ?? ?? ?? ??',
     UNFREEZE:        '55 48 89 E5 41 57 41 56 41 54 53 48 89 FB 44 8B B7 B4 00 00 00 F3 0F 10 05 ?? ?? ?? ??',
     UNFREEZE_ATTACK: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 80 BB 48 01 00 00 00 75 ?? 48 8B BB C8 00 00 00',
 };
-
 const FALLBACK = {
-    FRAME_FUNC:      0x1612A20,
-    JUMP:            0x1611F00,
-    UNFREEZE:        0x13F92C0,
-    UNFREEZE_ATTACK: 0x13DA8B0,
+    FRAME_FUNC: 0x1612A20, JUMP: 0x1611F00,
+    UNFREEZE:   0x13F92C0, UNFREEZE_ATTACK: 0x13DA8B0,
 };
 
 const _resolutionLog = [];
-
 function isReadablePtr(p) {
     if (p === null || p === undefined) return false;
     if (p.isNull && p.isNull()) return false;
     return Process.findRangeByAddress(p) !== null;
 }
-
 function _scanModule(sig) {
     const ranges = Process.enumerateRanges('r-x');
     for (const r of ranges) {
@@ -58,57 +59,68 @@ function _scanModule(sig) {
     }
     return null;
 }
-
 function _resolveBySig(name) {
     const sig = SIGS[name];
     if (!sig) return null;
     const addr = _scanModule(sig);
-    if (addr) {
-        _resolutionLog.push({
-            name, method: 'AOB', addr: addr.toString(),
-                            offset: addr.sub(MODULE_BASE).toString()
-        });
-    }
+    if (addr) _resolutionLog.push({ name, method: 'AOB',
+        addr: addr.toString(), offset: addr.sub(MODULE_BASE).toString() });
     return addr;
 }
-
 function _resolveByFallback(name) {
     const off = FALLBACK[name];
     if (off === undefined) return null;
     const addr = MODULE_BASE.add(off);
-    _resolutionLog.push({
-        name, method: 'FALLBACK', addr: addr.toString(),
-                        offset: '0x' + off.toString(16)
-    });
+    _resolutionLog.push({ name, method: 'FALLBACK',
+        addr: addr.toString(), offset: '0x' + off.toString(16) });
     return addr;
 }
+function _resolveSimple(name) { return _resolveBySig(name) || _resolveByFallback(name); }
 
-function _resolveSimple(name) {
-    return _resolveBySig(name) || _resolveByFallback(name);
+// FRAME_FUNC strict: если AOB offset != fallback, значит скан попал в похожую
+// функцию → принудительно используем fallback offset.
+function _resolveFrameFuncStrict() {
+    const expectedOffset = FALLBACK['FRAME_FUNC'];
+    const aob = _resolveBySig('FRAME_FUNC');
+    if (aob) {
+        const off = aob.sub(MODULE_BASE);
+        if (off.toInt32() !== expectedOffset) {
+            send({
+                type: 'dbg',
+                where: 'resolver',
+                msg: 'FRAME_FUNC AOB mismatch → use fallback',
+                aob_offset: '0x' + off.toString(16),
+                 expected_offset: '0x' + expectedOffset.toString(16),
+            });
+            _resolutionLog.pop();
+            const fb = MODULE_BASE.add(expectedOffset);
+            _resolutionLog.push({
+                name: 'FRAME_FUNC',
+                method: 'AOB_REJECTED_FALLBACK',
+                addr: fb.toString(),
+                                offset: '0x' + expectedOffset.toString(16),
+            });
+            return fb;
+        }
+        return aob;
+    }
+    return _resolveByFallback('FRAME_FUNC');
 }
 
-const FRAME_FUNC           = _resolveSimple('FRAME_FUNC');
+const FRAME_FUNC           = _resolveFrameFuncStrict();
 const ADDR_JUMP            = _resolveSimple('JUMP');
 const ADDR_UNFREEZE        = _resolveSimple('UNFREEZE');
 const ADDR_UNFREEZE_ATTACK = _resolveSimple('UNFREEZE_ATTACK');
+const ADDR = { UNFREEZE: ADDR_UNFREEZE, UNFREEZE_ATTACK: ADDR_UNFREEZE_ATTACK, JUMP: ADDR_JUMP };
 
-const ADDR = {
-    UNFREEZE:        ADDR_UNFREEZE,
-    UNFREEZE_ATTACK: ADDR_UNFREEZE_ATTACK,
-    JUMP:            ADDR_JUMP,
-};
-
-send({
-    type: 'resolved',
-    log: _resolutionLog,
+send({ type: 'resolved', log: _resolutionLog,
     FRAME_FUNC: FRAME_FUNC.toString(),
      JUMP: ADDR.JUMP.toString(),
      UNFREEZE: ADDR.UNFREEZE.toString(),
-     UNFREEZE_ATTACK: ADDR.UNFREEZE_ATTACK.toString()
-});
+     UNFREEZE_ATTACK: ADDR.UNFREEZE_ATTACK.toString() });
 
 // ------------------------------------------------------------
-// Frida 17 API shim
+// Frida 17 export lookup shim
 // ------------------------------------------------------------
 function findExport(moduleName, exportName) {
     try {
@@ -122,18 +134,15 @@ function findExport(moduleName, exportName) {
 // ------------------------------------------------------------
 // Bit helpers
 // ------------------------------------------------------------
-
 const _f32buf  = new ArrayBuffer(4);
 const _f32view = new Float32Array(_f32buf);
 const _u32view = new Uint32Array(_f32buf);
-
 function f32Bits(x) {
     _f32view[0] = x;
     let u = _u32view[0] >>> 0;
     if (u === 0x80000000) u = 0;
     return u;
 }
-
 function fnv1a32(bytes) {
     let h = 0x811c9dc5;
     for (let i = 0; i < bytes.length; i++) {
@@ -146,7 +155,6 @@ function fnv1a32(bytes) {
 // ------------------------------------------------------------
 // Time
 // ------------------------------------------------------------
-
 const CLOCK_MONOTONIC = 1;
 const _SYS_clock_gettime_x86_64 = 228;
 const _tsBuf = Memory.alloc(16);
@@ -155,1023 +163,824 @@ try {
     const sa = findExport('libc.so', 'syscall');
     if (sa) _syscallFn = new NativeFunction(sa, 'long', ['long', '...']);
 } catch (_) {}
-
 function nowNs() {
     if (_syscallFn) {
         try {
             _syscallFn(_SYS_clock_gettime_x86_64, CLOCK_MONOTONIC, _tsBuf);
-            const sec  = _tsBuf.readS64();
-            const nsec = _tsBuf.add(8).readS64();
-            return Number(sec) * 1e9 + Number(nsec);
+            const s = _tsBuf.readS64(), n = _tsBuf.add(8).readS64();
+            return Number(s) * 1e9 + Number(n);
         } catch (_) {}
     }
     return Date.now() * 1e6;
 }
 
 // ------------------------------------------------------------
-// Body state
+// Body state — hot path (1 try/catch, без findRangeByAddress)
 // ------------------------------------------------------------
-
 function _nz(v) { return v === 0 ? 0 : v; }
+const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
+    VX: 0x40, VY: 0x44, AV: 0x48, GRAVITY: 0xA8, BODY_SIZE: 0x200 };
+    const BODY_FIELDS = ['px', 'py', 'ang', 'vx', 'vy', 'av'];
 
-const BODY = {
-    XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
-    VX: 0x40, VY: 0x44, AV: 0x48,
-    GRAVITY: 0xA8, BODY_SIZE: 0x200,
-};
+    function readBodyState(bodyPtr) {
+        if (!bodyPtr || bodyPtr.isNull()) return null;
+        try {
+            const px  = bodyPtr.add(BODY.XF_PX).readFloat();
+            const py  = bodyPtr.add(BODY.XF_PY).readFloat();
+            const ang = bodyPtr.add(BODY.SW_A).readFloat();
+            const vx  = bodyPtr.add(BODY.VX).readFloat();
+            const vy  = bodyPtr.add(BODY.VY).readFloat();
+            const av  = bodyPtr.add(BODY.AV).readFloat();
+            if (!isFinite(px) || !isFinite(py) || !isFinite(ang)
+                || !isFinite(vx) || !isFinite(vy) || !isFinite(av)) return null;
+            return { px: _nz(px), py: _nz(py), ang: _nz(ang),
+                vx: _nz(vx), vy: _nz(vy), av: _nz(av) };
+        } catch (_) { return null; }
+    }
+    function heroBodyBytes(bodyPtr) {
+        if (!bodyPtr || bodyPtr.isNull()) return null;
+        try {
+            const buf = bodyPtr.readByteArray(BODY.BODY_SIZE);
+            return buf ? new Uint8Array(buf) : null;
+        } catch (_) { return null; }
+    }
+    function heroBodyHash(bodyPtr) {
+        const b = heroBodyBytes(bodyPtr);
+        return b ? fnv1a32(b) : null;
+    }
+    function isValidHeroStrict(p) {
+        if (!p || p.isNull() || !isReadablePtr(p)) return false;
+        try { if (!p.and(7).isNull()) return false; } catch (_) { return false; }
+        let body; try { body = p.add(0x20).readPointer(); } catch (_) { return false; }
+        if (!isReadablePtr(body)) return false;
+        try { if (!body.and(7).isNull()) return false; } catch (_) { return false; }
+        let bt; try { bt = body.readU32(); } catch (_) { return false; }
+        if (bt !== 2) return false;
+        let grav; try { grav = body.add(BODY.GRAVITY).readFloat(); } catch (_) { return false; }
+        return isFinite(grav) && grav > -100 && grav < 100;
+    }
+    function heroSnapshot(p) {
+        if (!p || p.isNull()) return { reason: 'nullptr' };
+        try {
+            return {
+                vt_rel:      p.readPointer().sub(MODULE_BASE).toString(),
+                state_a0:    p.add(0xA0).readS32(),
+                cooldown_b0: p.add(0xB0).readS32(),
+                ground_80:   p.add(0x80).readS32(),
+                ground_84:   p.add(0x84).readS32(),
+            };
+        } catch (_) {
+            return { reason: 'unreadable' };
+        }
+    }
+    function pickFields(o) {
+        const out = {};
+        for (const k of BODY_FIELDS) out[k] = o[k];
+        for (const k of ['a0', 'b0', 'g80', 'g84']) if (k in o) out[k] = o[k];
+        return out;
+    }
+    function compareBodyBit(actual, expected) {
+        const diffs = [];
+        for (const k of BODY_FIELDS) {
+            if (actual[k] === undefined || expected[k] === undefined) continue;
+            const ab = f32Bits(actual[k]), eb = f32Bits(expected[k]);
+            if (ab !== eb) {
+                if ((ab === 0 && eb === 0x80000000) || (ab === 0x80000000 && eb === 0)) continue;
+                diffs.push({ field: k, actual: actual[k], expected: expected[k], aU32: ab, eU32: eb });
+            }
+        }
+        for (const k of ['a0', 'b0', 'g80', 'g84']) {
+            if (actual[k] === undefined || expected[k] === undefined) continue;
+            if (actual[k] !== expected[k])
+                diffs.push({ field: k, actual: actual[k], expected: expected[k], int: true });
+        }
+        return diffs.length ? { diffs } : null;
+    }
 
-const BODY_FIELDS = ['px', 'py', 'ang', 'vx', 'vy', 'av'];
+    // ------------------------------------------------------------
+    // Libc hooks (RNG + TIME) — не в хот-пути, оставляем как есть
+    // ------------------------------------------------------------
+    const _libcHooks = {
+        rng: new Set(), time: new Set(),
+        rngInstalled: false, timeInstalled: false,
+        rngHandles: [], timeHandles: [],
+    };
 
-function readBodyState(bodyPtr) {
-    if (!bodyPtr || bodyPtr.isNull()) return null;
-    if (!Process.findRangeByAddress(bodyPtr)) return null;
-    try {
-        const px  = bodyPtr.add(BODY.XF_PX).readFloat();
-        const py  = bodyPtr.add(BODY.XF_PY).readFloat();
-        const ang = bodyPtr.add(BODY.SW_A).readFloat();
-        const vx  = bodyPtr.add(BODY.VX).readFloat();
-        const vy  = bodyPtr.add(BODY.VY).readFloat();
-        const av  = bodyPtr.add(BODY.AV).readFloat();
-        if (!isFinite(px)  || Math.abs(px)  > 1e5) return null;
-        if (!isFinite(py)  || Math.abs(py)  > 1e5) return null;
-        if (!isFinite(ang) || Math.abs(ang) > 1e3) return null;
-        if (!isFinite(vx)  || Math.abs(vx)  > 1e4) return null;
-        if (!isFinite(vy)  || Math.abs(vy)  > 1e4) return null;
-        if (!isFinite(av)  || Math.abs(av)  > 1e4) return null;
-        return {
-            px: _nz(px), py: _nz(py), ang: _nz(ang),
-            vx: _nz(vx), vy: _nz(vy), av: _nz(av),
-        };
-    } catch (_) { return null; }
-}
-
-function heroBodyBytes(bodyPtr) {
-    if (!bodyPtr || bodyPtr.isNull() || !Process.findRangeByAddress(bodyPtr)) return null;
-    try {
-        const buf = bodyPtr.readByteArray(BODY.BODY_SIZE);
-        if (!buf) return null;
-        return new Uint8Array(buf);
-    } catch (_) { return null; }
-}
-
-function heroBodyHash(bodyPtr) {
-    const b = heroBodyBytes(bodyPtr);
-    if (!b) return null;
-    return fnv1a32(b);
-}
-
-// ------------------------------------------------------------
-// Hero strict check — structural, version-independent.
-// FRAME_FUNC == HeroBody::update, значит args[0] уже HeroBody*.
-// Проверяем только, что указатель живой (не стал мусором между
-// вызовами) — тело читается и гравитация в разумных пределах.
-// ------------------------------------------------------------
-
-function isValidHeroStrict(p) {
-    if (!p || p.isNull() || !isReadablePtr(p)) return false;
-    try { if (!p.and(7).isNull()) return false; } catch (_) { return false; }
-
-    let body;
-    try { body = p.add(0x20).readPointer(); } catch (_) { return false; }
-    if (!isReadablePtr(body)) return false;
-    try { if (!body.and(7).isNull()) return false; } catch (_) { return false; }
-
-    let bt;
-    try { bt = body.readU32(); } catch (_) { return false; }
-    if (bt !== 2) return false;
-
-    let grav;
-    try { grav = body.add(BODY.GRAVITY).readFloat(); } catch (_) { return false; }
-    if (!isFinite(grav) || grav < -100 || grav > 100) return false;
-
-    return true;
-}
-
-function heroSnapshot(p) {
-    const s = {};
-    if (!p || !isReadablePtr(p)) { s.reason = 'unmapped'; return s; }
-    try { s.vt_rel      = p.readPointer().sub(MODULE_BASE).toString(); } catch (_) { s.vt_rel = 'err'; }
-    try { s.state_a0    = p.add(0xA0).readS32(); } catch (_) { s.state_a0 = 'err'; }
-    try { s.cooldown_b0 = p.add(0xB0).readS32(); } catch (_) { s.cooldown_b0 = 'err'; }
-    try { s.ground_80   = p.add(0x80).readS32(); } catch (_) { s.ground_80 = 'err'; }
-    try { s.ground_84   = p.add(0x84).readS32(); } catch (_) { s.ground_84 = 'err'; }
-    return s;
-}
-
-function isEffectiveJump(snap) {
-    if (!snap) return false;
-    if (typeof snap.state_a0 !== 'number' || (snap.state_a0 & 7) !== 0) return false;
-    const g = (typeof snap.ground_80 === 'number' ? snap.ground_80 : 0)
-    + (typeof snap.ground_84 === 'number' ? snap.ground_84 : 0);
-    return g > 0;
-}
-
-// ------------------------------------------------------------
-// Libc hooks (RNG + TIME)
-// ------------------------------------------------------------
-
-const _libcHooks = {
-    rng: new Set(), time: new Set(),
-    rngInstalled: false, timeInstalled: false,
-    rngHandles: [], timeHandles: [],
-};
-
-function installRngHooks() {
-    if (_libcHooks.rngInstalled) return;
-    _libcHooks.rngInstalled = true;
-    for (const name of ['rand', 'random', 'lrand48', 'mrand48', 'drand48']) {
-        const a = findExport('libc.so', name);
-        if (!a) continue;
-        _libcHooks.rng.add(name);
-        const h = Interceptor.attach(a, {
-            onEnter() { this._fn = name; },
-                                     onLeave(ret) {
-                                         if (pump._recordRng) {
-                                             try { pump._rngLog.push({ f: pump._frame, fn: name, v: ret.toUInt32() }); } catch (_) {}
-                                         }
-                                         if (pump._replayRng) {
-                                             const q = pump._replayRng.get(name);
-                                             if (q && q.length > 0) {
-                                                 const v = q.shift();
-                                                 try { ret.replace(ptr(v)); } catch (_) {}
+    function installRngHooks() {
+        if (_libcHooks.rngInstalled) return;
+        _libcHooks.rngInstalled = true;
+        for (const name of ['rand', 'random', 'lrand48', 'mrand48', 'drand48']) {
+            const a = findExport('libc.so', name);
+            if (!a) continue;
+            _libcHooks.rng.add(name);
+            const h = Interceptor.attach(a, {
+                onEnter() { this._fn = name; },
+                                         onLeave(ret) {
+                                             if (pump._recordRng) {
+                                                 try { pump._rngLog.push({ f: pump._frame, fn: name, v: ret.toUInt32() }); } catch (_) {}
+                                             }
+                                             if (pump._replayRng) {
+                                                 const q = pump._replayRng.get(name);
+                                                 if (q && q.length > 0) {
+                                                     const v = q.shift();
+                                                     try { ret.replace(ptr(v)); } catch (_) {}
+                                                 }
                                              }
                                          }
-                                     }
-        });
-        _libcHooks.rngHandles.push(h);
+            });
+            _libcHooks.rngHandles.push(h);
+        }
     }
-}
 
-function installTimeHooks() {
-    if (_libcHooks.timeInstalled) return;
-    _libcHooks.timeInstalled = true;
-    for (const name of ['clock_gettime', 'gettimeofday', 'clock_gettime64']) {
-        const a = findExport('libc.so', name);
-        if (!a) continue;
-        _libcHooks.time.add(name);
-        const h = Interceptor.attach(a, {
-            onEnter(args) {
-                this._ts  = args[name === 'gettimeofday' ? 0 : 1];
-                this._clk = name === 'gettimeofday' ? -1 : args[0].toInt32();
-                this._fn  = name;
-            },
-            onLeave(ret) {
-                if (pump._recordTime && this._ts && isReadablePtr(this._ts)) {
-                    try {
-                        let ns;
-                        if (this._fn === 'gettimeofday') {
-                            const s  = this._ts.readS64();
-                            const us = this._ts.add(8).readS64();
-                            ns = Number(s) * 1e9 + Number(us) * 1000;
-                        } else {
-                            const s      = this._ts.readS64();
-                            const nsPart = this._ts.add(8).readS64();
-                            ns = Number(s) * 1e9 + Number(nsPart);
-                        }
-                        pump._timeLog.push({ f: pump._frame, fn: this._fn, clk: this._clk, ns });
-                    } catch (_) {}
-                }
-                if (pump._freezeTime && this._ts && isReadablePtr(this._ts)) {
-                    try {
-                        const ns = pump._frozenNs;
-                        if (this._fn === 'gettimeofday') {
-                            this._ts.writeS64(Math.floor(ns / 1e9));
-                            this._ts.add(8).writeS64(Math.floor((ns % 1e9) / 1000));
-                        } else {
-                            this._ts.writeS64(Math.floor(ns / 1e9));
-                            this._ts.add(8).writeS64(ns % 1e9);
-                        }
-                        ret.replace(0);
-                    } catch (_) {}
-                }
-            }
-        });
-        _libcHooks.timeHandles.push(h);
-    }
-}
-
-function detachRngHooks() {
-    for (const h of _libcHooks.rngHandles) { try { h.detach(); } catch (_) {} }
-    _libcHooks.rngHandles = [];
-    _libcHooks.rngInstalled = false;
-    _libcHooks.rng.clear();
-}
-
-function detachTimeHooks() {
-    for (const h of _libcHooks.timeHandles) { try { h.detach(); } catch (_) {} }
-    _libcHooks.timeHandles = [];
-    _libcHooks.timeInstalled = false;
-    _libcHooks.time.clear();
-}
-
-function installLibcHooks() {
-    installRngHooks();
-    installTimeHooks();
-}
-
-// ------------------------------------------------------------
-// Pump (Interceptor)
-// ------------------------------------------------------------
-
-const pump = {
-    _frame: 0,
-    _paused: false,
-    _budget: -1,
-    _installed: false,
-
-    _onFrame: null,
-    _onFirstUpdate: null,
-    _onLeave: null,
-
-    _lastHero: null,
-    _lastHeroFrame: null,
-
-    _detectBodyRecord: false,
-    _detectBodyFrames: [],
-    _detectBodyHash: new Map(),
-
-    _playbackBodyMap: null,
-    _playbackAnchorFrame: null,
-    _playbackAnchorRecFrame: null,
-    _replayBodyFrames: [],
-    _divergences: [],
-
-    _ring: [],
-    _ringMax: 60,
-
-    _recordTime: false,
-    _timeLog: [],
-    _frameNsTimeline: new Map(),
-    _recordRng: false,
-    _rngLog: [],
-
-    _replayRng: null,
-    _freezeTime: false,
-    _frozenNs: null,
-
-    _dbgStats: { enter: 0, leave: 0, nullBody: 0, readOk: 0 },
-
-    install() {
-        if (pump._installed) { send({ type: 'pump_already' }); return; }
-        pump._paused = false;
-        pump._budget = -1;
-        pump._frame = 0;
-
-        Interceptor.attach(FRAME_FUNC, {
-            onEnter(args) {
-                this._hero = args[0];
-
-                let guard = 0;
-                while (pump._paused || pump._budget === 0) {
-                    Thread.sleep(0.001);
-                    if (++guard > 60000) break;
-                }
-                if (pump._budget > 0) pump._budget--;
-                pump._frame++;
-                pump._dbgStats.enter++;
-
-                try {
-                    pump._lastHero = args[0];
-                    pump._lastHeroFrame = pump._frame;
-                } catch (_) {}
-
-                if (detectRec && detectWaitFirstHeroUpdate) {
-                    try {
-                        if (isValidHeroStrict(args[0])) {
-                            detectWaitFirstHeroUpdate = false;
-                            const ev = {
-                                frame: pump._frame,
-                                t_ms: detectStartWall !== null ? (Date.now() - detectStartWall) : 0,
-                           t_ns: detectStartNsVal !== null ? (nowNs() - detectStartNsVal) : 0,
-                           name: 'first_hero_update',
-                           thisPtr: args[0].toString(),
-                           snap: heroSnapshot(args[0]),
-                            };
-                            detectEvents.push(ev);
-                            send({ type: 'event', ev });
-                        }
-                    } catch (_) {}
-                }
-
-                if (pump._onFirstUpdate) {
-                    try { pump._onFirstUpdate(args[0], pump._frame); } catch (_) {}
-                }
-                if (pump._onFrame) {
-                    try { pump._onFrame(pump._frame); }
-                    catch (e) { send({ type: 'onframe_error', msg: String(e) }); }
-                }
-            },
-
-            onLeave(_retval) {
-                const hero = this._hero;
-                pump._dbgStats.leave++;
-                if (!hero || !isReadablePtr(hero)) return;
-
-                let body;
-                try { body = hero.add(0x20).readPointer(); } catch (_) { return; }
-                if (!isReadablePtr(body)) { pump._dbgStats.nullBody++; return; }
-
-                const rec = readBodyState(body);
-                if (!rec) return;
-                pump._dbgStats.readOk++;
-                rec.frame = pump._frame;
-
-                const snap = heroSnapshot(hero);
-                const extra = {
-                    a0: snap.state_a0, b0: snap.cooldown_b0,
-                    g80: snap.ground_80, g84: snap.ground_84,
-                };
-
-                pump._ring.push({
-                    frame: pump._frame,
-                    px: rec.px, py: rec.py, ang: rec.ang,
-                    vx: rec.vx, vy: rec.vy, av: rec.av,
-                    a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
-                });
-                if (pump._ring.length > pump._ringMax) pump._ring.shift();
-
-                if (pump._detectBodyRecord) {
-                    pump._detectBodyFrames.push({
-                        frame: pump._frame,
-                        px: rec.px, py: rec.py, ang: rec.ang,
-                        vx: rec.vx, vy: rec.vy, av: rec.av,
-                        a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
-                    });
-                    const h = heroBodyHash(body);
-                    if (h !== null) pump._detectBodyHash.set(pump._frame, h);
-                }
-
-                if (pump._playbackBodyMap && pump._playbackAnchorFrame !== null) {
-                    const recFrame = pump._playbackAnchorRecFrame
-                    + (pump._frame - pump._playbackAnchorFrame);
-                    const expected = pump._playbackBodyMap.get(recFrame);
-                    const actual = {
-                        px: rec.px, py: rec.py, ang: rec.ang,
-                        vx: rec.vx, vy: rec.vy, av: rec.av,
-                        a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
-                    };
-                    pump._replayBodyFrames.push({ frame: pump._frame, ...actual });
-                    if (expected) {
-                        const div = compareBodyBit(actual, expected);
-                        if (div) {
-                            div.f = pump._frame;
-                            div.recFrame = recFrame;
-                            div.expected = pickFields(expected);
-                            div.actual = pickFields(actual);
-                            pump._divergences.push(div);
-                        }
+    function installTimeHooks() {
+        if (_libcHooks.timeInstalled) return;
+        _libcHooks.timeInstalled = true;
+        for (const name of ['clock_gettime', 'gettimeofday', 'clock_gettime64']) {
+            const a = findExport('libc.so', name);
+            if (!a) continue;
+            _libcHooks.time.add(name);
+            const h = Interceptor.attach(a, {
+                onEnter(args) {
+                    this._ts  = args[name === 'gettimeofday' ? 0 : 1];
+                    this._clk = name === 'gettimeofday' ? -1 : args[0].toInt32();
+                    this._fn  = name;
+                },
+                onLeave(ret) {
+                    if (pump._recordTime && this._ts && isReadablePtr(this._ts)) {
+                        try {
+                            let ns;
+                            if (this._fn === 'gettimeofday') {
+                                const s = this._ts.readS64();
+                                const us = this._ts.add(8).readS64();
+                                ns = Number(s) * 1e9 + Number(us) * 1000;
+                            } else {
+                                const s = this._ts.readS64();
+                                const nsPart = this._ts.add(8).readS64();
+                                ns = Number(s) * 1e9 + Number(nsPart);
+                            }
+                            pump._timeLog.push({ f: pump._frame, fn: this._fn, clk: this._clk, ns });
+                        } catch (_) {}
+                    }
+                    if (pump._freezeTime && this._ts && isReadablePtr(this._ts)) {
+                        try {
+                            const ns = pump._frozenNs;
+                            if (this._fn === 'gettimeofday') {
+                                this._ts.writeS64(Math.floor(ns / 1e9));
+                                this._ts.add(8).writeS64(Math.floor((ns % 1e9) / 1000));
+                            } else {
+                                this._ts.writeS64(Math.floor(ns / 1e9));
+                                this._ts.add(8).writeS64(ns % 1e9);
+                            }
+                            ret.replace(0);
+                        } catch (_) {}
                     }
                 }
-
-                if (pump._onLeave) {
-                    try { pump._onLeave(pump._frame, body, rec, extra); } catch (_) {}
-                }
-            }
-        });
-
-        pump._installed = true;
-        send({ type: 'pump_installed', mode: 'interceptor',
-            func: FRAME_FUNC.toString(),
-             offset: FRAME_FUNC.sub(MODULE_BASE).toString() });
-    },
-
-    resetHero() { pump._lastHero = null; pump._lastHeroFrame = null; },
-    reset()     { pump._frame = 0; },
-    frame()     { return pump._frame; },
-    pause()     { pump._paused = true; },
-    resume()    { pump._paused = false; pump._budget = -1; },
-    step(n)     { pump._paused = false; pump._budget = n; },
-
-    setOnFrame(fn)       { pump._onFrame = fn; },
-    clearOnFrame()       { pump._onFrame = null; },
-    setOnFirstUpdate(fn) { pump._onFirstUpdate = fn; },
-    clearOnFirstUpdate() { pump._onFirstUpdate = null; },
-    setOnLeave(fn)       { pump._onLeave = fn; },
-    clearOnLeave()       { pump._onLeave = null; },
-
-    detectBodyStart() {
-        pump._detectBodyFrames = [];
-        pump._detectBodyHash = new Map();
-        pump._detectBodyRecord = true;
-    },
-    detectBodyStop()  { pump._detectBodyRecord = false; },
-    detectBodyGet()   { return pump._detectBodyFrames; },
-    detectBodyHashGet() { return pump._detectBodyHash; },
-
-    setPlaybackBody(framesArray) {
-        if (!framesArray || !framesArray.length) { pump._playbackBodyMap = null; return 0; }
-        const m = new Map();
-        for (const r of framesArray) m.set(r.frame, r);
-        pump._playbackBodyMap = m;
-        pump._replayBodyFrames = [];
-        pump._divergences = [];
-        return m.size;
-    },
-    setPlaybackAnchor(playbackFrame, recFrame) {
-        pump._playbackAnchorFrame = playbackFrame;
-        pump._playbackAnchorRecFrame = recFrame;
-    },
-    clearPlaybackBody() {
-        pump._playbackBodyMap = null;
-        pump._playbackAnchorFrame = null;
-        pump._playbackAnchorRecFrame = null;
-        pump._replayRng = null;
-    },
-};
-
-// ------------------------------------------------------------
-// Compare helpers
-// ------------------------------------------------------------
-
-function pickFields(obj) {
-    const out = {};
-    for (const k of BODY_FIELDS) out[k] = obj[k];
-    for (const k of ['a0', 'b0', 'g80', 'g84']) if (k in obj) out[k] = obj[k];
-    return out;
-}
-
-function compareBodyBit(actual, expected) {
-    const diffs = [];
-    for (const k of BODY_FIELDS) {
-        if (actual[k] === undefined || expected[k] === undefined) continue;
-        const ab = f32Bits(actual[k]);
-        const eb = f32Bits(expected[k]);
-        if (ab !== eb) {
-            if ((ab === 0 && eb === 0x80000000) || (ab === 0x80000000 && eb === 0)) continue;
-            diffs.push({ field: k, actual: actual[k], expected: expected[k], aU32: ab, eU32: eb });
+            });
+            _libcHooks.timeHandles.push(h);
         }
     }
-    for (const k of ['a0', 'b0', 'g80', 'g84']) {
-        if (actual[k] === undefined || expected[k] === undefined) continue;
-        if (actual[k] !== expected[k]) {
-            diffs.push({ field: k, actual: actual[k], expected: expected[k], int: true });
-        }
+
+    function detachRngHooks() {
+        for (const h of _libcHooks.rngHandles) { try { h.detach(); } catch (_) {} }
+        _libcHooks.rngHandles = [];
+        _libcHooks.rngInstalled = false;
+        _libcHooks.rng.clear();
     }
-    return diffs.length ? { diffs } : null;
-}
+    function detachTimeHooks() {
+        for (const h of _libcHooks.timeHandles) { try { h.detach(); } catch (_) {} }
+        _libcHooks.timeHandles = [];
+        _libcHooks.timeInstalled = false;
+        _libcHooks.time.clear();
+    }
+    function installLibcHooks() { installRngHooks(); installTimeHooks(); }
 
-// ------------------------------------------------------------
-// Detect
-// ------------------------------------------------------------
+    // ------------------------------------------------------------
+    // Frame gate (в async не используется, оставлен для fallback)
+    // ------------------------------------------------------------
+    const gate = {
+        armed: false, target: 0, waiting: false, released: false,
+        enteredAtFrame: null, releasedAtFrame: null, waitMs: 0,
+    };
 
-let detectRec = false;
-let detectEvents = [];
-let detectStartWall = null;
-let detectStartNsVal = null;
-let detectWaitFirstHeroUpdate = false;
-let _jumpCallSites = new Set();
-
-function _onFrameRecordTimeline(f) {
-    if (!pump._recordTime) return;
-    if (detectStartNsVal === null) return;
-    pump._frameNsTimeline.set(f, nowNs() - detectStartNsVal);
-}
-
-function detectInstall() {
-    const targets = [
-        { name: 'unfreeze',        addr: ADDR.UNFREEZE },
-        { name: 'unfreeze_attack', addr: ADDR.UNFREEZE_ATTACK },
-        { name: 'jump',            addr: ADDR.JUMP },
-    ];
-    targets.forEach(t => {
-        Interceptor.attach(t.addr, {
-            onEnter(args) {
-                if (!detectRec) return;
-                const thisPtr = args[0];
-                const ev = {
-                    frame: pump.frame(),
-                           t_ms: detectStartWall !== null ? (Date.now() - detectStartWall) : 0,
-                           t_ns: detectStartNsVal !== null ? (nowNs() - detectStartNsVal) : 0,
-                           name: t.name,
-                           thisPtr: thisPtr.toString(),
-                           snap: heroSnapshot(thisPtr),
-                };
-                try {
-                    const vt = thisPtr.readPointer();
-                    ev.vt = vt.toString();
-                    ev.vt_rel = vt.sub(MODULE_BASE).toString();
-                } catch (_) { ev.vt = null; ev.vt_rel = null; }
-
-                if (t.name === 'jump') {
-                    try {
-                        ev.returnAddress = this.returnAddress.toString();
-                        ev.returnAddressRel = this.returnAddress.sub(MODULE_BASE).toString();
-                        _jumpCallSites.add(ev.returnAddressRel);
-                    } catch (_) {}
-                }
-                if (t.name === 'unfreeze' || t.name === 'unfreeze_attack') {
-                    detectWaitFirstHeroUpdate = true;
-                }
-                detectEvents.push(ev);
-                send({ type: 'event', ev });
+    function setFrameGate(targetFrame) {
+        if (gate.armed) return { ok: false, error: 'gate_already_armed', target: gate.target };
+        gate.target = targetFrame;
+        gate.armed = true;
+        gate.waiting = false;
+        gate.released = false;
+        gate.enteredAtFrame = null;
+        gate.releasedAtFrame = null;
+        return { ok: true, target: targetFrame, current: pump._frame };
+    }
+    function waitForGate(timeoutMs) {
+        const t0 = Date.now();
+        while (gate.armed && !gate.waiting && !gate.released) {
+            if (Date.now() - t0 > timeoutMs) {
+                return { ok: false, error: 'gate_timeout',
+                    target: gate.target, current: pump._frame };
             }
-        });
-    });
-    send({ type: 'detect_installed', n: targets.length });
-}
-
-function detectStart() {
-    detectEvents = [];
-    detectStartWall = Date.now();
-    detectStartNsVal = nowNs();
-    detectRec = true;
-    detectWaitFirstHeroUpdate = false;
-    _jumpCallSites = new Set();
-
-    pump._frameNsTimeline = new Map();
-    pump._timeLog = [];
-    pump._rngLog = [];
-    pump.detectBodyStart();
-
-    pump._recordTime = true;
-    pump._recordRng = true;
-    pump.setOnFrame(_onFrameRecordTimeline);
-
-    send({ type: 'detect_started', frame: pump.frame(),
-        wall: detectStartWall, ns: detectStartNsVal });
-}
-
-function detectStop() {
-    detectRec = false;
-    detectWaitFirstHeroUpdate = false;
-    pump.detectBodyStop();
-    pump._recordTime = false;
-    pump._recordRng = false;
-    pump.clearOnFrame();
-
-    const dur = detectStartWall ? (Date.now() - detectStartWall) : 0;
-    send({
-        type: 'detect_stopped',
-        count: detectEvents.length,
-        body_frames: pump._detectBodyFrames.length,
-        body_hashes: pump._detectBodyHash.size,
-        time_samples: pump._timeLog.length,
-        rng_samples: pump._rngLog.length,
-        duration_ms: dur,
-        avg_fps: dur > 0 ? (pump.frame() * 1000 / dur).toFixed(1) : 'n/a',
-         jump_callsites: Array.from(_jumpCallSites),
-    });
-    return detectEvents;
-}
-
-function detectGetBodyFrames()      { return pump.detectBodyGet(); }
-function detectGetFrameNsTimeline() {
-    if (!pump._frameNsTimeline) return [];
-    const out = [];
-    for (const [f, ns] of pump._frameNsTimeline) out.push([f, ns]);
-    out.sort((a, b) => a[0] - b[0]);
-    return out;
-}
-function detectGetRngLog()  { return pump._rngLog; }
-function detectGetTimeLog() { return pump._timeLog; }
-
-// ------------------------------------------------------------
-// Replay
-// ------------------------------------------------------------
-
-let jumpFn = null;
-function ensureJumpFn() {
-    if (!jumpFn) jumpFn = new NativeFunction(ADDR.JUMP, 'void', ['pointer']);
-}
-
-let _activeJumpsHooks = [];
-
-function replayJumpsOnly(events, opts) {
-    opts = opts || {};
-    const bodyFramesIn = Array.isArray(opts.body_frames) ? opts.body_frames : null;
-    const rngLogIn     = Array.isArray(opts.rng_log) ? opts.rng_log : null;
-    const verbose      = !!opts.verbose;
-
-    ensureJumpFn();
-    pump.install();
-    pump.reset();
-    pump.clearOnFrame();
-    pump.clearOnFirstUpdate();
-    pump.clearOnLeave();
-    pump.clearPlaybackBody();
-    pump.resetHero();
-
-    if (rngLogIn && rngLogIn.length) installRngHooks();
-    else if (verbose) send({ type: 'dbg', where: 'replay', msg: 'rng_log absent' });
-
-    const allJumps = events.filter(e => e.name === 'jump').sort((a, b) => a.frame - b.frame);
-    const unfreezeEvent = events
-    .filter(e => e.name === 'unfreeze' || e.name === 'unfreeze_attack')
-    .sort((a, b) => a.frame - b.frame)[0];
-    const firstHeroUpdate = events.find(e => e.name === 'first_hero_update') || null;
-    const firstBodyFrame = (bodyFramesIn && bodyFramesIn.length) ? bodyFramesIn[0].frame : null;
-
-    if (!allJumps.length) { send({ type: 'jumps_error', msg: 'no jumps in log' }); return; }
-
-    let useAnchor, anchorRecFrame, anchorKind;
-    if (firstHeroUpdate) {
-        useAnchor = true;
-        anchorRecFrame = firstHeroUpdate.frame;
-        anchorKind = 'first_hero_update';
-    } else if (firstBodyFrame !== null) {
-        useAnchor = true;
-        anchorRecFrame = firstBodyFrame;
-        anchorKind = 'first_body_frame';
-    } else if (unfreezeEvent) {
-        useAnchor = false;
-        anchorRecFrame = unfreezeEvent.frame;
-        anchorKind = 'unfreeze (fallback)';
-    } else {
-        send({ type: 'jumps_error', msg: 'no anchor available' });
-        return;
+            Thread.sleep(0.001);
+        }
+        if (gate.waiting)  return { ok: true, frame: gate.enteredAtFrame, waiting: true };
+        if (gate.released) return { ok: true, frame: gate.releasedAtFrame, skipped: true };
+        return { ok: false, error: 'gate_not_armed', current: pump._frame };
     }
-
-    // true только если в логе есть first_hero_update — тогда ждём его
-    // через onFirstUpdate. Иначе играем сразу с frame=unfreeze.
-    const waitForFirstUpdate = (anchorKind === 'first_hero_update');
-
-    const plan = allJumps.map(e => ({
-        ev: e,
-        frameDelta: Math.max(0, e.frame - anchorRecFrame),
-    }));
-
-    let bodyMapSize = 0, bodyRange = null;
-    if (bodyFramesIn && bodyFramesIn.length) {
-        bodyMapSize = pump.setPlaybackBody(bodyFramesIn);
-        bodyRange = {
-            first: bodyFramesIn[0].frame,
-            last: bodyFramesIn[bodyFramesIn.length - 1].frame,
-            count: bodyFramesIn.length,
+    function releaseGate() {
+        if (!gate.armed && !gate.waiting) return { ok: false, error: 'gate_not_armed' };
+        gate.released = true;
+        return { ok: true, frame: gate.enteredAtFrame, releasedAt: gate.releasedAtFrame };
+    }
+    function gateStatus() {
+        return {
+            armed: gate.armed, target: gate.target, waiting: gate.waiting,
+            released: gate.released, enteredAt: gate.enteredAtFrame,
+            releasedAt: gate.releasedAtFrame, waitMs: gate.waitMs, current: pump._frame,
         };
     }
 
-    if (rngLogIn && rngLogIn.length) {
-        const byFn = {};
-        for (const r of rngLogIn) {
-            if (!r.fn) continue;
-            if (!byFn[r.fn]) byFn[r.fn] = [];
-            byFn[r.fn].push(r.v >>> 0);
-        }
-        const m = new Map();
-        for (const k of Object.keys(byFn)) m.set(k, byFn[k].slice());
-        pump._replayRng = m;
-    }
+    // ------------------------------------------------------------
+    // JUMP monitor
+    // ------------------------------------------------------------
+    let _jumpTotal = 0;
+    const _jumpLog = [];
+    const _JUMP_LOG_MAX = 500;
+    let _jumpMonitorInstalled = false;
 
-    const expectedCallSites = new Set();
-    for (const j of allJumps) if (j.returnAddressRel) expectedCallSites.add(j.returnAddressRel);
-
-    if (verbose) {
-        send({
-            type: 'jumps_analysis',
-            total_in_log: allJumps.length,
-            effective_in_log: allJumps.filter(e => isEffectiveJump(e.snap || {})).length,
-             anchor: anchorKind,
-             anchor_rec_frame: anchorRecFrame,
-             wait_for_first_update: waitForFirstUpdate,
-             body_frames: bodyRange,
-             replay_count: plan.length,
-             per_jump: plan.map(p => ({
-                 frame: p.ev.frame,
-                 frame_delta: p.frameDelta,
-                 state_a0: (p.ev.snap || {}).state_a0,
-                                      ground_80: (p.ev.snap || {}).ground_80,
-                                      ground_84: (p.ev.snap || {}).ground_84,
-                                      cooldown_b0: (p.ev.snap || {}).cooldown_b0,
-                                      effective: isEffectiveJump(p.ev.snap || {}),
-                                      callsite: p.ev.returnAddressRel || null,
-             })),
-        });
-
-        send({
-            type: 'jumps_plan',
-            mode: anchorKind,
-            replay_mode: 'pure (frame-synced)',
-             replay_count: plan.length,
-             frame_deltas: plan.map(p => p.frameDelta),
-             body_verify: bodyMapSize > 0 ? ('enabled, ' + bodyMapSize + ' recs') : 'disabled',
-             rng_restore: pump._replayRng ? 'enabled' : 'disabled',
-             jump_from: 'onLeave',
-             wait_for_first_update: waitForFirstUpdate,
-        });
-    }
-
-    const callsiteHits = { entered: 0, matched: 0, mismatched: 0, errors: 0, other: [] };
-    const firedLog = [];
-
-    for (const h of _activeJumpsHooks) { try { h.detach(); } catch (_) {} }
-    _activeJumpsHooks = [];
-
-    let phase = 'waiting_unfreeze';
-    let anchorFrame = null;
-    let nextIdx = 0;
-    let heroPtr = null;
-    let deferFrames = 0;
-    let skippedCount = 0;
-    let lastFpsFrame = null, lastFpsWall = null;
-    let lastProgressLogMs = null;
-    const total = plan.length;
-
-    const maxFrameDelta = plan.reduce((m, p) => Math.max(m, p.frameDelta), 0);
-    const maxPlayFrame = maxFrameDelta + 600;
-    const playStartWall = Date.now();
-    const PLAY_WALL_LIMIT_MS = 5 * 60 * 1000;
-
-    const jumpHook = Interceptor.attach(ADDR.JUMP, {
-        onEnter() {
-            callsiteHits.entered++;
-            let rel = null;
-            try { rel = this.returnAddress.sub(MODULE_BASE).toString(); }
-            catch (e) { callsiteHits.errors++; return; }
-            if (expectedCallSites.has(rel)) callsiteHits.matched++;
-            else {
-                callsiteHits.mismatched++;
-                if (callsiteHits.other.length < 8) callsiteHits.other.push(rel);
-            }
-        }
-    });
-    _activeJumpsHooks.push(jumpHook);
-
-    function cleanupPlay(reason) {
-        if (phase === 'done') return;
-        phase = 'done';
-        for (const h of _activeJumpsHooks) { try { h.detach(); } catch (_) {} }
-        _activeJumpsHooks = [];
-        pump.clearOnFrame();
-        pump.clearOnFirstUpdate();
-        pump.clearOnLeave();
-        if (reason) {
-            send({ type: 'jumps_timeout', reason,
-                fired: nextIdx, total, fired_log: firedLog });
-        }
-    }
-
-    function _armPlaying(frameForAnchor) {
-        phase = 'playing';
-        anchorFrame = frameForAnchor;
-        if (bodyMapSize > 0) pump.setPlaybackAnchor(anchorFrame, anchorRecFrame);
-        lastFpsFrame = pump.frame();
-        lastFpsWall = Date.now();
-        lastProgressLogMs = Date.now();
-    }
-
-    function onUnfreeze() {
-        if (phase !== 'waiting_unfreeze') return;
-
-        if (waitForFirstUpdate) {
-            // Есть first_hero_update в логе — ждём его
-            phase = 'waiting_first_update';
-            lastFpsFrame = pump.frame();
-            lastFpsWall = Date.now();
-            lastProgressLogMs = Date.now();
-            if (verbose) send({ type: 'jumps_waiting_first_update', anchorKind });
-            return;
-        }
-
-        // Нет first_hero_update — стартуем сразу по frame unfreeze
-        _armPlaying(pump.frame());
-        if (verbose) send({
-            type: 'jumps_armed',
-            mode: anchorKind,
-            anchorFrame, anchorRecFrame,
-            replay_count: total, jump_from: 'onLeave'
-        });
-    }
-
-    function onFirstUpdate(_hero, frame) {
-        if (phase !== 'waiting_first_update') return;
-        if (!isValidHeroStrict(_hero)) return;
-        _armPlaying(frame);
-        heroPtr = _hero;
-        if (verbose) send({
-            type: 'jumps_armed',
-            mode: anchorKind,
-            anchorFrame, anchorRecFrame,
-            replay_count: total, jump_from: 'onLeave'
-        });
-    }
-
-    const h1 = Interceptor.attach(ADDR.UNFREEZE,        { onEnter() { onUnfreeze(); } });
-    const h2 = Interceptor.attach(ADDR.UNFREEZE_ATTACK, { onEnter() { onUnfreeze(); } });
-    _activeJumpsHooks.push(h1, h2);
-
-    pump.setOnFirstUpdate(onFirstUpdate);
-
-    pump.setOnFrame((f) => {
-        if (phase !== 'done' && (Date.now() - playStartWall) > PLAY_WALL_LIMIT_MS) {
-            cleanupPlay('wall_timeout');
-            pump.clearPlaybackBody();
-            return;
-        }
-        if (phase !== 'playing') return;
-        if (anchorFrame !== null && (f - anchorFrame) > maxPlayFrame) {
-            cleanupPlay('frame_timeout');
-            pump.clearPlaybackBody();
-            return;
-        }
-        if (!verbose) return;
-        if (lastFpsFrame !== null && (f - lastFpsFrame) >= 60) {
-            const dt = Date.now() - lastFpsWall;
-            send({ type: 'fps', frame: f,
-                fps: dt > 0 ? Number(((f - lastFpsFrame) * 1000 / dt).toFixed(1)) : 0 });
-            lastFpsFrame = f;
-            lastFpsWall = Date.now();
-        }
-        if (nextIdx < total && lastProgressLogMs !== null &&
-            (Date.now() - lastProgressLogMs) >= 1000) {
-            lastProgressLogMs = Date.now();
-        const progressTarget = anchorFrame + plan[nextIdx].frameDelta;
-        const snap = heroPtr ? heroSnapshot(heroPtr) : {};
-        send({ type: 'jumps_progress',
-            frame: f, next_idx: nextIdx,
-            target_frame: progressTarget,
-            remaining_frames: Math.max(0, progressTarget - f),
-             state_a0: snap.state_a0,
-             ground_80: snap.ground_80,
-             divergences: pump._divergences.length });
-            }
-    });
-
-    pump.setOnLeave((f, _body, _rec, _extra) => {
-        if (phase !== 'playing') return;
-        if (heroPtr === null && pump._lastHero && pump._lastHeroFrame !== null
-            && pump._lastHeroFrame > anchorFrame) {
-            if (isValidHeroStrict(pump._lastHero)) {
-                heroPtr = pump._lastHero;
-                if (verbose) {
-                    send({ type: 'hero_resolved', source: 'pump_lastHero',
-                        addr: heroPtr.toString(), frame: f });
-                }
-            }
-            }
-            if (nextIdx >= total) return;
-            const targetFrame = anchorFrame + plan[nextIdx].frameDelta;
-        if (f < targetFrame) return;
-
-        if (!heroPtr || !isValidHeroStrict(heroPtr)) {
-            if (deferFrames < 20) {
-                deferFrames++;
-                if (deferFrames === 1 && verbose) {
-                    send({ type: 'jump_deferred', idx: nextIdx, frame: f,
-                        target_frame: targetFrame });
-                }
-                return;
-            }
-            if (verbose) {
-                send({ type: 'jump_skipped', idx: nextIdx, frame: f,
-                    target_frame: targetFrame });
-            }
-            nextIdx++;
-            skippedCount++;
-            deferFrames = 0;
-        } else {
-            const snap = heroSnapshot(heroPtr);
-            deferFrames = 0;
-            try {
-                jumpFn(heroPtr);
-                firedLog.push({
-                    idx: nextIdx,
-                    absFrame: f,
-                    target_frame: targetFrame,
-                    frame_error: f - targetFrame,
-                    snap,
+    function installJumpMonitor() {
+        if (_jumpMonitorInstalled) return;
+        _jumpMonitorInstalled = true;
+        Interceptor.attach(ADDR.JUMP, {
+            onEnter() {
+                _jumpTotal++;
+                _jumpLog.push({
+                    idx: _jumpTotal,
+                    frame: pump._frame,
+                    t: Date.now(),
                 });
-            } catch (e) {
-                send({ type: 'jump_error', idx: nextIdx, msg: String(e), snap });
+                if (_jumpLog.length > _JUMP_LOG_MAX) _jumpLog.shift();
             }
-            nextIdx++;
-        }
+        });
+        send({ type: 'jump_monitor_installed', addr: ADDR.JUMP.toString() });
+    }
 
-        if (nextIdx >= total) {
-            const verify = buildVerificationReport(bodyFramesIn, anchorRecFrame, anchorFrame);
-            const csSnapshot = { ...callsiteHits, other: callsiteHits.other.slice() };
-            cleanupPlay();
-            send({
-                type: 'jumps_done',
-                fired: nextIdx - skippedCount,
-                skipped: skippedCount,
-                total_planned: total,
-                verify,
-                callsite: csSnapshot,
-                fired_log: firedLog,
+    // ------------------------------------------------------------
+    // Pump
+    // ------------------------------------------------------------
+    const pump = {
+        _frame: 0, _paused: false, _budget: -1, _installed: false,
+        _onFrame: null, _onFirstUpdate: null, _onLeave: null,
+        _lastHero: null, _lastHeroFrame: null,
+        _detectBodyRecord: false, _detectBodyFrames: [], _detectBodyHash: new Map(),
+        _playbackBodyMap: null, _playbackAnchorFrame: null, _playbackAnchorRecFrame: null,
+        _replayBodyFrames: [], _divergences: [],
+        _ring: [], _ringMax: 300, _ringActive: false,
+        _recordTime: false, _timeLog: [], _frameNsTimeline: new Map(),
+        _recordRng: false, _rngLog: [],
+        _replayRng: null,
+        _freezeTime: false, _frozenNs: null,
+        _dbgStats: { enter: 0, leave: 0, nullBody: 0, readOk: 0 },
+
+        install() {
+            if (pump._installed) { send({ type: 'pump_already' }); return; }
+            pump._paused = false; pump._budget = -1; pump._frame = 0;
+
+            Interceptor.attach(FRAME_FUNC, {
+                onEnter(args) {
+                    this._hero = args[0];
+
+                    if (pump._paused || pump._budget === 0) {
+                        let g = 0;
+                        while (pump._paused || pump._budget === 0) {
+                            Thread.sleep(0.001);
+                            if (++g > 60000) break;
+                        }
+                    }
+                    const incoming = pump._frame + 1;
+                    if (gate.armed && incoming === gate.target) {
+                        gate.waiting = true;
+                        gate.released = false;
+                        gate.enteredAtFrame = incoming;
+                        const tEnter = Date.now();
+                        let g = 0;
+                        while (gate.armed && !gate.released) {
+                            Thread.sleep(0.001);
+                            if (++g > 30000) break;
+                        }
+                        gate.waiting = false;
+                        gate.armed = false;
+                        gate.releasedAtFrame = incoming;
+                        gate.waitMs = Date.now() - tEnter;
+                        send({ type: 'gate_released', frame: gate.releasedAtFrame,
+                            wait_ms: gate.waitMs });
+                    }
+                    if (pump._budget > 0) pump._budget--;
+                    pump._frame++;
+                    pump._dbgStats.enter++;
+                    try {
+                        pump._lastHero = args[0];
+                        pump._lastHeroFrame = pump._frame;
+                    } catch (_) {}
+
+                    if (detectRec && detectWaitFirstHeroUpdate) {
+                        try {
+                            if (isValidHeroStrict(args[0])) {
+                                detectWaitFirstHeroUpdate = false;
+                                const ev = {
+                                    frame: pump._frame,
+                                    t_ms: detectStartWall !== null ? (Date.now() - detectStartWall) : 0,
+                               t_ns: detectStartNsVal !== null ? (nowNs() - detectStartNsVal) : 0,
+                               name: 'first_hero_update',
+                               thisPtr: args[0].toString(),
+                               snap: heroSnapshot(args[0]),
+                                };
+                                detectEvents.push(ev);
+                                send({ type: 'event', ev });
+                            }
+                        } catch (_) {}
+                    }
+                    if (pump._onFirstUpdate) {
+                        try { pump._onFirstUpdate(args[0], pump._frame); } catch (_) {}
+                    }
+                    if (pump._onFrame) {
+                        try { pump._onFrame(pump._frame); }
+                        catch (e) { send({ type: 'onframe_error', msg: String(e) }); }
+                    }
+                },
+                onLeave(_retval) {
+                    const hero = this._hero;
+                    pump._dbgStats.leave++;
+                    if (!hero) return;
+
+                    // Fast path: ничего не нужно читать
+                    if (!pump._detectBodyRecord
+                        && !pump._ringActive
+                        && !pump._playbackBodyMap
+                        && !pump._onLeave) {
+                        return;
+                        }
+
+                        let body;
+                    try { body = hero.add(0x20).readPointer(); } catch (_) { return; }
+                    if (!body || body.isNull()) { pump._dbgStats.nullBody++; return; }
+
+                    const rec = readBodyState(body);
+                    if (!rec) return;
+                    pump._dbgStats.readOk++;
+                    rec.frame = pump._frame;
+
+                    const snap = heroSnapshot(hero);
+                    const extra = {
+                        a0: snap.state_a0, b0: snap.cooldown_b0,
+                        g80: snap.ground_80, g84: snap.ground_84,
+                    };
+
+                    if (pump._ringActive) {
+                        pump._ring.push({
+                            frame: pump._frame, px: rec.px, py: rec.py, ang: rec.ang,
+                            vx: rec.vx, vy: rec.vy, av: rec.av,
+                            a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
+                        });
+                        if (pump._ring.length > pump._ringMax) pump._ring.shift();
+                    }
+
+                    if (pump._detectBodyRecord) {
+                        pump._detectBodyFrames.push({
+                            frame: pump._frame,
+                            px: rec.px, py: rec.py, ang: rec.ang,
+                            vx: rec.vx, vy: rec.vy, av: rec.av,
+                            a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
+                        });
+                        // body_hashes: сэмплируем 1/5 кадров
+                        if (pump._frame % 5 === 0) {
+                            const h = heroBodyHash(body);
+                            if (h !== null) pump._detectBodyHash.set(pump._frame, h);
+                        }
+                    }
+
+                    if (pump._playbackBodyMap && pump._playbackAnchorFrame !== null) {
+                        const recFrame = pump._playbackAnchorRecFrame
+                        + (pump._frame - pump._playbackAnchorFrame);
+                        const expected = pump._playbackBodyMap.get(recFrame);
+                        const actual = {
+                            px: rec.px, py: rec.py, ang: rec.ang,
+                            vx: rec.vx, vy: rec.vy, av: rec.av,
+                            a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
+                        };
+                        pump._replayBodyFrames.push({ frame: pump._frame, ...actual });
+                        if (expected) {
+                            const div = compareBodyBit(actual, expected);
+                            if (div) {
+                                div.f = pump._frame;
+                                div.recFrame = recFrame;
+                                div.expected = pickFields(expected);
+                                div.actual = pickFields(actual);
+                                pump._divergences.push(div);
+                            }
+                        }
+                    }
+                    if (pump._onLeave) {
+                        try { pump._onLeave(pump._frame, body, rec, extra); } catch (_) {}
+                    }
+                }
             });
-            pump.clearPlaybackBody();
-        }
-    });
-}
 
-function buildVerificationReport(bodyFramesIn, anchorRecFrame, anchorPlaybackFrame) {
-    if (!bodyFramesIn || !bodyFramesIn.length) return null;
-    const recMap = new Map(bodyFramesIn.map(r => [r.frame, r]));
-    let compared = 0, divergences = 0, maxAbsU32 = 0;
-    let firstDiv = null;
-    const samples = [];
-    for (const rf of pump._replayBodyFrames) {
-        const recFrame = anchorRecFrame + (rf.frame - anchorPlaybackFrame);
-        const exp = recMap.get(recFrame);
-        if (!exp) continue;
-        compared++;
-        const div = compareBodyBit(rf, exp);
-        if (div) {
-            divergences++;
-            if (!firstDiv) firstDiv = { f: rf.frame, recFrame, diffs: div.diffs };
-            for (const d of div.diffs) {
-                if (d.int) continue;
-                const diff = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
-                if (diff > maxAbsU32) maxAbsU32 = diff;
-            }
-            if (samples.length < 5) {
-                samples.push({ f: rf.frame, recFrame, diffs: div.diffs.slice(0, 6) });
-            }
-        }
-    }
-    return {
-        compared,
-        total_replay_frames: pump._replayBodyFrames.length,
-        divergences,
-        max_abs_diff_u32: maxAbsU32,
-        first_divergence: firstDiv,
-        samples,
-        ring: pump._ring.slice(-5),
+            installJumpMonitor();
+
+            pump._installed = true;
+            send({ type: 'pump_installed', mode: 'interceptor',
+                func: FRAME_FUNC.toString(),
+                 offset: FRAME_FUNC.sub(MODULE_BASE).toString() });
+        },
+
+        resetHero() { pump._lastHero = null; pump._lastHeroFrame = null; },
+        reset()     { pump._frame = 0; },
+        frame()     { return pump._frame; },
+        pause()     { pump._paused = true; },
+        resume()    { pump._paused = false; pump._budget = -1; },
+        step(n)     { pump._paused = false; pump._budget = n; },
+
+        setOnFrame(fn)       { pump._onFrame = fn; },
+        clearOnFrame()       { pump._onFrame = null; },
+        setOnFirstUpdate(fn) { pump._onFirstUpdate = fn; },
+        clearOnFirstUpdate() { pump._onFirstUpdate = null; },
+        setOnLeave(fn)       { pump._onLeave = fn; },
+        clearOnLeave()       { pump._onLeave = null; },
+
+        detectBodyStart() {
+            pump._detectBodyFrames = [];
+            pump._detectBodyHash = new Map();
+            pump._detectBodyRecord = true;
+        },
+        detectBodyStop()    { pump._detectBodyRecord = false; },
+        detectBodyGet()     { return pump._detectBodyFrames; },
+        detectBodyHashGet() { return pump._detectBodyHash; },
+
+        setPlaybackBody(framesArray) {
+            if (!framesArray || !framesArray.length) { pump._playbackBodyMap = null; return 0; }
+            const m = new Map();
+            for (const r of framesArray) m.set(r.frame, r);
+            pump._playbackBodyMap = m;
+            pump._replayBodyFrames = [];
+            pump._divergences = [];
+            return m.size;
+        },
+        setPlaybackAnchor(playbackFrame, recFrame) {
+            pump._playbackAnchorFrame = playbackFrame;
+            pump._playbackAnchorRecFrame = recFrame;
+        },
+        clearPlaybackBody() {
+            pump._playbackBodyMap = null;
+            pump._playbackAnchorFrame = null;
+            pump._playbackAnchorRecFrame = null;
+            pump._replayRng = null;
+        },
     };
-}
 
-function compareTwoRecordings(a, b) {
-    if (!Array.isArray(a) || !Array.isArray(b)) {
-        return { error: 'both args must be arrays' };
+    function ringTail(n) { return pump._ring.slice(-Math.max(1, n)); }
+
+    // ------------------------------------------------------------
+    // Detect
+    // ------------------------------------------------------------
+    let detectRec = false;
+    let detectEvents = [];
+    let detectStartWall = null;
+    let detectStartNsVal = null;
+    let detectWaitFirstHeroUpdate = false;
+    let _jumpCallSites = new Set();
+
+    function _onFrameRecordTimeline(f) {
+        if (!pump._recordTime) return;
+        if (detectStartNsVal === null) return;
+        if (f % 5 !== 0) return;    // 1/5 кадров
+        pump._frameNsTimeline.set(f, nowNs() - detectStartNsVal);
     }
-    const mapB = new Map(b.map(r => [r.frame, r]));
-    let compared = 0, diffs = 0, maxU32 = 0;
-    const samples = [];
-    for (const ra of a) {
-        const rb = mapB.get(ra.frame);
-        if (!rb) continue;
-        compared++;
-        const div = compareBodyBit(ra, rb);
-        if (div) {
-            diffs++;
-            if (samples.length < 10) {
-                samples.push({ f: ra.frame, diffs: div.diffs.slice(0, 6) });
-            }
-            for (const d of div.diffs) {
-                if (d.int) continue;
-                const diff = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
-                if (diff > maxU32) maxU32 = diff;
-            }
-        }
+
+    function detectInstall() {
+        const targets = [
+            { name: 'unfreeze',        addr: ADDR.UNFREEZE },
+            { name: 'unfreeze_attack', addr: ADDR.UNFREEZE_ATTACK },
+            { name: 'jump',            addr: ADDR.JUMP },
+        ];
+        targets.forEach(t => {
+            Interceptor.attach(t.addr, {
+                onEnter(args) {
+                    if (!detectRec) return;
+                    const thisPtr = args[0];
+                    const ev = {
+                        frame: pump.frame(),
+                               t_ms: detectStartWall !== null ? (Date.now() - detectStartWall) : 0,
+                               t_ns: detectStartNsVal !== null ? (nowNs() - detectStartNsVal) : 0,
+                               name: t.name,
+                               thisPtr: thisPtr.toString(),
+                               snap: heroSnapshot(thisPtr),
+                    };
+                    try {
+                        const vt = thisPtr.readPointer();
+                        ev.vt = vt.toString();
+                        ev.vt_rel = vt.sub(MODULE_BASE).toString();
+                    } catch (_) { ev.vt = null; ev.vt_rel = null; }
+                    if (t.name === 'jump') {
+                        try {
+                            ev.returnAddress = this.returnAddress.toString();
+                            ev.returnAddressRel = this.returnAddress.sub(MODULE_BASE).toString();
+                            _jumpCallSites.add(ev.returnAddressRel);
+                        } catch (_) {}
+                    }
+                    if (t.name === 'unfreeze' || t.name === 'unfreeze_attack') {
+                        detectWaitFirstHeroUpdate = true;
+                    }
+                    detectEvents.push(ev);
+                    send({ type: 'event', ev });
+                }
+            });
+        });
+        send({ type: 'detect_installed', n: targets.length });
     }
-    return {
-        compared,
-        a_len: a.length,
-        b_len: b.length,
-        diffs,
-        max_abs_diff_u32: maxU32,
-        samples,
-        deterministic: diffs === 0,
-    };
-}
 
-// ------------------------------------------------------------
-// RPC
-// ------------------------------------------------------------
+    function detectStart() {
+        detectEvents = [];
+        detectStartWall = Date.now();
+        detectStartNsVal = nowNs();
+        detectRec = true;
+        detectWaitFirstHeroUpdate = false;
+        _jumpCallSites = new Set();
+        pump._frameNsTimeline = new Map();
+        pump._timeLog = [];
+        pump._rngLog = [];
+        pump.detectBodyStart();
+        pump._recordTime = true;
+        pump._recordRng = true;
+        pump.setOnFrame(_onFrameRecordTimeline);
+        send({ type: 'detect_started', frame: pump.frame(),
+            wall: detectStartWall, ns: detectStartNsVal });
+    }
 
-rpc.exports = {
-    pumpInstall: () => pump.install(),
-    pumpFrame:   () => pump.frame(),
-    pumpReset:   () => pump.reset(),
-    pumpPause:   () => pump.pause(),
-    pumpResume:  () => pump.resume(),
-    pumpStep:    (n) => pump.step(n),
-    pumpDbgStats: () => pump._dbgStats,
+    function detectStop() {
+        detectRec = false;
+        detectWaitFirstHeroUpdate = false;
+        pump.detectBodyStop();
+        pump._recordTime = false;
+        pump._recordRng = false;
+        pump.clearOnFrame();
+        const dur = detectStartWall ? (Date.now() - detectStartWall) : 0;
+        send({
+            type: 'detect_stopped',
+            count: detectEvents.length,
+            body_frames: pump._detectBodyFrames.length,
+            body_hashes: pump._detectBodyHash.size,
+            time_samples: pump._timeLog.length,
+            rng_samples: pump._rngLog.length,
+            duration_ms: dur,
+            avg_fps: dur > 0 ? (pump.frame() * 1000 / dur).toFixed(1) : 'n/a',
+             jump_callsites: Array.from(_jumpCallSites),
+        });
+        return detectEvents;
+    }
 
-    detectInstall:       () => detectInstall(),
-    detectStart:         () => detectStart(),
-    detectStop:          () => detectStop(),
-    detectGetBodyFrames: () => detectGetBodyFrames(),
-    detectGetBodyHash:   () => {
+    function detectGetBodyFrames() { return pump.detectBodyGet(); }
+    function detectGetBodyHash() {
         const out = [];
         for (const [f, h] of pump._detectBodyHash) out.push([f, h]);
         return out;
-    },
-    detectGetFrameNsTimeline: () => detectGetFrameNsTimeline(),
-    detectGetRngLog:     () => detectGetRngLog(),
-    detectGetTimeLog:    () => detectGetTimeLog(),
+    }
+    function detectGetFrameNsTimeline() {
+        const out = [];
+        for (const [f, ns] of pump._frameNsTimeline) out.push([f, ns]);
+        out.sort((a, b) => a[0] - b[0]);
+        return out;
+    }
+    function detectGetRngLog()  { return pump._rngLog; }
+    function detectGetTimeLog() { return pump._timeLog; }
 
-    replayJumpsOnly: (events, opts) => replayJumpsOnly(events, opts),
-    compareTwoRecordings: (a, b) => compareTwoRecordings(a, b),
+    // ------------------------------------------------------------
+    // Play (NO jumpFn — только чтение)
+    // ------------------------------------------------------------
+    let play = { phase: 'idle', anchorFrame: null, anchorRecFrame: null,
+        anchorKind: null, plan: [], waitForFirstUpdate: false };
+        const _playHooks = [];
 
-    libcHooksInstall: () => {
-        installLibcHooks();
-        return { rng: Array.from(_libcHooks.rng), time: Array.from(_libcHooks.time) };
-    },
-    libcHooksDetachRng:  () => { detachRngHooks();  return true; },
-    libcHooksDetachTime: () => { detachTimeHooks(); return true; },
+        function playSetup(events, opts) {
+            opts = opts || {};
+            const bodyFramesIn = Array.isArray(opts.body_frames) ? opts.body_frames : null;
 
-    setFreezeTime: (enabled, ns) => {
-        pump._freezeTime = !!enabled;
-        pump._frozenNs = (ns != null) ? Number(ns) : null;
-        if (pump._freezeTime) installTimeHooks();
-        else detachTimeHooks();
-    },
-    setReplayRng: (obj) => {
-        const m = new Map();
-        for (const k of Object.keys(obj || {})) m.set(k, (obj[k] || []).slice());
-        pump._replayRng = m;
-        installRngHooks();
-    },
-    clearReplayRng: () => { pump._replayRng = null; },
-};
+            pump.install();
+            pump._ringActive = true;
+            pump.reset();
+            pump.clearOnFrame();
+            pump.clearOnFirstUpdate();
+            pump.clearOnLeave();
+            pump.clearPlaybackBody();
+            pump.resetHero();
+            gate.armed = false; gate.waiting = false; gate.released = false;
+
+            const allJumps = events.filter(e => e.name === 'jump')
+            .sort((a, b) => a.frame - b.frame);
+            if (!allJumps.length) return { ok: false, error: 'no_jumps' };
+
+            const unfreezeEvent = events
+            .filter(e => e.name === 'unfreeze' || e.name === 'unfreeze_attack')
+            .sort((a, b) => a.frame - b.frame)[0];
+            const firstHeroUpdate = events.find(e => e.name === 'first_hero_update') || null;
+            const firstBodyFrame = (bodyFramesIn && bodyFramesIn.length) ? bodyFramesIn[0].frame : null;
+
+            let anchorRecFrame, anchorKind, waitForFirstUpdate;
+            if (firstHeroUpdate) {
+                anchorRecFrame = firstHeroUpdate.frame;
+                anchorKind = 'first_hero_update';
+                waitForFirstUpdate = true;
+            } else if (firstBodyFrame !== null) {
+                anchorRecFrame = firstBodyFrame;
+                anchorKind = 'first_body_frame';
+                waitForFirstUpdate = false;
+            } else if (unfreezeEvent) {
+                anchorRecFrame = unfreezeEvent.frame;
+                anchorKind = 'unfreeze';
+                waitForFirstUpdate = false;
+            } else {
+                return { ok: false, error: 'no_anchor' };
+            }
+
+            const plan = allJumps.map((e, i) => ({
+                idx: i,
+                rec_frame: e.frame,
+                frame_delta: Math.max(0, e.frame - anchorRecFrame),
+                                                 snap: e.snap || {},
+            }));
+
+            let bodyMapSize = 0;
+            if (bodyFramesIn && bodyFramesIn.length) {
+                bodyMapSize = pump.setPlaybackBody(bodyFramesIn);
+            }
+
+            play = { phase: 'waiting_unfreeze', anchorFrame: null,
+                anchorRecFrame, anchorKind, plan, waitForFirstUpdate };
+
+                const onUnfreeze = () => {
+                    if (play.phase !== 'waiting_unfreeze') return;
+                    if (waitForFirstUpdate) {
+                        play.phase = 'waiting_first_update';
+                        send({ type: 'play_phase', phase: 'waiting_first_update' });
+                        return;
+                    }
+                    play.phase = 'playing';
+                    play.anchorFrame = pump.frame();
+                    if (bodyMapSize > 0) pump.setPlaybackAnchor(play.anchorFrame, anchorRecFrame);
+                    send({ type: 'play_armed', anchor: play.anchorFrame,
+                        anchorRec: anchorRecFrame, kind: anchorKind,
+                        count: plan.length, body_verify: bodyMapSize });
+                };
+                const onFirstUpdate = (hero, f) => {
+                    if (play.phase !== 'waiting_first_update') return;
+                    if (!isValidHeroStrict(hero)) return;
+                    play.phase = 'playing';
+                    play.anchorFrame = f;
+                    if (bodyMapSize > 0) pump.setPlaybackAnchor(f, anchorRecFrame);
+                    send({ type: 'play_armed', anchor: f, anchorRec: anchorRecFrame,
+                        kind: anchorKind, count: plan.length, body_verify: bodyMapSize });
+                };
+                const hU  = Interceptor.attach(ADDR.UNFREEZE,        { onEnter: onUnfreeze });
+                const hUA = Interceptor.attach(ADDR.UNFREEZE_ATTACK, { onEnter: onUnfreeze });
+                _playHooks.push(hU, hUA);
+                pump.setOnFirstUpdate(onFirstUpdate);
+
+                send({ type: 'play_phase', phase: play.phase });
+                return { ok: true, anchorKind, anchorRecFrame, plan,
+                    waitForFirstUpdate, body_verify: bodyMapSize };
+        }
+
+        function playState() {
+            return { phase: play.phase, anchor: play.anchorFrame,
+                anchorRec: play.anchorRecFrame, kind: play.anchorKind,
+                plan: play.plan, gate: gateStatus(), frame: pump._frame };
+        }
+
+        function playStop() {
+            for (const h of _playHooks) { try { h.detach(); } catch (_) {} }
+            _playHooks.length = 0;
+            pump.clearOnFirstUpdate();
+            pump.clearPlaybackBody();
+            pump._ringActive = false;
+            gate.armed = false;
+            play.phase = 'idle';
+            return { ok: true };
+        }
+
+        function playVerify() {
+            let compared = 0, divergences = 0, maxU32 = 0, firstDiv = null;
+            const samples = [];
+            if (pump._playbackBodyMap && pump._playbackAnchorFrame !== null) {
+                const recMap = pump._playbackBodyMap;
+                for (const rf of pump._replayBodyFrames) {
+                    const recFrame = pump._playbackAnchorRecFrame
+                    + (rf.frame - pump._playbackAnchorFrame);
+                    const exp = recMap.get(recFrame);
+                    if (!exp) continue;
+                    compared++;
+                    const div = compareBodyBit(rf, exp);
+                    if (div) {
+                        divergences++;
+                        if (!firstDiv) firstDiv = { f: rf.frame, recFrame, diffs: div.diffs };
+                        for (const d of div.diffs) {
+                            if (d.int) continue;
+                            const dd = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
+                            if (dd > maxU32) maxU32 = dd;
+                        }
+                        if (samples.length < 5) {
+                            samples.push({ f: rf.frame, recFrame, diffs: div.diffs.slice(0, 6) });
+                        }
+                    }
+                }
+            }
+            return {
+                compared, divergences, max_abs_diff_u32: maxU32,
+                first_divergence: firstDiv, samples,
+                total_replay_frames: pump._replayBodyFrames.length,
+            };
+        }
+
+        function compareTwoRecordings(a, b) {
+            if (!Array.isArray(a) || !Array.isArray(b)) {
+                return { error: 'both args must be arrays' };
+            }
+            const mapB = new Map(b.map(r => [r.frame, r]));
+            let compared = 0, diffs = 0, maxU32 = 0;
+            const samples = [];
+            for (const ra of a) {
+                const rb = mapB.get(ra.frame);
+                if (!rb) continue;
+                compared++;
+                const div = compareBodyBit(ra, rb);
+                if (div) {
+                    diffs++;
+                    if (samples.length < 10)
+                        samples.push({ f: ra.frame, diffs: div.diffs.slice(0, 6) });
+                    for (const d of div.diffs) {
+                        if (d.int) continue;
+                        const dd = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
+                        if (dd > maxU32) maxU32 = dd;
+                    }
+                }
+            }
+            return { compared, a_len: a.length, b_len: b.length,
+                diffs, max_abs_diff_u32: maxU32, samples,
+                deterministic: diffs === 0 };
+        }
+
+        // ------------------------------------------------------------
+        // RPC exports
+        // ------------------------------------------------------------
+        rpc.exports = {
+            pumpInstall:        () => pump.install(),
+            pumpFrame:          () => pump.frame(),
+            pumpReset:          () => pump.reset(),
+            pumpPause:          () => pump.pause(),
+            pumpResume:         () => pump.resume(),
+            pumpStep:           (n) => pump.step(n),
+            pumpDbgStats:       () => pump._dbgStats,
+
+            pumpJumpCount:      () => _jumpTotal,
+            pumpJumpLogSince:   (idx) => {
+                const from = Number(idx) || 0;
+                return _jumpLog.filter(j => j.idx > from);
+            },
+
+            detectInstall:            () => detectInstall(),
+            detectStart:              () => detectStart(),
+            detectStop:               () => detectStop(),
+            detectGetBodyFrames:      () => detectGetBodyFrames(),
+            detectGetBodyHash:        () => detectGetBodyHash(),
+            detectGetFrameNsTimeline: () => detectGetFrameNsTimeline(),
+            detectGetRngLog:          () => detectGetRngLog(),
+            detectGetTimeLog:         () => detectGetTimeLog(),
+
+            setFrameGate: (t) => setFrameGate(t),
+            waitForGate:  (t) => waitForGate(t),
+            releaseGate:  () => releaseGate(),
+            gateStatus:   () => gateStatus(),
+            ringTail:     (n) => ringTail(n),
+
+            playSetup:  (ev, opts) => playSetup(ev, opts),
+            playState:  () => playState(),
+            playVerify: () => playVerify(),
+            playStop:   () => playStop(),
+
+            compareTwoRecordings: (a, b) => compareTwoRecordings(a, b),
+
+            libcHooksInstall:    () => { installLibcHooks(); return {
+                rng: Array.from(_libcHooks.rng), time: Array.from(_libcHooks.time) }; },
+                libcHooksDetachRng:  () => { detachRngHooks();  return true; },
+                libcHooksDetachTime: () => { detachTimeHooks(); return true; },
+                setFreezeTime: (enabled, ns) => {
+                    pump._freezeTime = !!enabled;
+                    pump._frozenNs = (ns != null) ? Number(ns) : null;
+                    if (pump._freezeTime) installTimeHooks();
+                    else detachTimeHooks();
+                },
+                setReplayRng: (obj) => {
+                    const m = new Map();
+                    for (const k of Object.keys(obj || {})) m.set(k, (obj[k] || []).slice());
+                    pump._replayRng = m;
+                    installRngHooks();
+                },
+                clearReplayRng: () => { pump._replayRng = null; },
+        };

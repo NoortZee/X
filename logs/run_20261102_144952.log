@@ -1,0 +1,2 @@
+2026-11-02 14:49:52,807 INFO main: log → /home/noort/memory_replay/logs/run_20261102_144952.log
+2026-11-02 14:49:52,811 ERROR main: attach failed: unable to connect to remote frida-server

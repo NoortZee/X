@@ -1,523 +1,411 @@
 #!/usr/bin/env python3
-import frida, sys, json, os, threading
+"""main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.1).
 
-PKG = "com.zeptolab.thieves.google"
-LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-LOG_PATH = os.path.join(LOG_DIR, "replay.json")
+FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
+Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
+"""
+from __future__ import annotations
 
-_done_event = threading.Event()
+import json
+import logging
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+import frida
+import yaml
+
+from phantom_bridge import PhantomBridge, PhantomError
+from orchestrator import (
+    Orchestrator,
+    ReplayError,
+    MISSED,
+    find_anchor,
+    build_plan,
+    resolve_tap,
+)
+
+PROJECT = Path(__file__).resolve().parent
+CFG_PATH = PROJECT / "config.yaml"
+LOG_DIR = PROJECT / "logs"
+REPLAY_PATH = LOG_DIR / "replay.json"
+
+_done = threading.Event()
 _done_status = {"error": None}
 
 PRINT_TYPES = {
-    "event",
-    "detect_started", "detect_stopped", "detect_installed",
-    "pump_installed", "pump_already",
-    "module_base", "fatal",
-    "hero_resolved",
-    "jumps_analysis", "jumps_plan",
-    "jumps_waiting_first_update",
-    "jumps_armed", "jumps_ready",
-    "jumps_progress",
-    "jumps_done", "jumps_error", "jumps_timeout",
-    "jump_fired", "jump_error", "jump_deferred", "jump_skipped", "onframe_error",
-    "fps",
-    "verify_result",
-    "anchor_state_check",
-    "divergence",
-    "determinism_result",
-    "dbg",
+    "event", "detect_started", "detect_stopped", "detect_installed",
+    "pump_installed", "pump_already", "module_base", "fatal",
+    "play_phase", "play_armed", "play_done", "gate_released",
+    "jump_monitor_installed",
+    "onframe_error", "dbg",
 }
 
-REPLAY_FORMAT_VERSION = 3
+log = logging.getLogger("main")
 
 
-# ------------------------------------------------------------
-# FRIDA ATTACH
-# ------------------------------------------------------------
+def setup_logging(level: str = "INFO") -> Path:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = LOG_DIR / f"run_{ts}.log"
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    fh = logging.FileHandler(path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level, logging.INFO))
+    root.addHandler(fh)
+    root.addHandler(sh)
+    return path
 
-def attach():
-    device = frida.get_device_manager().add_remote_device('127.0.0.1:41337')
-    session = None
-    last_err = None
 
-    for target in (PKG, "King of Thieves"):
-        try:
-            session = device.attach(target)
-            print(f"[OK] attached by name: {target}", flush=True)
-            break
-        except frida.ProcessNotFoundError as e:
-            last_err = e
-            print(f"[..] not found by name: {target}", flush=True)
+def load_config() -> dict:
+    if not CFG_PATH.exists():
+        raise SystemExit(f"config not found: {CFG_PATH}")
+    with open(CFG_PATH, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-    if session is None:
-        for p in device.enumerate_processes():
-            if "thieves" in p.name.lower():
-                session = device.attach(p.pid)
-                print(f"[OK] attached by PID {p.pid}: {p.name}", flush=True)
+
+class Agent:
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.session = None
+        self.script = None
+        self._pump_installed = False
+
+    def attach(self) -> None:
+        device = frida.get_device_manager().add_remote_device(
+            self.cfg["frida"]["device"]
+        )
+        last_err = None
+        for target in (self.cfg["frida"]["package"], "King of Thieves"):
+            try:
+                self.session = device.attach(target)
+                log.info("attached by name: %s", target)
                 break
+            except frida.ProcessNotFoundError as e:
+                last_err = e
+        if self.session is None:
+            for p in device.enumerate_processes():
+                if "thieves" in p.name.lower():
+                    self.session = device.attach(p.pid)
+                    log.info("attached by PID %d: %s", p.pid, p.name)
+                    break
+        if self.session is None:
+            raise last_err or RuntimeError("game not running")
 
-    if session is None:
-        raise last_err or RuntimeError("Game not running.")
+        src = (PROJECT / "agent.js").read_text(encoding="utf-8")
+        self.script = self.session.create_script(src)
+        self.script.on("message", self._on_msg)
+        self.script.load()
+        # ВАЖНО: pump_install НЕ вызываем здесь. Слишком дорого для idle.
+        # detect_install дёшев (только 3 event hooks, не per-frame).
+        self.script.exports_sync.detect_install()
 
-    agent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.js")
-    with open(agent_path) as f:
-        script = session.create_script(f.read())
+    def ensure_pump(self) -> None:
+        """Lazy pump_install — вызывать перед record/play/calibrate."""
+        if self._pump_installed:
+            return
+        self.script.exports_sync.pump_install()
+        self._pump_installed = True
+        log.info("pump installed (lazy)")
 
-    def on_msg(msg, _data):
+    def _on_msg(self, msg, _data):
         if msg["type"] == "send":
-            p = msg["payload"]
-            t = p.get("type") if isinstance(p, dict) else None
-
-            if t == "jumps_error":
-                _done_status["error"] = p.get("msg")
-                _done_event.set()
-            elif t == "jumps_done":
-                _done_event.set()
-            elif t == "jumps_timeout":
-                _done_status["error"] = f"timeout ({p.get('reason')})"
-                _done_event.set()
-            elif t == "verify_result":
-                _print_verify(p)
-
+            p = msg["payload"] or {}
+            t = p.get("type")
             if t in PRINT_TYPES:
-                if t == "dbg":
-                    print(f"[DBG] {p}", flush=True)
-                else:
-                    print(f"[AGENT] {p}", flush=True)
+                log.info("[agent] %s", p)
+            if t == "fatal":
+                _done_status["error"] = p.get("msg")
+                _done.set()
         else:
-            print(f"[FRIDA ERROR] {msg}", flush=True)
+            log.error("[frida] %s", msg)
 
-    script.on("message", on_msg)
-    script.load()
+    def __getattr__(self, name):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        def _call(*a, **kw):
+            return getattr(self.script.exports_sync, name)(*a, **kw)
+        return _call
 
-    script.exports_sync.pump_install()
-    script.exports_sync.detect_install()
-    try:
-        script.exports_sync.pump_resume()
-    except Exception:
-        pass
-
-    return session, script
-
-
-# ------------------------------------------------------------
-# PRINT HELPERS
-# ------------------------------------------------------------
-
-def _print_verify(p):
-    if p.get("ok"):
-        print("╔══════════════════════════════════════════════╗", flush=True)
-        print("║  ✅ BIT-EXACT MATCH — идеальный реплей        ║", flush=True)
-        print("╚══════════════════════════════════════════════╝", flush=True)
-        return
-    v = p.get("verify") or {}
-    print("╔══════════════════════════════════════════════╗", flush=True)
-    print("║  ⚠ РАСХОЖДЕНИЕ В РЕПЛЕЕ                      ║", flush=True)
-    print("╚══════════════════════════════════════════════╝", flush=True)
-    print(f"   compared={v.get('compared')}  divergences={v.get('divergences')}  max_u32_diff={v.get('max_abs_diff_u32')}", flush=True)
-    fd = v.get("first_divergence")
-    if fd:
-        print(f"   first divergence: replayFrame={fd.get('f')}  recFrame={fd.get('recFrame')}", flush=True)
-        for d in fd.get("diffs", [])[:6]:
-            print(f"     {d.get('field')}: actual={d.get('actual')}  expected={d.get('expected')}", flush=True)
-    for s in (v.get("samples") or [])[:3]:
-        print(f"   sample f={s.get('f')} rec={s.get('recFrame')}", flush=True)
-        for d in s.get("diffs", [])[:4]:
-            print(f"     {d.get('field')}: actual={d.get('actual')}  expected={d.get('expected')}", flush=True)
+    def close(self):
+        if self.session:
+            try:
+                self.session.detach()
+            except Exception:
+                pass
 
 
-def prompt(msg):
-    try:
-        input(msg); return True
-    except (EOFError, KeyboardInterrupt):
-        return False
-
-
-# ------------------------------------------------------------
-# LOG I/O
-# ------------------------------------------------------------
-
-def _find_anchor(events):
-    for e in events:
-        if e.get("name") == "first_hero_update":
-            return e["frame"]
-    for e in events:
-        if e.get("name") in ("unfreeze", "unfreeze_attack"):
-            return e["frame"]
-    return None
-
-
-def _build_report_lines(events, bodies, anchor):
-    L = []
-    L.append("=" * 78)
-    L.append("  REPLAY REPORT  (v3.5 — pure input replay, frame-synced)")
-    L.append("=" * 78)
-    L.append(f"  events:       {len(events)}")
-    L.append(f"  body_frames:  {len(bodies)}")
-    L.append(f"  anchor_frame: {anchor}")
-    if bodies:
-        L.append(f"  body range:   {bodies[0]['frame']}..{bodies[-1]['frame']}")
-    L.append("")
-    L.append("-" * 78)
-    L.append(f"  {'frame':>6}  {'rel':>5}  {'t_ms':>6}  {'name':<22}  details")
-    L.append("-" * 78)
-    for e in events:
-        snap = e.get("snap") or {}
-        details = ""
-        if e["name"] == "jump":
-            g = (snap.get("ground_80") or 0) + (snap.get("ground_84") or 0)
-            details = f"state={snap.get('state_a0')}  ground={g}  cd={snap.get('cooldown_b0')}"
-        elif "state_a0" in snap:
-            details = f"state={snap['state_a0']}"
-        rel = e.get("rel_frame")
-        L.append(f"  {e['frame']:>6}  {str(rel):>5}  {int(e.get('t_ms', 0)):>6}  "
-                 f"{e['name']:<22}  {details}")
-    return L
-
-
-def save_log(events, body_frames, timeline_ns=None, rng_log=None):
-    os.makedirs(LOG_DIR, exist_ok=True)
-    body_frames = body_frames or []
-    anchor = _find_anchor(events)
-
-    rich_events = []
-    for e in events:
-        ev = dict(e)
-        f, t = ev.get("frame"), ev.get("t_ms")
-        if isinstance(f, int) and isinstance(anchor, int):
-            ev["rel_frame"] = f - anchor
-        if isinstance(t, (int, float)):
-            ev["t_sec"] = round(t / 1000.0, 3)
-        rich_events.append(ev)
-
-    rich_bodies = []
-    for b in body_frames:
-        nb = dict(b)
-        for k in ("px", "py", "ang", "vx", "vy", "av"):
-            if isinstance(nb.get(k), float):
-                nb[k] = float(nb[k])
-        rich_bodies.append(nb)
-
-    report_lines = _build_report_lines(rich_events, rich_bodies, anchor)
-
-    out = []
-    out.append("{")
-    out.append('  "replay_report": {')
-    out.append(f'    "anchor_frame": {json.dumps(anchor)},')
-    out.append(f'    "events_count": {len(rich_events)},')
-    out.append(f'    "body_frames_count": {len(rich_bodies)},')
-    out.append('    "lines": [')
-    for i, ln in enumerate(report_lines):
-        comma = "," if i < len(report_lines) - 1 else ""
-        out.append('      ' + json.dumps(ln, ensure_ascii=False) + comma)
-    out.append('    ]')
-    out.append('  },')
-    out.append(f'  "version": {REPLAY_FORMAT_VERSION},')
-    out.append(f'  "anchor_frame": {json.dumps(anchor)},')
-
-    out.append('  "events": [')
-    for i, e in enumerate(rich_events):
-        pretty = json.dumps(e, indent=2, ensure_ascii=False)
-        pretty = "\n".join("    " + line for line in pretty.split("\n"))
-        out.append(pretty + ("," if i < len(rich_events) - 1 else ""))
-    out.append('  ],')
-
-    out.append('  "body_frames": [')
-    for i, b in enumerate(rich_bodies):
-        out.append('    ' + json.dumps(b, ensure_ascii=False)
-                   + ("," if i < len(rich_bodies) - 1 else ""))
-    out.append('  ]')
-
-    if timeline_ns:
-        out.append(',')
-        out.append('  "timeline_ns": ' + json.dumps(timeline_ns))
-    if rng_log:
-        out.append(',')
-        out.append('  "rng_log": ' + json.dumps(rng_log[:2000]))
-
-    out.append('}')
-    with open(LOG_PATH, "w", encoding="utf-8") as f:
-        f.write("\n".join(out) + "\n")
-    return LOG_PATH
-
-
-def load_log(path=None):
-    path = path or LOG_PATH
-    if not os.path.exists(path):
-        return {}, [], None, None
+def load_replay(path: Path = REPLAY_PATH) -> dict:
+    if not path.exists():
+        return {}
     with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    if isinstance(data, list):
-        return {}, data, None, None
-    return (
-        data.get("events", []),
-        data.get("body_frames", []),
-        data.get("timeline_ns"),
-        data.get("rng_log"),
+        return json.load(f)
+
+
+# ------------------------------------------------------------
+# RECORD
+# ------------------------------------------------------------
+def do_record(agent: Agent) -> None:
+    log.info("=== RECORD ===")
+    print("Войдите на уровень в замороженном состоянии.")
+    input("Enter — НАЧАТЬ запись... ")
+
+    agent.ensure_pump()          # lazy install
+    agent.detect_start()
+    print("🔴 запись... Играйте (первый тап — старт уровня).")
+    input("Enter — ОСТАНОВИТЬ... ")
+
+    events = agent.detect_stop()
+    body = agent.detect_get_body_frames()
+    tl = agent.detect_get_frame_ns_timeline()
+    rng = agent.detect_get_rng_log()
+
+    kind, anchor = find_anchor(events, body)
+    out = {
+        "version": 3,
+        "anchor_frame": anchor,
+        "anchor_kind": kind,
+        "events": events,
+        "body_frames": body,
+        "timeline_ns": tl,
+        "rng_log": rng[:2000] if rng else None,
+    }
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    REPLAY_PATH.write_text(
+        json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    log.info("saved replay: %d events, %d body_frames, anchor=%s@%s",
+             len(events), len(body), kind, anchor)
 
-
-# ------------------------------------------------------------
-# ACTIONS
-# ------------------------------------------------------------
-
-def do_record(script):
-    print()
-    print("═══ RECORD (with body-state + diagnostics) ═══")
-    print("Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии.")
-    if not prompt("Enter — НАЧАТЬ запись... "):
-        print("Отменено.")
-        return None
-
-    script.exports_sync.detect_start()
-    print()
-    print("🔴 ЗАПИСЬ ИДЁТ — тапните по экрану и играйте.")
-    prompt("Enter — ОСТАНОВИТЬ запись... ")
-
-    events = script.exports_sync.detect_stop()
-    body_frames = script.exports_sync.detect_get_body_frames()
-    timeline = script.exports_sync.detect_get_frame_ns_timeline()
-    rng_log = script.exports_sync.detect_get_rng_log()
-
-    if not events:
-        print("❌ событий нет.")
-        return None
-
-    save_log(events, body_frames, timeline, rng_log)
-
-    print()
-    print(f"✅ Записано {len(events)} событий + {len(body_frames)} body_frames")
-    print(f"   timeline: {len(timeline) if timeline else 0} сэмплов  |  rng: {len(rng_log or [])} вызовов")
-
-    unfreeze_f = None
-    first_update_f = None
-    effective_jumps = 0
-    total_jumps = 0
-
-    for e in events:
-        snap = e.get("snap") or {}
-        marker = ""
-        if e['name'] in ('unfreeze', 'unfreeze_attack'):
-            marker = " ← якорь-fallback"
-            if unfreeze_f is None:
-                unfreeze_f = e['frame']
-        if e['name'] == 'first_hero_update':
-            marker = " ← ЯКОРЬ (first_hero_update)"
-            first_update_f = e['frame']
-        if e['name'] == 'jump':
-            total_jumps += 1
-            eff = (
-                isinstance(snap.get('state_a0'), int) and (snap['state_a0'] & 7) == 0
-                and (snap.get('ground_80', 0) or 0) + (snap.get('ground_84', 0) or 0) > 0
-            )
-            if eff:
-                effective_jumps += 1
-            marker = " ← эффективный" if eff else " (no-op)"
-        print(
-            f"   frame {e['frame']:4d}  t={e.get('t_ms', 0):5d}ms  {e['name']:20s}  "
-            f"state={snap.get('state_a0','?')} ground={snap.get('ground_80','?')}/{snap.get('ground_84','?')} "
-            f"cd={snap.get('cooldown_b0','?')}{marker}"
+    if not body:
+        log.warning(
+            "RECORD got 0 body_frames — проверьте pump_installed offset "
+            "(должен быть 0x1612a20, не 0x161b7c0)"
         )
 
-    if first_update_f is not None and unfreeze_f is not None:
-        print()
-        print(f"   ⏱  unfreeze → first_hero_update: {first_update_f - unfreeze_f} кадров")
 
-    if body_frames:
-        sample = body_frames[0]
-        print()
-        print(f"   📦 body_frames: {len(body_frames)} записей, "
-              f"кадры {body_frames[0].get('frame')}..{body_frames[-1].get('frame')}")
-        print(f"      sample[0]: px={sample.get('px'):.17g} py={sample.get('py'):.17g} "
-              f"ang={sample.get('ang'):.17g} vx={sample.get('vx'):.17g} vy={sample.get('vy'):.17g}")
-
-    print()
-    print(f"   📊 Прыжков всего: {total_jumps}, эффективных: {effective_jumps}")
-    print(f"   → {LOG_PATH}")
-    return events, body_frames
-
-
-def do_determinism(script):
-    print()
-    print("═══ DETERMINISM CHECK ═══")
-    print("Сделаем ДВА прогона с идентичным вводом и сравним бит-в-бит.")
-    print("Важно: вход в уровень и набор действий должны быть одинаковыми!")
-
-    if not prompt("Enter — запись A... "):
+# ------------------------------------------------------------
+# PLAY
+# ------------------------------------------------------------
+def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
+    replay = load_replay()
+    if not replay.get("events"):
+        print("нет replay.json — сначала record.")
         return
-    script.exports_sync.detect_start()
-    print("🔴 A ИДЁТ — играйте как обычно.")
-    prompt("Enter — ОСТАНОВИТЬ A... ")
-    script.exports_sync.detect_stop()
-    bfA = script.exports_sync.detect_get_body_frames()
+    print(f"anchor: {replay.get('anchor_kind')}={replay.get('anchor_frame')}, "
+          f"jumps={sum(1 for e in replay['events'] if e['name'] == 'jump')}")
+    print("Войдите на уровень в замороженном состоянии.")
+    input("Enter — старт play... ")
 
-    if not prompt("Enter — запись B (тот же ввод)... "):
-        return
-    script.exports_sync.detect_start()
-    print("🔴 B ИДЁТ — ТОЧНО ТОТ ЖЕ ввод.")
-    prompt("Enter — ОСТАНОВИТЬ B... ")
-    script.exports_sync.detect_stop()
-    bfB = script.exports_sync.detect_get_body_frames()
+    # playSetup внутри orchestrator.run() сам вызовет pump.install()
+    agent.ensure_pump()
 
-    if not bfA or not bfB:
-        print("❌ нет body_frames в одном из прогонов.")
+    orch = Orchestrator(cfg, agent, phantom, replay)
+    try:
+        report = orch.run()
+    except (ReplayError, PhantomError) as e:
+        log.error("play failed: %s", e)
         return
 
-    result = script.exports_sync.compare_two_recordings(bfA, bfB)
-    print()
-    print("═══ DETERMINISM RESULT ═══")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
-    if result.get("deterministic"):
-        print("✅ ФИЗИКА ДЕТЕРМИНИРОВАНА (бит-в-бит)")
-    else:
-        print(f"⚠ РАСХОЖДЕНИЙ: {result.get('diffs')} — искать источник недетерминизма")
-
-
-def do_play(script, events, body_frames, rng_log=None):
-    if not events:
-        print("Нет данных для воспроизведения (сначала сделайте record).")
-        return
-
-    print()
-    print("═══ PLAY (pure, frame-synced, jump from onLeave) ═══")
-    if rng_log:
-        print(f"   RNG replay: enabled ({len(rng_log)} calls)")
-    else:
-        print(f"   RNG replay: disabled (no rng_log — libc rng hooks будут пропущены)")
-    print("   Физика НЕ модифицируется (только чтение и сравнение)")
-    print("   Time hooks (clock_gettime/gettimeofday): DISABLED в play "
-          "(иначе FPS падает до ~10)")
-    print("В игре:")
-    print("  1. Зайдите на уровень чтоб он был в ЗАМОРОЖЕННОМ состоянии")
-    print("  2. запустите режим слежки и запустите уровень")
-
-    if not prompt("Enter — программа встанет на слежку... "):
-        print("Отменено.")
-        return
-
-    _done_event.clear()
-    _done_status["error"] = None
-
-    opts = {
-        "body_frames": body_frames or [],
-    }
-    if rng_log:
-        opts["rng_log"] = rng_log
-
-    script.exports_sync.replay_jumps_only(events, opts)
-
-    print()
-    print("🟢 Готов. Тапните ОДИН раз по экрану в игре.")
-
-    while not _done_event.wait(timeout=1.0):
-        pass
-
-    if _done_status["error"]:
-        print(f"\n❌ Ошибка: {_done_status['error']}")
-    else:
-        print("\n✅ Jumps playback завершён.")
-
-
-def do_rehearse(script):
-    res = do_record(script)
-    if not res:
-        return None
-    events, body_frames = res
-    ev, bf, tl, rng = load_log()
-    do_play(script, events, body_frames, rng)
-    return events, body_frames
-
-
-def do_clear():
-    if os.path.exists(LOG_PATH):
-        try:
-            os.remove(LOG_PATH)
-            print(f"Удалено: {LOG_PATH}")
-        except Exception as e:
-            print(f"Не удалось удалить: {e}")
-    else:
-        print("Лог уже пуст.")
-    return {}, [], None, None
+    out_path = LOG_DIR / f"play_{datetime.now():%Y%m%d_%H%M%S}.json"
+    out_path.write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    fe = report["frame_error_stats"]
+    print(
+        f"✅ jumps: {report['jumps_fired']}/{report['jumps_planned']} "
+        f"(missed={report['jumps_missed']})"
+    )
+    print(
+        f"   frame_error: min={fe['min']} med={fe['med']} max={fe['max']} "
+        f"abs_med={fe['abs_med']} abs_max={fe['abs_max']}"
+    )
+    print(f"   tap ms: {report['tap_stats_ms']}")
+    print(f"   report: {out_path}")
 
 
 # ------------------------------------------------------------
-# MENU LOOP
+# CALIBRATE
 # ------------------------------------------------------------
+def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
+    print("=== CALIBRATE (async, no gate) ===")
+    print("Нужен активный уровень — персонаж бежит, не frozen.")
+    print("Каждый тап: снимок cur_frame → tap → ждём 200 ms → ищем переход a0/g80.")
+    input("Enter — старт... ")
 
-def print_menu(events, body_frames):
-    log_exists = os.path.exists(LOG_PATH)
-    if events:
-        log_state = f"есть {len(events)} соб. / {len(body_frames)} bf"
-    elif log_exists:
-        log_state = "есть на диске"
-    else:
-        log_state = "пусто"
+    agent.ensure_pump()          # lazy install
 
-    print()
-    print("─────────────────────────────────────────────────")
-    print(f"  Лог: {log_state}")
-    print("─────────────────────────────────────────────────")
-    print("  Enter / rehearse       — запись + воспроизведение")
-    print("  record                 — только запись")
-    print("  play                   — только воспроизведение")
-    print("  determinism            — два прогона + сравнение")
-    print("  clear                  — удалить лог")
-    print("  exit / q               — выход")
-    print("─────────────────────────────────────────────────")
+    x, y = resolve_tap(cfg)
+    fps = float(cfg["orchestrator"]["nominal_fps"])
+    samples_lead_ms: list[float] = []
+    samples_tap_ms: list[float] = []
+
+    for i in range(10):
+        st = agent.play_state()
+        cur = int(st.get("frame", 0))
+        tail = agent.ring_tail(1) or [{}]
+        prev = tail[-1]
+        a0_before = prev.get("a0")
+        g80_before = prev.get("g80")
+
+        tr = phantom.tap(x, y)
+        if not tr.ok:
+            print(f"[{i}] tap failed: {tr.error}")
+            time.sleep(0.5)
+            continue
+        samples_tap_ms.append(tr.duration_ms)
+
+        time.sleep(0.2)
+
+        tail = agent.ring_tail(200) or []
+        change_frame = None
+        prev_a, prev_g = a0_before, g80_before
+        for r in tail:
+            f = int(r["frame"])
+            if f <= cur:
+                continue
+            a = r.get("a0")
+            g = r.get("g80")
+            is_jump = False
+            if isinstance(prev_a, int) and isinstance(a, int):
+                if prev_a == 0 and a != 0:
+                    is_jump = True
+            if prev_g == 1 and g == 0:
+                is_jump = True
+            if is_jump:
+                change_frame = f
+                break
+            prev_a, prev_g = a, g
+
+        if change_frame is None:
+            print(f"[{i}] cur={cur} no change in 200ms")
+            time.sleep(0.5)
+            continue
+
+        lead_frames = change_frame - cur
+        lead_ms = lead_frames * 1000.0 / fps
+        samples_lead_ms.append(lead_ms)
+        print(
+            f"[{i}] cur={cur} → change@{change_frame} "
+            f"lead_frames={lead_frames} lead≈{lead_ms:.1f}ms "
+            f"tap={tr.duration_ms:.1f}ms"
+        )
+        time.sleep(0.4)
+
+    if not samples_lead_ms:
+        print("не удалось зафиксировать ни одного отклика")
+        return
+
+    samples_lead_ms.sort()
+    n = len(samples_lead_ms)
+    med = samples_lead_ms[n // 2]
+    p95 = samples_lead_ms[min(n - 1, int(n * 0.95))]
+    print(
+        f"\nsamples={n}  "
+        f"min={samples_lead_ms[0]:.1f}ms  "
+        f"med={med:.1f}ms  "
+        f"p95={p95:.1f}ms  "
+        f"max={samples_lead_ms[-1]:.1f}ms"
+    )
+    if samples_tap_ms:
+        print(
+            f"tap_ms: med="
+            f"{sorted(samples_tap_ms)[len(samples_tap_ms) // 2]:.1f}ms"
+        )
+    print(f"\n⚠ калибровка шумит (FPS-джиттер). "
+          f"Дефолт predict_lead_ms=0 — работает лучше.")
 
 
-def main_loop(script):
-    events, body_frames, timeline_ns, rng_log = load_log()
-    if events:
-        print(f"[main] загружен существующий лог: {len(events)} событий, {len(body_frames)} body_frames")
+# ------------------------------------------------------------
+# DRY RUN
+# ------------------------------------------------------------
+def do_dry_run(agent: Agent, cfg: dict) -> None:
+    replay = load_replay()
+    if not replay.get("events"):
+        print("нет replay.json")
+        return
+    print("=== DRY-RUN: plan only ===")
+    kind, anchor = find_anchor(replay["events"], replay.get("body_frames", []))
+    if anchor is None:
+        print("no anchor")
+        return
+    plan = build_plan(replay["events"], anchor)
+    print(f"anchor={kind}@{anchor}")
+    for p in plan:
+        print(
+            f"  idx={p['idx']:2d}  rec_frame={p['rec_frame']:5d}  "
+            f"delta={p['frame_delta']:4d}"
+        )
+    print(f"total: {len(plan)} jumps")
+
+
+MENU = """
+─────────────────────────────────────────────────
+  Enter / rehearse    record + play
+  record              only record
+  play                only play
+  calibrate           predict_lead_ms test (10 taps)
+  dry-run             plan only, no taps
+  clear               delete replay.json
+  exit / q            quit
+─────────────────────────────────────────────────
+"""
+
+
+def main() -> None:
+    cfg = load_config()
+    log_path = setup_logging(cfg.get("logging", {}).get("level", "INFO"))
+    log.info("log → %s", log_path)
+
+    agent = Agent(cfg)
+    try:
+        agent.attach()
+    except Exception as e:
+        log.error("attach failed: %s", e)
+        sys.exit(1)
+
+    phantom = PhantomBridge(cfg["phantom"])
 
     while True:
-        print_menu(events, body_frames)
+        print(MENU)
         try:
             cmd = input("> ").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print("\n[main] выход")
-            return
-
+            break
         try:
             if cmd in ("", "rehearse", "r"):
-                do_rehearse(script)
-                events, body_frames, timeline_ns, rng_log = load_log()
+                do_record(agent)
+                do_play(agent, phantom, cfg)
             elif cmd in ("record", "rec"):
-                res = do_record(script)
-                if res:
-                    events, body_frames, timeline_ns, rng_log = load_log()
+                do_record(agent)
             elif cmd in ("play", "p"):
-                if not events:
-                    events, body_frames, timeline_ns, rng_log = load_log()
-                do_play(script, events, body_frames, rng_log)
-            elif cmd in ("determinism", "det"):
-                do_determinism(script)
+                do_play(agent, phantom, cfg)
+            elif cmd in ("calibrate", "cal"):
+                do_calibrate(agent, phantom, cfg)
+            elif cmd in ("dry-run", "dry"):
+                do_dry_run(agent, cfg)
             elif cmd in ("clear", "c"):
-                events, body_frames, timeline_ns, rng_log = do_clear()
+                if REPLAY_PATH.exists():
+                    REPLAY_PATH.unlink()
+                print("cleared")
             elif cmd in ("exit", "quit", "q"):
-                print("[main] выход")
-                return
+                break
             else:
-                print(f"Неизвестная команда: '{cmd}'")
+                print(f"unknown command: {cmd}")
         except frida.InvalidOperationError as e:
-            print(f"\n[!] Frida сессия потеряна: {e}")
-            print("[!] Перезапустите игру и запустите скрипт заново.")
-            return
-        except Exception as e:
-            print(f"\n[!] Ошибка: {e}")
+            log.error("frida session lost: %s", e)
+            break
+        except Exception:
+            log.exception("command error")
 
+    phantom.close()
+    agent.close()
 
-# ------------------------------------------------------------
 
 if __name__ == "__main__":
-    print(f"[main] v{REPLAY_FORMAT_VERSION} start")
-    print("[main] attaching to King of Thieves...")
-    try:
-        _session, _script = attach()
-    except Exception as e:
-        print(f"[main] не удалось подключиться: {e}")
-        print("[main] Убедитесь, что игра запущена и frida-server активен.")
-        sys.exit(1)
-    print("[main] готово. Интерактивный режим.")
-    main_loop(_script)
+    main()

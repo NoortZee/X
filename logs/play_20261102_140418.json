@@ -1,0 +1,315 @@
+{
+  "ok": true,
+  "mode": "async_no_gate_v7.0",
+  "anchor_kind": "unfreeze",
+  "anchor_rec": 0,
+  "tap_xy": [
+    540,
+    960
+  ],
+  "jumps_planned": 15,
+  "jumps_fired": 0,
+  "jumps_missed": 15,
+  "retries": 15,
+  "frame_error_stats": {
+    "min": null,
+    "med": null,
+    "max": null,
+    "abs_med": null,
+    "abs_max": null
+  },
+  "tap_stats_ms": {
+    "min": 2.2169309995661024,
+    "med": 2.230477999546565,
+    "max": 1004.6601079993707
+  },
+  "fired_log": [
+    {
+      "idx": 0,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 1004.6601079993707,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 1,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2397649991034996,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 2,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2281729980022646,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 3,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2169309995661024,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 2,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 4,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.244533998236875,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 5,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.230477999546565,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 6,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.234825999039458,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 7,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2226219989534,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 2,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 8,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2429410000768257,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 1,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 9,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.225228001407231,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 10,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2191560001374455,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 0,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 11,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.234954999948968,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 12,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2396039985324023,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 13,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.2259880006458843,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    },
+    {
+      "idx": 14,
+      "abs_frame": -1,
+      "target_frame": 0,
+      "frame_error": -99999,
+      "tap_ack_ms": 2.223063000201364,
+      "tap_x": 540,
+      "tap_y": 960,
+      "tap_count": 2,
+      "snap_before": {
+        "vt_rel": "0x205a068",
+        "state_a0": 0,
+        "cooldown_b0": 0,
+        "ground_80": 1,
+        "ground_84": 0
+      },
+      "snap_after": {},
+      "note": "missed_no_jumpfn"
+    }
+  ],
+  "verify_body_frames": {},
+  "elapsed_s": 10.314814943001693
+}

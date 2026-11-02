@@ -1,0 +1,13 @@
+2026-11-02 14:53:23,356 INFO main: log → /home/noort/memory_replay/logs/run_20261102_145323.log
+2026-11-02 14:53:23,873 INFO main: attached by name: King of Thieves
+2026-11-02 14:53:23,878 INFO main: [agent] {'type': 'module_base', 'name': 'libthieves.so', 'base': '0x7f5014d02000', 'size': 35942400}
+2026-11-02 14:53:23,928 INFO main: [agent] {'type': 'detect_installed', 'n': 3}
+2026-11-02 14:53:32,159 INFO main: === RECORD ===
+2026-11-02 14:53:32,721 INFO main: [agent] {'type': 'jump_monitor_installed', 'addr': '0x7f5016313f00'}
+2026-11-02 14:53:32,721 INFO main: [agent] {'type': 'pump_installed', 'mode': 'interceptor', 'func': '0x7f5016314a20', 'offset': '0x1612a20'}
+2026-11-02 14:53:32,721 INFO main: pump installed (lazy)
+2026-11-02 14:53:32,722 INFO main: [agent] {'type': 'detect_started', 'frame': 0, 'wall': 1793620412721, 'ns': 1793620412721000000}
+2026-11-02 14:53:37,188 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 4466, 't_ns': 4466000128, 'name': 'unfreeze', 'thisPtr': '0x7f515f5c6508', 'snap': {'vt_rel': '0x2007ea8', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': -1883953200, 'ground_84': 32593}, 'vt': '0x7f5016d09ea8', 'vt_rel': '0x2007ea8'}}
+2026-11-02 14:53:37,205 INFO main: [agent] {'type': 'event', 'ev': {'frame': 1, 't_ms': 4483, 't_ns': 4484000000, 'name': 'first_hero_update', 'thisPtr': '0x7f513fe3e110', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}}}
+2026-11-02 14:53:37,250 INFO main: [agent] {'type': 'event', 'ev': {'frame': 3, 't_ms': 4528, 't_ns': 4528000000, 'name': 'jump', 'thisPtr': '0x7f513fe3e110', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:53:38,004 INFO main: [agent] {'type': 'event', 'ev': {'frame': 49, 't_ms': 5283, 't_ns': 5283000064, 'name': 'jump', 'thisPtr': '0x7f513fe3e110', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
