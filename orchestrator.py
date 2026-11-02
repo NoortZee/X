@@ -1,10 +1,21 @@
-"""orchestrator.py — async replay (NO frame gate). v7.1.
+"""orchestrator.py — async replay (NO frame gate). v7.6.
 
-Changes vs v7.0:
-  * _snap_at_frame: ring_tail(4) вместо ring_tail(120) — экономия RPC
-  * _fire_async: stall detection (game_stalled, 2 s без прироста кадров)
-  * _fire_async: skip вместо raise на deadline (не убивает весь play)
-  * post_tap_check_ms=60, poll_interval_ms=3 (из config.yaml)
+v7.6:
+  * pre-check covered_by_user_tap для idx=0:
+      - jc_baseline снимается в run() ДО user-tap
+      - перед первым tap проверяем pump_jump_log_since(jc_baseline)
+      - если user-tap уже дал jumpFn на frame ~target → covered (не тапаем)
+      - это устраняет double-jump и ловит случай когда user-tap уже прыгнул
+
+v7.5:
+  * jc_baseline capture в run() до user-tap
+  * pre-connect phantom в run()
+  * pre_state(a0, g80) в fire log
+  * OVERSHOOT_TOLERANCE = 10
+
+v7.4:
+  * Убраны jc_start / _consumed_jump_frames
+  * overshoot tolerance: frames_to_go < 0 и overshoot ≤ tol → тапаем
 """
 from __future__ import annotations
 
@@ -15,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger("orch")
+
+OVERSHOOT_TOLERANCE = 10
 
 
 def find_anchor(events, body_frames):
@@ -85,6 +98,7 @@ class Orchestrator:
         self.fire_log: list[FireRecord] = []
         self.tap_x, self.tap_y = resolve_tap(cfg)
         self._wall0 = None
+        self.jc_baseline = None
 
     def _wait_playing(self):
         o = self.cfg["orchestrator"]
@@ -101,8 +115,6 @@ class Orchestrator:
             time.sleep(o["poll_interval_ms"] / 1000.0)
 
     def _snap_at_frame(self, frame: int) -> dict:
-        # ring_tail(4) вместо (120): только последние 4 элемента,
-        # этого хватает для извлечения snap_after (fired_frame+1)
         tail = self.agent.ring_tail(4) or []
         for r in tail:
             if int(r.get("frame", -1)) == frame:
@@ -111,7 +123,39 @@ class Orchestrator:
                          "px", "py", "vx", "vy")}
         return {}
 
-    def _fire_async(self, jump) -> FireRecord:
+    def _try_covered_by_user_tap(self, jump, target_frame) -> Optional[FireRecord]:
+        """Pre-tap check: user-tap мог уже сделать jumpFn. Если так — covered,
+        не тапаем (избегаем double jump и ловим случай когда user-tap уже прыгнул).
+        """
+        if self.jc_baseline is None:
+            return None
+        try:
+            early = self.agent.pump_jump_log_since(self.jc_baseline) or []
+        except Exception as e:
+            log.warning("pump_jump_log_since(jc_baseline) failed: %s", e)
+            return None
+        for ej in early:
+            ff = int(ej["frame"])
+            if abs(ff - target_frame) <= 5:
+                log.info(
+                    "fired idx=%d fired@%d target=%d err=%+d "
+                    "note=covered_by_user_tap (jc_baseline=%d, user-tap)",
+                    jump["idx"], ff, target_frame, ff - target_frame,
+                    self.jc_baseline)
+                return FireRecord(
+                    idx=jump["idx"], abs_frame=ff,
+                    target_frame=target_frame,
+                    frame_error=ff - target_frame,
+                    tap_ack_ms=0.0,
+                    tap_x=self.tap_x, tap_y=self.tap_y,
+                    tap_count=0,
+                    snap_before=jump.get("snap") or {},
+                    snap_after=self._snap_at_frame(ff + 1) or {},
+                    note="covered_by_user_tap",
+                )
+        return None
+
+    def _fire_async(self, jump, initial_state=None) -> FireRecord:
         o = self.cfg["orchestrator"]
         lead_ms = float(o["predict_lead_ms"])
         margin_ms = float(o["predict_margin_ms"])
@@ -124,15 +168,28 @@ class Orchestrator:
         poll_s = o["poll_interval_ms"] / 1000.0
         stall_s = 2.0
 
-        # --- 1. ждём cur == target ---
+        # v7.6: pre-check для idx=0 — user-tap мог уже дать jumpFn
+        if jump["idx"] == 0 and initial_state is not None:
+            anchor_est = int(initial_state["anchor"])
+            target_est = anchor_est + int(jump["frame_delta"])
+            covered = self._try_covered_by_user_tap(jump, target_est)
+            if covered is not None:
+                return covered
+
         t_start = time.monotonic()
         cur_before = None
         target_frame = None
         last_cur = -1
         last_cur_t = t_start
+        first_iter = True
+        overshoot = 0
 
         while True:
-            st = self.agent.play_state()
+            if first_iter and initial_state is not None:
+                st = initial_state
+                first_iter = False
+            else:
+                st = self.agent.play_state()
             if st.get("phase") != "playing":
                 raise ReplayError(
                     f"fire idx={jump['idx']}: phase={st.get('phase')}")
@@ -140,8 +197,6 @@ class Orchestrator:
             target_frame = anchor + int(jump["frame_delta"])
             cur = int(st.get("frame", 0))
 
-            # game_stalled: pump._frame не растёт 2 секунды → персонаж умер /
-            # уровень закончился / игра зафризилась.
             now = time.monotonic()
             if cur != last_cur:
                 last_cur = cur
@@ -160,11 +215,24 @@ class Orchestrator:
 
             frames_to_go = target_frame - cur
 
-            # Прошли таргет — skip, не raise.
             if frames_to_go < 0:
+                overshoot = -frames_to_go
+                if overshoot <= OVERSHOOT_TOLERANCE:
+                    # На случай если user-tap запоздал и уже прыгнул:
+                    covered = self._try_covered_by_user_tap(jump, target_frame)
+                    if covered is not None:
+                        return covered
+                    log.info(
+                        "fire idx=%d cur=%d target=%d overshoot=%d ≤%d "
+                        "— tapping anyway",
+                        jump["idx"], cur, target_frame,
+                        overshoot, OVERSHOOT_TOLERANCE)
+                    cur_before = cur
+                    break
                 log.warning(
-                    "fire idx=%d SKIP (cur=%d > target=%d)",
-                    jump["idx"], cur, target_frame)
+                    "fire idx=%d SKIP (cur=%d target=%d overshoot=%d >%d)",
+                    jump["idx"], cur, target_frame,
+                    overshoot, OVERSHOOT_TOLERANCE)
                 return FireRecord(
                     idx=jump["idx"], abs_frame=-1,
                     target_frame=target_frame, frame_error=MISSED,
@@ -180,7 +248,6 @@ class Orchestrator:
 
             time.sleep(poll_s)
 
-            # hard deadline тоже skip, не raise.
             if time.monotonic() - t_start > hard_s:
                 log.warning(
                     "fire idx=%d SKIP deadline (cur=%d target=%d)",
@@ -193,19 +260,31 @@ class Orchestrator:
                     snap_after={}, note="deadline_skipped",
                 )
 
-        log.info(
-            "fire idx=%d cur=%d target=%d frames_to_go=%d lead=%d tap=(%d,%d)",
-            jump["idx"], cur_before, target_frame,
-            target_frame - cur_before, int(lead_ms),
-            self.tap_x, self.tap_y)
-
-        # --- 2. снимок счётчика jumpFn до тапа ---
+        # pre_state диагностика
+        pre_state = {}
         try:
-            jc_before = int(self.agent.pump_jump_count())
-        except Exception as e:
-            raise ReplayError(f"pump_jump_count failed: {e}")
+            tail = self.agent.ring_tail(1) or [{}]
+            pre_state = tail[-1] if tail else {}
+        except Exception:
+            pass
 
-        # --- 3. тап (с retry) ---
+        log.info(
+            "fire idx=%d cur=%d target=%d frames_to_go=%d overshoot=%d "
+            "lead=%d tap=(%d,%d) pre_state(a0=%s g80=%s)",
+            jump["idx"], cur_before, target_frame,
+            target_frame - cur_before, overshoot, int(lead_ms),
+            self.tap_x, self.tap_y,
+            pre_state.get("a0"), pre_state.get("g80"))
+
+        # для idx=0 используем baseline (0), для остальных — текущий count
+        if jump["idx"] == 0 and self.jc_baseline is not None:
+            jc_before = self.jc_baseline
+        else:
+            try:
+                jc_before = int(self.agent.pump_jump_count())
+            except Exception as e:
+                raise ReplayError(f"pump_jump_count failed: {e}")
+
         total_taps = 0
         total_tap_ms = 0.0
         new_jumps = []
@@ -236,7 +315,6 @@ class Orchestrator:
                 time.sleep(retry_delay_ms / 1000.0)
                 jc_before = jc_after
 
-        # --- 4. анализ результата ---
         if not new_jumps:
             log.warning(
                 "fired idx=%d MISSED target=%d taps=%d tap_ms=%.2f",
@@ -291,22 +369,38 @@ class Orchestrator:
         if not setup.get("ok"):
             raise ReplayError(f"playSetup failed: {setup}")
 
+        # Pre-connect phantom (экономит 5-10 мс на первом tap)
+        try:
+            self.phantom.connect()
+            log.info("phantom pre-connected")
+        except Exception as e:
+            log.warning("phantom pre-connect failed: %s", e)
+
+        # Baseline jump count до пользовательского тапа
+        try:
+            self.jc_baseline = int(self.agent.pump_jump_count())
+        except Exception as e:
+            log.warning("pump_jump_count baseline failed: %s", e)
+            self.jc_baseline = None
+
         o = self.cfg["orchestrator"]
         log.info(
-            "playSetup: anchor=%s@%s jumps=%d lead=%dms check=%dms retry=%s",
+            "playSetup: anchor=%s@%s jumps=%d lead=%dms check=%dms retry=%s "
+            "overshoot_tol=%d jc_baseline=%s",
             anchor_kind, anchor_rec, len(plan),
             o["predict_lead_ms"], o["post_tap_check_ms"],
-            o.get("retry_on_miss", False))
+            o.get("retry_on_miss", False), OVERSHOOT_TOLERANCE,
+            self.jc_baseline)
         log.info("tap position: (%d, %d)", self.tap_x, self.tap_y)
 
         self._wall0 = time.monotonic()
-        self._wait_playing()
+        st = self._wait_playing()
 
-        for j in plan:
+        for i, j in enumerate(plan):
             if time.monotonic() - self._wall0 > o["wall_timeout_s"]:
                 raise ReplayError(
                     f"wall_timeout (fired={len(self.fire_log)}/{len(plan)})")
-            fr = self._fire_async(j)
+            fr = self._fire_async(j, initial_state=st if i == 0 else None)
             self.fire_log.append(fr)
 
         verify_bf = {}
@@ -323,13 +417,15 @@ class Orchestrator:
 
         report = {
             "ok": True,
-            "mode": "async_no_gate_v7.1",
+            "mode": "async_no_gate_v7.6",
             "anchor_kind": anchor_kind,
             "anchor_rec": anchor_rec,
             "tap_xy": [self.tap_x, self.tap_y],
             "jumps_planned": len(plan),
             "jumps_fired": sum(1 for fr in self.fire_log if fr.frame_error != MISSED),
             "jumps_missed": sum(1 for fr in self.fire_log if fr.frame_error == MISSED),
+            "covered_by_user_tap": sum(
+                1 for fr in self.fire_log if fr.note == "covered_by_user_tap"),
             "retries": sum(1 for tc in tap_counts if tc > 1),
             "frame_error_stats": {
                 "min": min(errors) if errors else None,

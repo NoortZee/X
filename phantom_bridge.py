@@ -9,9 +9,7 @@ Protocol (little-endian):
     KEY_UP       0x05
     PING         0x7f
 
-Tap duration is controlled by `tap_down_to_up_ms`:
-    > 0 → DOWN, sleep N ms, UP  (typical: 1 ms for instant tap)
-    = 0 → DOWN+UP в одном TCP-write (burst)
+v1.2: tap() retries once on BrokenPipeError / ConnectionResetError.
 """
 from __future__ import annotations
 
@@ -54,7 +52,6 @@ class PhantomBridge:
         self.ping_timeout = cfg.get("ping_timeout_ms", 1000) / 1000.0
         self.sock: Optional[socket.socket] = None
 
-    # ---- connection lifecycle ----
     def connect(self) -> None:
         if self.sock is not None:
             return
@@ -97,7 +94,6 @@ class PhantomBridge:
     def __exit__(self, *_):
         self.close()
 
-    # ---- low-level frame writers ----
     def _send_down(self, x: int, y: int) -> None:
         assert self.sock is not None
         self.sock.sendall(struct.pack("<BBii", 0x00, self.slot, int(x), int(y)))
@@ -106,13 +102,11 @@ class PhantomBridge:
         assert self.sock is not None
         self.sock.sendall(struct.pack("<BB", 0x02, self.slot))
 
-    # ---- high-level ----
-    def tap(self, x: int, y: int) -> TapResult:
+    def tap(self, x: int, y: int, _retry: bool = True) -> TapResult:
         t0 = time.perf_counter()
         try:
             self.connect()
             if self.down_up_ms <= 0:
-                # Burst: DOWN+UP в одном TCP-write
                 self.sock.sendall(
                     struct.pack("<BBii", 0x00, self.slot, int(x), int(y))
                     + struct.pack("<BB", 0x02, self.slot)
@@ -126,22 +120,28 @@ class PhantomBridge:
                 time.sleep(self.post_wait_ms / 1000.0)
 
             return TapResult(
-                True,
-                (time.perf_counter() - t0) * 1000,
-                self.sync_mode,
-                self.slot,
-                x,
-                y,
+                True, (time.perf_counter() - t0) * 1000,
+                self.sync_mode, self.slot, x, y,
             )
+        except (BrokenPipeError, ConnectionResetError) as e:
+            self.close()
+            log.warning("phantom connection broken (%s), reconnecting", e)
+            if _retry:
+                try:
+                    self.connect()
+                    return self.tap(x, y, _retry=False)
+                except Exception as e2:
+                    log.error("phantom reconnect failed: %s", e2)
+                    return TapResult(
+                        False, (time.perf_counter() - t0) * 1000,
+                        self.sync_mode, self.slot, x, y,
+                        error=f"reconnect_failed: {e2}")
+            return TapResult(
+                False, (time.perf_counter() - t0) * 1000,
+                self.sync_mode, self.slot, x, y, error=str(e))
         except OSError as e:
             self.close()
             log.error("tap failed: %s", e)
             return TapResult(
-                False,
-                (time.perf_counter() - t0) * 1000,
-                self.sync_mode,
-                self.slot,
-                x,
-                y,
-                error=str(e),
-            )
+                False, (time.perf_counter() - t0) * 1000,
+                self.sync_mode, self.slot, x, y, error=str(e))

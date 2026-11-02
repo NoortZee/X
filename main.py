@@ -221,6 +221,8 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
         f"✅ jumps: {report['jumps_fired']}/{report['jumps_planned']} "
         f"(missed={report['jumps_missed']})"
     )
+    if report.get("note"):
+        print(f"   note: {report['note']}")
     print(
         f"   frame_error: min={fe['min']} med={fe['med']} max={fe['max']} "
         f"abs_med={fe['abs_med']} abs_max={fe['abs_max']}"

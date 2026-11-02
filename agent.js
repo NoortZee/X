@@ -1,12 +1,8 @@
 // agent.js — TAS agent for King of Thieves x86_64
-// v5.4 — FPS-optimized hot path:
-//        * lazy install (main.py вызывает pump_install только в record/play)
-//        * readBodyState/heroSnapshot: 1 try/catch, без findRangeByAddress
-//        * onLeave: fast path + _ringActive флаг
-//        * heroBodyHash: 1/5 кадров (было каждый)
-//        * _onFrameRecordTimeline: 1/5 кадров
-//        * strict FRAME_FUNC resolver (AOB mismatch → fallback)
-//        * JUMP monitor + rpc pumpJumpCount/pumpJumpLogSince
+// v5.5 — READ-ONLY + JUMP monitor + strict FRAME_FUNC resolver
+//        + lazy pump install (main.py вызывает pump_install только в record/play)
+//        + FPS-optimized hot path (1 try/catch, no findRangeByAddress)
+//        + detectFrameAtStart для корректного avg_fps
 'use strict';
 
 const MODULE_NAME = 'libthieves.so';
@@ -77,8 +73,6 @@ function _resolveByFallback(name) {
 }
 function _resolveSimple(name) { return _resolveBySig(name) || _resolveByFallback(name); }
 
-// FRAME_FUNC strict: если AOB offset != fallback, значит скан попал в похожую
-// функцию → принудительно используем fallback offset.
 function _resolveFrameFuncStrict() {
     const expectedOffset = FALLBACK['FRAME_FUNC'];
     const aob = _resolveBySig('FRAME_FUNC');
@@ -119,9 +113,6 @@ send({ type: 'resolved', log: _resolutionLog,
      UNFREEZE: ADDR.UNFREEZE.toString(),
      UNFREEZE_ATTACK: ADDR.UNFREEZE_ATTACK.toString() });
 
-// ------------------------------------------------------------
-// Frida 17 export lookup shim
-// ------------------------------------------------------------
 function findExport(moduleName, exportName) {
     try {
         const m = Process.getModuleByName(moduleName);
@@ -258,14 +249,13 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
     }
 
     // ------------------------------------------------------------
-    // Libc hooks (RNG + TIME) — не в хот-пути, оставляем как есть
+    // Libc hooks
     // ------------------------------------------------------------
     const _libcHooks = {
         rng: new Set(), time: new Set(),
         rngInstalled: false, timeInstalled: false,
         rngHandles: [], timeHandles: [],
     };
-
     function installRngHooks() {
         if (_libcHooks.rngInstalled) return;
         _libcHooks.rngInstalled = true;
@@ -291,7 +281,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
             _libcHooks.rngHandles.push(h);
         }
     }
-
     function installTimeHooks() {
         if (_libcHooks.timeInstalled) return;
         _libcHooks.timeInstalled = true;
@@ -339,7 +328,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
             _libcHooks.timeHandles.push(h);
         }
     }
-
     function detachRngHooks() {
         for (const h of _libcHooks.rngHandles) { try { h.detach(); } catch (_) {} }
         _libcHooks.rngHandles = [];
@@ -355,13 +343,12 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
     function installLibcHooks() { installRngHooks(); installTimeHooks(); }
 
     // ------------------------------------------------------------
-    // Frame gate (в async не используется, оставлен для fallback)
+    // Frame gate (в async не используется)
     // ------------------------------------------------------------
     const gate = {
         armed: false, target: 0, waiting: false, released: false,
         enteredAtFrame: null, releasedAtFrame: null, waitMs: 0,
     };
-
     function setFrameGate(targetFrame) {
         if (gate.armed) return { ok: false, error: 'gate_already_armed', target: gate.target };
         gate.target = targetFrame;
@@ -511,7 +498,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                     pump._dbgStats.leave++;
                     if (!hero) return;
 
-                    // Fast path: ничего не нужно читать
                     if (!pump._detectBodyRecord
                         && !pump._ringActive
                         && !pump._playbackBodyMap
@@ -550,7 +536,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                             vx: rec.vx, vy: rec.vy, av: rec.av,
                             a0: extra.a0, b0: extra.b0, g80: extra.g80, g84: extra.g84,
                         });
-                        // body_hashes: сэмплируем 1/5 кадров
                         if (pump._frame % 5 === 0) {
                             const h = heroBodyHash(body);
                             if (h !== null) pump._detectBodyHash.set(pump._frame, h);
@@ -646,12 +631,13 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
     let detectStartWall = null;
     let detectStartNsVal = null;
     let detectWaitFirstHeroUpdate = false;
+    let detectFrameAtStart = 0;
     let _jumpCallSites = new Set();
 
     function _onFrameRecordTimeline(f) {
         if (!pump._recordTime) return;
         if (detectStartNsVal === null) return;
-        if (f % 5 !== 0) return;    // 1/5 кадров
+        if (f % 5 !== 0) return;
         pump._frameNsTimeline.set(f, nowNs() - detectStartNsVal);
     }
 
@@ -701,6 +687,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
         detectEvents = [];
         detectStartWall = Date.now();
         detectStartNsVal = nowNs();
+        detectFrameAtStart = pump.frame();
         detectRec = true;
         detectWaitFirstHeroUpdate = false;
         _jumpCallSites = new Set();
@@ -712,7 +699,8 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
         pump._recordRng = true;
         pump.setOnFrame(_onFrameRecordTimeline);
         send({ type: 'detect_started', frame: pump.frame(),
-            wall: detectStartWall, ns: detectStartNsVal });
+            wall: detectStartWall, ns: detectStartNsVal,
+            frame_at_start: detectFrameAtStart });
     }
 
     function detectStop() {
@@ -723,6 +711,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
         pump._recordRng = false;
         pump.clearOnFrame();
         const dur = detectStartWall ? (Date.now() - detectStartWall) : 0;
+        const frames_delta = pump.frame() - detectFrameAtStart;
         send({
             type: 'detect_stopped',
             count: detectEvents.length,
@@ -731,7 +720,8 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
             time_samples: pump._timeLog.length,
             rng_samples: pump._rngLog.length,
             duration_ms: dur,
-            avg_fps: dur > 0 ? (pump.frame() * 1000 / dur).toFixed(1) : 'n/a',
+            frames_delta: frames_delta,
+            avg_fps: dur > 0 ? (frames_delta * 1000 / dur).toFixed(1) : 'n/a',
              jump_callsites: Array.from(_jumpCallSites),
         });
         return detectEvents;
@@ -753,7 +743,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
     function detectGetTimeLog() { return pump._timeLog; }
 
     // ------------------------------------------------------------
-    // Play (NO jumpFn — только чтение)
+    // Play (NO jumpFn)
     // ------------------------------------------------------------
     let play = { phase: 'idle', anchorFrame: null, anchorRecFrame: null,
         anchorKind: null, plan: [], waitForFirstUpdate: false };
@@ -853,7 +843,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                 anchorRec: play.anchorRecFrame, kind: play.anchorKind,
                 plan: play.plan, gate: gateStatus(), frame: pump._frame };
         }
-
         function playStop() {
             for (const h of _playHooks) { try { h.detach(); } catch (_) {} }
             _playHooks.length = 0;
@@ -864,7 +853,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
             play.phase = 'idle';
             return { ok: true };
         }
-
         function playVerify() {
             let compared = 0, divergences = 0, maxU32 = 0, firstDiv = null;
             const samples = [];
