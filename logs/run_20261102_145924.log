@@ -1,0 +1,120 @@
+2026-11-02 14:59:24,278 INFO main: log → /home/noort/memory_replay/logs/run_20261102_145924.log
+2026-11-02 14:59:24,802 INFO main: attached by name: King of Thieves
+2026-11-02 14:59:24,807 INFO main: [agent] {'type': 'module_base', 'name': 'libthieves.so', 'base': '0x7f5014d02000', 'size': 35942400}
+2026-11-02 14:59:24,856 INFO main: [agent] {'type': 'detect_installed', 'n': 3}
+2026-11-02 14:59:25,722 INFO main: === RECORD ===
+2026-11-02 14:59:26,549 INFO main: [agent] {'type': 'jump_monitor_installed', 'addr': '0x7f5016313f00'}
+2026-11-02 14:59:26,549 INFO main: [agent] {'type': 'pump_installed', 'mode': 'interceptor', 'func': '0x7f5016314a20', 'offset': '0x1612a20'}
+2026-11-02 14:59:26,550 INFO main: pump installed (lazy)
+2026-11-02 14:59:26,550 INFO main: [agent] {'type': 'detect_started', 'frame': 0, 'wall': 1793620766550, 'ns': 1793620766550000000}
+2026-11-02 14:59:33,458 INFO main: [agent] {'type': 'event', 'ev': {'frame': 0, 't_ms': 6907, 't_ns': 6906999808, 'name': 'unfreeze', 'thisPtr': '0x7f515f5c6508', 'snap': {'vt_rel': '0x2007ea8', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': -1883953200, 'ground_84': 32593}, 'vt': '0x7f5016d09ea8', 'vt_rel': '0x2007ea8'}}
+2026-11-02 14:59:33,476 INFO main: [agent] {'type': 'event', 'ev': {'frame': 1, 't_ms': 6925, 't_ns': 6924999936, 'name': 'first_hero_update', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}}}
+2026-11-02 14:59:34,366 INFO main: [agent] {'type': 'event', 'ev': {'frame': 54, 't_ms': 7816, 't_ns': 7816000000, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:35,567 INFO main: [agent] {'type': 'event', 'ev': {'frame': 126, 't_ms': 9016, 't_ns': 9016000000, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:36,217 INFO main: [agent] {'type': 'event', 'ev': {'frame': 165, 't_ms': 9666, 't_ns': 9665999872, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:37,617 INFO main: [agent] {'type': 'event', 'ev': {'frame': 249, 't_ms': 11066, 't_ns': 11065999872, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:38,688 INFO main: [agent] {'type': 'event', 'ev': {'frame': 313, 't_ms': 12137, 't_ns': 12136999936, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:40,188 INFO main: [agent] {'type': 'event', 'ev': {'frame': 403, 't_ms': 13637, 't_ns': 13636999936, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 1, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:41,138 INFO main: [agent] {'type': 'event', 'ev': {'frame': 460, 't_ms': 14588, 't_ns': 14587999744, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 1, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:41,730 INFO main: [agent] {'type': 'event', 'ev': {'frame': 496, 't_ms': 15179, 't_ns': 15178999808, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 0, 'cooldown_b0': 0, 'ground_80': 1, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:43,230 INFO main: [agent] {'type': 'event', 'ev': {'frame': 586, 't_ms': 16680, 't_ns': 16680000000, 'name': 'jump', 'thisPtr': '0x7f51401dca30', 'snap': {'vt_rel': '0x205a068', 'state_a0': 1, 'cooldown_b0': 0, 'ground_80': 0, 'ground_84': 0}, 'vt': '0x7f5016d5c068', 'vt_rel': '0x205a068', 'returnAddress': '0x7f501641f3f7', 'returnAddressRel': '0x171d3f7'}}
+2026-11-02 14:59:52,872 INFO main: [agent] {'type': 'detect_stopped', 'count': 11, 'body_frames': 631, 'body_hashes': 126, 'time_samples': 0, 'rng_samples': 0, 'duration_ms': 26321, 'avg_fps': '24.0', 'jump_callsites': ['0x171d3f7']}
+2026-11-02 14:59:52,894 INFO main: saved replay: 11 events, 631 body_frames, anchor=first_hero_update@1
+2026-11-02 14:59:53,537 INFO main: [agent] {'type': 'pump_already'}
+2026-11-02 14:59:53,537 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_unfreeze'}
+2026-11-02 14:59:53,537 INFO orch: playSetup: anchor=first_hero_update@1 jumps=9 lead=0ms check=150ms retry=True
+2026-11-02 14:59:53,537 INFO orch: tap position: (540, 960)
+2026-11-02 14:59:56,150 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_first_update'}
+2026-11-02 14:59:56,191 INFO main: [agent] {'type': 'play_armed', 'anchor': 1, 'anchorRec': 1, 'kind': 'first_hero_update', 'count': 9, 'body_verify': 631}
+2026-11-02 14:59:57,046 INFO orch: fire idx=0 cur=54 target=54 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:59:57,048 INFO phantom: connected to Phantom 127.0.0.1:27183
+2026-11-02 14:59:57,202 WARNING orch: fired idx=0 MULTI-JUMP count=2 frames=[54, 54]
+2026-11-02 14:59:57,204 INFO orch: fired idx=0 fired@54 target=54 err=+0 tap=2.87ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 14:59:58,245 INFO orch: fire idx=1 cur=126 target=126 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:59:58,403 INFO orch: fired idx=1 fired@126 target=126 err=+0 tap=1.11ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 14:59:58,897 INFO orch: fire idx=2 cur=165 target=165 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 14:59:59,054 INFO orch: fired idx=2 fired@165 target=165 err=+0 tap=1.10ms taps=1 snap_after(a0=0 g80=0)
+2026-11-02 15:00:00,296 INFO orch: fire idx=3 cur=249 target=249 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:00,454 INFO orch: fired idx=3 fired@249 target=249 err=+0 tap=1.10ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:00:01,365 INFO orch: fire idx=4 cur=313 target=313 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:01,523 INFO orch: fired idx=4 fired@313 target=313 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:00:02,863 INFO orch: fire idx=5 cur=403 target=403 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:03,020 INFO orch: fired idx=5 fired@403 target=403 err=+0 tap=1.09ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:03,815 INFO orch: fire idx=6 cur=460 target=460 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:03,972 INFO orch: fired idx=6 fired@460 target=460 err=+0 tap=1.09ms taps=1 snap_after(a0=2 g80=0)
+2026-11-02 15:00:04,414 INFO orch: fire idx=7 cur=496 target=496 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:04,571 INFO orch: fired idx=7 fired@496 target=496 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:00:05,913 INFO orch: fire idx=8 cur=586 target=586 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:06,071 INFO orch: fired idx=8 fired@586 target=586 err=+0 tap=1.12ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:17,973 INFO main: [agent] {'type': 'pump_already'}
+2026-11-02 15:00:17,973 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_unfreeze'}
+2026-11-02 15:00:17,974 INFO orch: playSetup: anchor=first_hero_update@1 jumps=9 lead=0ms check=150ms retry=True
+2026-11-02 15:00:17,974 INFO orch: tap position: (540, 960)
+2026-11-02 15:00:20,724 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_first_update'}
+2026-11-02 15:00:20,766 INFO main: [agent] {'type': 'play_armed', 'anchor': 1, 'anchorRec': 1, 'kind': 'first_hero_update', 'count': 9, 'body_verify': 631}
+2026-11-02 15:00:21,620 INFO orch: fire idx=0 cur=54 target=54 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:21,777 INFO orch: fired idx=0 fired@54 target=54 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:22,820 INFO orch: fire idx=1 cur=126 target=126 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:22,977 INFO orch: fired idx=1 fired@126 target=126 err=+0 tap=1.10ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:00:23,471 INFO orch: fire idx=2 cur=165 target=165 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:23,628 INFO orch: fired idx=2 fired@165 target=165 err=+0 tap=1.11ms taps=1 snap_after(a0=0 g80=0)
+2026-11-02 15:00:24,871 INFO orch: fire idx=3 cur=249 target=249 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:25,029 INFO orch: fired idx=3 fired@249 target=249 err=+0 tap=1.10ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:00:25,938 INFO orch: fire idx=4 cur=313 target=313 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:26,097 INFO orch: fired idx=4 fired@313 target=313 err=+0 tap=1.11ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:00:27,439 INFO orch: fire idx=5 cur=403 target=403 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:27,597 INFO orch: fired idx=5 fired@403 target=403 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:28,389 INFO orch: fire idx=6 cur=460 target=460 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:28,546 INFO orch: fired idx=6 fired@460 target=460 err=+0 tap=1.10ms taps=1 snap_after(a0=2 g80=0)
+2026-11-02 15:00:28,988 INFO orch: fire idx=7 cur=496 target=496 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:29,146 INFO orch: fired idx=7 fired@496 target=496 err=+0 tap=1.09ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:00:30,490 INFO orch: fire idx=8 cur=586 target=586 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:30,647 INFO orch: fired idx=8 fired@586 target=586 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:40,716 INFO main: [agent] {'type': 'pump_already'}
+2026-11-02 15:00:40,717 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_unfreeze'}
+2026-11-02 15:00:40,717 INFO orch: playSetup: anchor=first_hero_update@1 jumps=9 lead=0ms check=150ms retry=True
+2026-11-02 15:00:40,717 INFO orch: tap position: (540, 960)
+2026-11-02 15:00:42,070 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_first_update'}
+2026-11-02 15:00:42,111 INFO main: [agent] {'type': 'play_armed', 'anchor': 1, 'anchorRec': 1, 'kind': 'first_hero_update', 'count': 9, 'body_verify': 631}
+2026-11-02 15:00:42,967 INFO orch: fire idx=0 cur=54 target=54 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:43,124 INFO orch: fired idx=0 fired@54 target=54 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:44,165 INFO orch: fire idx=1 cur=126 target=126 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:44,323 INFO orch: fired idx=1 fired@126 target=126 err=+0 tap=1.10ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:00:44,816 INFO orch: fire idx=2 cur=165 target=165 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:44,973 INFO orch: fired idx=2 fired@165 target=165 err=+0 tap=1.09ms taps=1 snap_after(a0=0 g80=0)
+2026-11-02 15:00:46,217 INFO orch: fire idx=3 cur=249 target=249 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:46,375 INFO orch: fired idx=3 fired@249 target=249 err=+0 tap=1.11ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:00:47,284 INFO orch: fire idx=4 cur=313 target=313 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:47,441 INFO orch: fired idx=4 fired@313 target=313 err=+0 tap=1.09ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:00:48,785 INFO orch: fire idx=5 cur=403 target=403 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:48,942 INFO orch: fired idx=5 fired@403 target=403 err=+0 tap=1.11ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:00:49,733 INFO orch: fire idx=6 cur=460 target=460 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:49,891 INFO orch: fired idx=6 fired@460 target=460 err=+0 tap=1.10ms taps=1 snap_after(a0=2 g80=0)
+2026-11-02 15:00:50,333 INFO orch: fire idx=7 cur=496 target=496 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:50,490 INFO orch: fired idx=7 fired@496 target=496 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:00:51,833 INFO orch: fire idx=8 cur=586 target=586 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:00:51,991 INFO orch: fired idx=8 fired@586 target=586 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:01:00,371 INFO main: [agent] {'type': 'pump_already'}
+2026-11-02 15:01:00,372 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_unfreeze'}
+2026-11-02 15:01:00,372 INFO orch: playSetup: anchor=first_hero_update@1 jumps=9 lead=0ms check=150ms retry=True
+2026-11-02 15:01:00,372 INFO orch: tap position: (540, 960)
+2026-11-02 15:01:01,831 INFO main: [agent] {'type': 'play_phase', 'phase': 'waiting_first_update'}
+2026-11-02 15:01:01,873 INFO main: [agent] {'type': 'play_armed', 'anchor': 1, 'anchorRec': 1, 'kind': 'first_hero_update', 'count': 9, 'body_verify': 631}
+2026-11-02 15:01:02,727 INFO orch: fire idx=0 cur=54 target=54 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:02,885 INFO orch: fired idx=0 fired@54 target=54 err=+0 tap=1.11ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:01:03,929 INFO orch: fire idx=1 cur=126 target=126 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:04,087 INFO orch: fired idx=1 fired@126 target=126 err=+0 tap=1.09ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:01:04,577 INFO orch: fire idx=2 cur=165 target=165 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:04,734 INFO orch: fired idx=2 fired@165 target=165 err=+0 tap=1.10ms taps=1 snap_after(a0=0 g80=0)
+2026-11-02 15:01:05,979 INFO orch: fire idx=3 cur=249 target=249 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:06,136 INFO orch: fired idx=3 fired@249 target=249 err=+0 tap=1.10ms taps=1 snap_after(a0=4 g80=1)
+2026-11-02 15:01:07,045 INFO orch: fire idx=4 cur=313 target=313 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:07,202 INFO orch: fired idx=4 fired@313 target=313 err=+0 tap=1.11ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:01:08,546 INFO orch: fire idx=5 cur=403 target=403 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:08,703 INFO orch: fired idx=5 fired@403 target=403 err=+0 tap=1.11ms taps=1 snap_after(a0=1 g80=0)
+2026-11-02 15:01:09,496 INFO orch: fire idx=6 cur=460 target=460 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:09,653 INFO orch: fired idx=6 fired@460 target=460 err=+0 tap=1.09ms taps=1 snap_after(a0=2 g80=0)
+2026-11-02 15:01:10,096 INFO orch: fire idx=7 cur=496 target=496 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:10,253 INFO orch: fired idx=7 fired@496 target=496 err=+0 tap=1.10ms taps=1 snap_after(a0=1 g80=1)
+2026-11-02 15:01:11,595 INFO orch: fire idx=8 cur=586 target=586 frames_to_go=0 lead=0 tap=(540,960)
+2026-11-02 15:01:11,753 INFO orch: fired idx=8 fired@586 target=586 err=+0 tap=1.09ms taps=1 snap_after(a0=1 g80=0)

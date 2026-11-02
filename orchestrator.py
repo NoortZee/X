@@ -1,12 +1,10 @@
-"""orchestrator.py — async replay (NO frame gate). v6.2.
+"""orchestrator.py — async replay (NO frame gate). v7.1.
 
-Changes vs v6.1:
-  * fire at cur == target (не target-1)
-  * _is_jump_transition поддерживает combo (a0:1→2, 2→4)
-  * allow frames_to_go == 0
-  * poll_interval_ms из config (было хардкод 2 ms → 5 ms)
-  * f_max = target + 8 (для delayed detection)
-  * v7.0: JUMP-hook детекция (pumpJumpCount) + retry при MISSED
+Changes vs v7.0:
+  * _snap_at_frame: ring_tail(4) вместо ring_tail(120) — экономия RPC
+  * _fire_async: stall detection (game_stalled, 2 s без прироста кадров)
+  * _fire_async: skip вместо raise на deadline (не убивает весь play)
+  * post_tap_check_ms=60, poll_interval_ms=3 (из config.yaml)
 """
 from __future__ import annotations
 
@@ -103,7 +101,9 @@ class Orchestrator:
             time.sleep(o["poll_interval_ms"] / 1000.0)
 
     def _snap_at_frame(self, frame: int) -> dict:
-        tail = self.agent.ring_tail(120) or []
+        # ring_tail(4) вместо (120): только последние 4 элемента,
+        # этого хватает для извлечения snap_after (fired_frame+1)
+        tail = self.agent.ring_tail(4) or []
         for r in tail:
             if int(r.get("frame", -1)) == frame:
                 return {k: r.get(k) for k in
@@ -122,10 +122,15 @@ class Orchestrator:
         retry_delay_ms = float(o.get("retry_delay_ms", 50))
         trigger_at_ms = lead_ms + margin_ms
         poll_s = o["poll_interval_ms"] / 1000.0
+        stall_s = 2.0
 
+        # --- 1. ждём cur == target ---
         t_start = time.monotonic()
         cur_before = None
         target_frame = None
+        last_cur = -1
+        last_cur_t = t_start
+
         while True:
             st = self.agent.play_state()
             if st.get("phase") != "playing":
@@ -134,8 +139,28 @@ class Orchestrator:
             anchor = int(st["anchor"])
             target_frame = anchor + int(jump["frame_delta"])
             cur = int(st.get("frame", 0))
+
+            # game_stalled: pump._frame не растёт 2 секунды → персонаж умер /
+            # уровень закончился / игра зафризилась.
+            now = time.monotonic()
+            if cur != last_cur:
+                last_cur = cur
+                last_cur_t = now
+            elif now - last_cur_t > stall_s:
+                log.warning(
+                    "fire idx=%d GAME STALLED cur=%d target=%d",
+                    jump["idx"], cur, target_frame)
+                return FireRecord(
+                    idx=jump["idx"], abs_frame=-1,
+                    target_frame=target_frame, frame_error=MISSED,
+                    tap_ack_ms=0.0, tap_x=self.tap_x, tap_y=self.tap_y,
+                    snap_before=jump.get("snap") or {},
+                    snap_after={}, note="game_stalled",
+                )
+
             frames_to_go = target_frame - cur
 
+            # Прошли таргет — skip, не raise.
             if frames_to_go < 0:
                 log.warning(
                     "fire idx=%d SKIP (cur=%d > target=%d)",
@@ -154,9 +179,19 @@ class Orchestrator:
                 break
 
             time.sleep(poll_s)
+
+            # hard deadline тоже skip, не raise.
             if time.monotonic() - t_start > hard_s:
-                raise ReplayError(
-                    f"fire idx={jump['idx']}: deadline (cur={cur})")
+                log.warning(
+                    "fire idx=%d SKIP deadline (cur=%d target=%d)",
+                    jump["idx"], cur, target_frame)
+                return FireRecord(
+                    idx=jump["idx"], abs_frame=-1,
+                    target_frame=target_frame, frame_error=MISSED,
+                    tap_ack_ms=0.0, tap_x=self.tap_x, tap_y=self.tap_y,
+                    snap_before=jump.get("snap") or {},
+                    snap_after={}, note="deadline_skipped",
+                )
 
         log.info(
             "fire idx=%d cur=%d target=%d frames_to_go=%d lead=%d tap=(%d,%d)",
@@ -164,11 +199,13 @@ class Orchestrator:
             target_frame - cur_before, int(lead_ms),
             self.tap_x, self.tap_y)
 
+        # --- 2. снимок счётчика jumpFn до тапа ---
         try:
             jc_before = int(self.agent.pump_jump_count())
         except Exception as e:
             raise ReplayError(f"pump_jump_count failed: {e}")
 
+        # --- 3. тап (с retry) ---
         total_taps = 0
         total_tap_ms = 0.0
         new_jumps = []
@@ -199,6 +236,7 @@ class Orchestrator:
                 time.sleep(retry_delay_ms / 1000.0)
                 jc_before = jc_after
 
+        # --- 4. анализ результата ---
         if not new_jumps:
             log.warning(
                 "fired idx=%d MISSED target=%d taps=%d tap_ms=%.2f",
@@ -285,7 +323,7 @@ class Orchestrator:
 
         report = {
             "ok": True,
-            "mode": "async_no_gate_v7.0",
+            "mode": "async_no_gate_v7.1",
             "anchor_kind": anchor_kind,
             "anchor_rec": anchor_rec,
             "tap_xy": [self.tap_x, self.tap_y],
