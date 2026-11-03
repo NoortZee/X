@@ -3,6 +3,13 @@
 
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
+
+Логи:
+  * в logs/ хранится только replay.json;
+  * .log-файлы не создаются;
+  * play_*.json не создаются;
+  * replay.json перезаписывается при каждом record;
+  * первая строка replay.json — комментарий "# jumps: N".
 """
 from __future__ import annotations
 
@@ -11,7 +18,6 @@ import logging
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 import frida
@@ -46,20 +52,37 @@ PRINT_TYPES = {
 log = logging.getLogger("main")
 
 
-def setup_logging(level: str = "INFO") -> Path:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = LOG_DIR / f"run_{ts}.log"
+def setup_logging(level: str = "INFO") -> None:
+    """Только консоль. Файловые .log больше не создаются."""
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    fh = logging.FileHandler(path, encoding="utf-8")
-    fh.setFormatter(fmt)
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(fmt)
+
     root = logging.getLogger()
     root.setLevel(getattr(logging, level, logging.INFO))
-    root.addHandler(fh)
+
+    # Убираем все старые хендлеры, включая FileHandler
+    for h in list(root.handlers):
+        root.removeHandler(h)
+        try:
+            h.close()
+        except Exception:
+            pass
+
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
     root.addHandler(sh)
-    return path
+
+
+def prune_logs_dir() -> None:
+    """Оставляем в logs/ только replay.json. Всё остальное удаляем."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    for p in LOG_DIR.iterdir():
+        if p.name == REPLAY_PATH.name:
+            continue
+        if p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
 
 def load_config() -> dict:
@@ -141,10 +164,19 @@ class Agent:
 
 
 def load_replay(path: Path = REPLAY_PATH) -> dict:
+    """Читает replay.json, пропуская строки-комментарии (# ...)."""
     if not path.exists():
         return {}
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    text = path.read_text(encoding="utf-8")
+    lines = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        lines.append(line)
+    raw = "\n".join(lines).strip()
+    if not raw:
+        return {}
+    return json.loads(raw)
 
 
 # ------------------------------------------------------------
@@ -166,6 +198,8 @@ def do_record(agent: Agent) -> None:
     rng = agent.detect_get_rng_log()
 
     kind, anchor = find_anchor(events, body)
+    jumps_count = sum(1 for e in events if e.get("name") == "jump")
+
     out = {
         "version": 3,
         "anchor_frame": anchor,
@@ -175,12 +209,18 @@ def do_record(agent: Agent) -> None:
         "timeline_ns": tl,
         "rng_log": rng[:2000] if rng else None,
     }
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    REPLAY_PATH.write_text(
-        json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8"
+    payload = (
+        f"# jumps: {jumps_count}\n"
+        + json.dumps(out, indent=2, ensure_ascii=False)
     )
-    log.info("saved replay: %d events, %d body_frames, anchor=%s@%s",
-             len(events), len(body), kind, anchor)
+    REPLAY_PATH.write_text(payload, encoding="utf-8")
+
+    log.info(
+        "saved replay: %d events, %d body_frames, %d jumps, anchor=%s@%s",
+        len(events), len(body), jumps_count, kind, anchor,
+    )
 
     if not body:
         log.warning(
@@ -212,10 +252,6 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
         log.error("play failed: %s", e)
         return
 
-    out_path = LOG_DIR / f"play_{datetime.now():%Y%m%d_%H%M%S}.json"
-    out_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
     fe = report["frame_error_stats"]
     print(
         f"✅ jumps: {report['jumps_fired']}/{report['jumps_planned']} "
@@ -228,7 +264,7 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
         f"abs_med={fe['abs_med']} abs_max={fe['abs_max']}"
     )
     print(f"   tap ms: {report['tap_stats_ms']}")
-    print(f"   report: {out_path}")
+    print("   report: console only (logs/replay.json is the only saved file)")
 
 
 # ------------------------------------------------------------
@@ -361,8 +397,9 @@ MENU = """
 
 def main() -> None:
     cfg = load_config()
-    log_path = setup_logging(cfg.get("logging", {}).get("level", "INFO"))
-    log.info("log → %s", log_path)
+    setup_logging(cfg.get("logging", {}).get("level", "INFO"))
+    prune_logs_dir()
+    log.info("logging: console only; logs dir keeps only replay.json")
 
     agent = Agent(cfg)
     try:
