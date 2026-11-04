@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.1).
+r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.3).
 
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
+
+v6.3:
+  * clear (c) теперь чистит и replay.json, и консоль:
+      - ANSI CSI \033[H\033[2J\033[3J — экран + scrollback;
+      - не форкает `clear`-процесс, работает в любом терминале;
+      - "cleared" больше не печатается (иначе висело бы над меню);
+      - ошибка удаления печатается ПОСЛЕ очистки, чтобы её не смыло.
+
+v6.2:
+  * Ctrl+C во время любой команды возвращает в меню, а не убивает процесс.
+  * do_play: KeyboardInterrupt → мягкий выход (orchestrator.run() сам
+    делает play_stop() в finally).
+  * do_record: KeyboardInterrupt во время «Enter — ОСТАНОВИТЬ…» всё равно
+    вызывает detect_stop() — иначе detectRec остаётся true в агенте.
+  * Главный цикл ловит KeyboardInterrupt до общего except Exception.
 
 Логи:
   * в logs/ хранится только replay.json;
@@ -101,6 +116,26 @@ def prune_logs_dir() -> None:
                 p.unlink()
             except OSError:
                 pass
+
+
+def clear_console() -> None:
+    """Полностью очищает консоль: видимый экран + scrollback.
+
+    ANSI CSI:
+      \\033[H   — курсор в (1,1)
+      \\033[2J  — стереть весь экран
+      \\033[3J  — стереть saved-lines (scrollback). Поддерживается
+                 kitty/alacritty/foot/gnome-terminal/konsole/xterm/tmux.
+                 На остальных терминалах последовательность просто
+                 игнорируется — экран всё равно очистится через 2J.
+
+    В отличие от os.system('clear'):
+      * не форкает процесс;
+      * реально стирает scrollback, а не «сдвигает» экран вверх,
+        оставляя историю доступной при прокрутке.
+    """
+    sys.stdout.write("\033[H\033[2J\033[3J")
+    sys.stdout.flush()
 
 
 def load_config() -> dict:
@@ -256,7 +291,13 @@ def do_record(agent: Agent, cfg: dict) -> None:
     agent.ensure_pump()          # lazy install
     agent.detect_start()
     print("🔴 запись... Играйте (первый тап — старт уровня).")
-    input("Enter — ОСТАНОВИТЬ... ")
+    try:
+        input("Enter — ОСТАНОВИТЬ... ")
+    except KeyboardInterrupt:
+        # Ctrl+C в ожидании стопа — всё равно корректно закрываем запись,
+        # иначе detectRec останется true в агенте и будет писать события
+        # во время play.
+        log.warning("record stop forced by Ctrl+C")
 
     events = agent.detect_stop()
     body = agent.detect_get_body_frames()
@@ -317,7 +358,11 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     print(f"anchor: {replay.get('anchor_kind')}={replay.get('anchor_frame')}, "
           f"jumps={sum(1 for e in replay['events'] if e['name'] == 'jump')}")
     print("Войдите на уровень в замороженном состоянии.")
-    input("Enter — старт play... ")
+    try:
+        input("Enter — старт play... ")
+    except KeyboardInterrupt:
+        log.warning("play cancelled before start")
+        return
 
     # playSetup внутри orchestrator.run() сам вызовет pump.install()
     agent.ensure_pump()
@@ -325,6 +370,11 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     orch = Orchestrator(cfg, agent, phantom, replay)
     try:
         report = orch.run()
+    except KeyboardInterrupt:
+        # orchestrator.run() уже сделал play_stop() в finally.
+        # Просто возвращаемся в меню.
+        log.warning("play aborted by Ctrl+C — returning to menu")
+        return
     except (ReplayError, PhantomError) as e:
         log.error("play failed: %s", e)
         return
@@ -351,7 +401,11 @@ def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     print("=== CALIBRATE (async, no gate) ===")
     print("Нужен активный уровень — персонаж бежит, не frozen.")
     print("Каждый тап: снимок cur_frame → tap → ждём 200 ms → ищем переход a0/g80.")
-    input("Enter — старт... ")
+    try:
+        input("Enter — старт... ")
+    except KeyboardInterrupt:
+        log.warning("calibrate cancelled before start")
+        return
 
     agent.ensure_pump()          # lazy install
 
@@ -467,7 +521,7 @@ MENU = """
   play                only play
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
-  clear               delete replay.json
+  clear               wipe console + delete replay.json
   exit / q            quit
 ─────────────────────────────────────────────────
 """
@@ -507,13 +561,30 @@ def main() -> None:
             elif cmd in ("dry-run", "dry"):
                 do_dry_run(agent, cfg)
             elif cmd in ("clear", "c"):
+                # 1) Удаляем replay.json
+                err = None
                 if REPLAY_PATH.exists():
-                    REPLAY_PATH.unlink()
-                print("cleared")
+                    try:
+                        REPLAY_PATH.unlink()
+                    except OSError as e:
+                        err = e
+                # 2) Стираем консоль (экран + scrollback).
+                #    Делаем ДО печати ошибки — иначе сообщение смоет.
+                clear_console()
+                # 3) При успехе намеренно ничего не печатаем: следующая
+                #    итерация while True напечатает MENU на чистом экране.
+                #    Строка "cleared" висела бы над меню и портила эффект.
+                if err is not None:
+                    log.warning("failed to delete %s: %s", REPLAY_PATH, err)
             elif cmd in ("exit", "quit", "q"):
                 break
             else:
                 print(f"unknown command: {cmd}")
+        except KeyboardInterrupt:
+            # Ctrl+C во время любой команды → мягко назад в меню.
+            # KeyboardInterrupt наследуется от BaseException, поэтому
+            # общий except Exception его НЕ ловит — нужен явный handler.
+            log.warning("interrupted by user (Ctrl+C) — back to menu")
         except frida.InvalidOperationError as e:
             log.error("frida session lost: %s", e)
             break

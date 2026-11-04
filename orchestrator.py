@@ -1,4 +1,10 @@
-"""orchestrator.py — async replay (NO frame gate). v7.6.
+"""orchestrator.py — async replay (NO frame gate). v7.7.
+
+v7.7:
+  * run() обёрнут в try/finally — play_stop() вызывается ВСЕГДА,
+    включая KeyboardInterrupt / ReplayError / PhantomError.
+    Это предотвращает «зависшие» UNFREEZE-хуки в агенте после abort
+    (иначе следующий play задваивает onUnfreeze).
 
 v7.6:
   * pre-check covered_by_user_tap для idx=0:
@@ -369,83 +375,86 @@ class Orchestrator:
         if not setup.get("ok"):
             raise ReplayError(f"playSetup failed: {setup}")
 
-        # Pre-connect phantom (экономит 5-10 мс на первом tap)
         try:
-            self.phantom.connect()
-            log.info("phantom pre-connected")
-        except Exception as e:
-            log.warning("phantom pre-connect failed: %s", e)
-
-        # Baseline jump count до пользовательского тапа
-        try:
-            self.jc_baseline = int(self.agent.pump_jump_count())
-        except Exception as e:
-            log.warning("pump_jump_count baseline failed: %s", e)
-            self.jc_baseline = None
-
-        o = self.cfg["orchestrator"]
-        log.info(
-            "playSetup: anchor=%s@%s jumps=%d lead=%dms check=%dms retry=%s "
-            "overshoot_tol=%d jc_baseline=%s",
-            anchor_kind, anchor_rec, len(plan),
-            o["predict_lead_ms"], o["post_tap_check_ms"],
-            o.get("retry_on_miss", False), OVERSHOOT_TOLERANCE,
-            self.jc_baseline)
-        log.info("tap position: (%d, %d)", self.tap_x, self.tap_y)
-
-        self._wall0 = time.monotonic()
-        st = self._wait_playing()
-
-        for i, j in enumerate(plan):
-            if time.monotonic() - self._wall0 > o["wall_timeout_s"]:
-                raise ReplayError(
-                    f"wall_timeout (fired={len(self.fire_log)}/{len(plan)})")
-            fr = self._fire_async(j, initial_state=st if i == 0 else None)
-            self.fire_log.append(fr)
-
-        verify_bf = {}
-        if o.get("verify_body_frames", False):
+            # Pre-connect phantom (экономит 5-10 мс на первом tap)
             try:
-                verify_bf = self.agent.play_verify()
+                self.phantom.connect()
+                log.info("phantom pre-connected")
             except Exception as e:
-                log.warning("play_verify: %s", e)
+                log.warning("phantom pre-connect failed: %s", e)
 
-        durations = [fr.tap_ack_ms for fr in self.fire_log] or [0.0]
-        errors = [fr.frame_error for fr in self.fire_log if fr.frame_error != MISSED]
-        abs_errors = [abs(e) for e in errors]
-        tap_counts = [fr.tap_count for fr in self.fire_log] or [0]
+            # Baseline jump count до пользовательского тапа
+            try:
+                self.jc_baseline = int(self.agent.pump_jump_count())
+            except Exception as e:
+                log.warning("pump_jump_count baseline failed: %s", e)
+                self.jc_baseline = None
 
-        report = {
-            "ok": True,
-            "mode": "async_no_gate_v7.6",
-            "anchor_kind": anchor_kind,
-            "anchor_rec": anchor_rec,
-            "tap_xy": [self.tap_x, self.tap_y],
-            "jumps_planned": len(plan),
-            "jumps_fired": sum(1 for fr in self.fire_log if fr.frame_error != MISSED),
-            "jumps_missed": sum(1 for fr in self.fire_log if fr.frame_error == MISSED),
-            "covered_by_user_tap": sum(
-                1 for fr in self.fire_log if fr.note == "covered_by_user_tap"),
-            "retries": sum(1 for tc in tap_counts if tc > 1),
-            "frame_error_stats": {
-                "min": min(errors) if errors else None,
-                "med": statistics.median(errors) if errors else None,
-                "max": max(errors) if errors else None,
-                "abs_med": statistics.median(abs_errors) if abs_errors else None,
-                "abs_max": max(abs_errors) if abs_errors else None,
-            },
-            "tap_stats_ms": {
-                "min": min(durations),
-                "med": statistics.median(durations),
-                "max": max(durations),
-            },
-            "fired_log": [fr.__dict__ for fr in self.fire_log],
-            "verify_body_frames": verify_bf,
-            "elapsed_s": time.monotonic() - self._wall0,
-        }
+            o = self.cfg["orchestrator"]
+            log.info(
+                "playSetup: anchor=%s@%s jumps=%d lead=%dms check=%dms retry=%s "
+                "overshoot_tol=%d jc_baseline=%s",
+                anchor_kind, anchor_rec, len(plan),
+                o["predict_lead_ms"], o["post_tap_check_ms"],
+                o.get("retry_on_miss", False), OVERSHOOT_TOLERANCE,
+                self.jc_baseline)
+            log.info("tap position: (%d, %d)", self.tap_x, self.tap_y)
 
-        try:
-            self.agent.play_stop()
-        except Exception:
-            pass
-        return report
+            self._wall0 = time.monotonic()
+            st = self._wait_playing()
+
+            for i, j in enumerate(plan):
+                if time.monotonic() - self._wall0 > o["wall_timeout_s"]:
+                    raise ReplayError(
+                        f"wall_timeout (fired={len(self.fire_log)}/{len(plan)})")
+                fr = self._fire_async(j, initial_state=st if i == 0 else None)
+                self.fire_log.append(fr)
+
+            verify_bf = {}
+            if o.get("verify_body_frames", False):
+                try:
+                    verify_bf = self.agent.play_verify()
+                except Exception as e:
+                    log.warning("play_verify: %s", e)
+
+            durations = [fr.tap_ack_ms for fr in self.fire_log] or [0.0]
+            errors = [fr.frame_error for fr in self.fire_log if fr.frame_error != MISSED]
+            abs_errors = [abs(e) for e in errors]
+            tap_counts = [fr.tap_count for fr in self.fire_log] or [0]
+
+            report = {
+                "ok": True,
+                "mode": "async_no_gate_v7.7",
+                "anchor_kind": anchor_kind,
+                "anchor_rec": anchor_rec,
+                "tap_xy": [self.tap_x, self.tap_y],
+                "jumps_planned": len(plan),
+                "jumps_fired": sum(1 for fr in self.fire_log if fr.frame_error != MISSED),
+                "jumps_missed": sum(1 for fr in self.fire_log if fr.frame_error == MISSED),
+                "covered_by_user_tap": sum(
+                    1 for fr in self.fire_log if fr.note == "covered_by_user_tap"),
+                "retries": sum(1 for tc in tap_counts if tc > 1),
+                "frame_error_stats": {
+                    "min": min(errors) if errors else None,
+                    "med": statistics.median(errors) if errors else None,
+                    "max": max(errors) if errors else None,
+                    "abs_med": statistics.median(abs_errors) if abs_errors else None,
+                    "abs_max": max(abs_errors) if abs_errors else None,
+                },
+                "tap_stats_ms": {
+                    "min": min(durations),
+                    "med": statistics.median(durations),
+                    "max": max(durations),
+                },
+                "fired_log": [fr.__dict__ for fr in self.fire_log],
+                "verify_body_frames": verify_bf,
+                "elapsed_s": time.monotonic() - self._wall0,
+            }
+            return report
+        finally:
+            # ВСЕГДА: на KeyboardInterrupt, ReplayError, PhantomError, что угодно.
+            # Иначе UNFREEZE-хуки останутся в агенте и следующий play их задвоит.
+            try:
+                self.agent.play_stop()
+            except Exception as e:
+                log.warning("play_stop in finally failed: %s", e)
