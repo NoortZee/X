@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.1).
+r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.1).
 
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
@@ -9,8 +9,27 @@ Idle-режим (после attach, до действий) — без Intercepto
   * .log-файлы не создаются;
   * play_*.json не создаются;
   * replay.json перезаписывается при каждом record;
-  * первая строка replay.json — комментарий "# jumps: N".
-"""
+  * преамбула обёрнута в тройные кавычки — удобно копировать:
+        """
+        jumps: N
+        anchor: <kind>@<frame>
+        fps: 60
+        tap_down_ms: 1
+
+        // задержка загрузки уровня и input lag примерно +26 мс
+        SLEEP_U16 <ms>
+        PRESS_MK hidmouse_0
+        SLEEP_U16 <tap_down_ms>
+        RELEASE_MK hidmouse_0
+        //
+        ...
+        """
+        {
+          "version": 3,
+          ...
+        }
+    Макрос НЕ печатается в консоль.
+'''
 from __future__ import annotations
 
 import json
@@ -59,7 +78,6 @@ def setup_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, level, logging.INFO))
 
-    # Убираем все старые хендлеры, включая FileHandler
     for h in list(root.handlers):
         root.removeHandler(h)
         try:
@@ -164,25 +182,73 @@ class Agent:
 
 
 def load_replay(path: Path = REPLAY_PATH) -> dict:
-    """Читает replay.json, пропуская строки-комментарии (# ...)."""
+    r'''Читает replay.json.
+
+    Всё до первого '{' считается преамбулой (блок с макросом) и
+    пропускается. JSON-объект начинается с '{'.
+    '''
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
-    lines = []
-    for line in text.splitlines():
-        if line.lstrip().startswith("#"):
-            continue
-        lines.append(line)
-    raw = "\n".join(lines).strip()
+    brace = text.find("{")
+    if brace < 0:
+        return {}
+    raw = text[brace:].strip()
     if not raw:
         return {}
     return json.loads(raw)
 
 
+def build_macro_script(events, anchor, fps, tap_down_ms=1):
+    """Строит текстовый скрипт в формате Phantom KeyMapper.
+
+    // задержка загрузки уровня и input lag примерно +26 мс
+    SLEEP_U16 <ms>
+    PRESS_MK hidmouse_0
+    SLEEP_U16 <tap_down_ms>
+    RELEASE_MK hidmouse_0
+    //
+
+    Время считается по frame_delta от anchor при nominal_fps.
+    """
+    if anchor is None:
+        return ""
+    jumps = sorted(
+        (e for e in events if e.get("name") == "jump"),
+        key=lambda e: int(e["frame"]),
+    )
+    if not jumps:
+        return ""
+    fps = float(fps) if fps and fps > 0 else 60.0
+    tap_down_ms = max(1, int(tap_down_ms))
+
+    lines = []
+    prev = int(anchor)
+    first = True
+    for j in jumps:
+        frame = int(j["frame"])
+        delta = frame - prev
+        if delta < 0:
+            delta = 0
+        sleep_ms = max(1, int(round(delta * 1000.0 / fps)))
+        if first:
+            lines.append(
+                "// задержка загрузки уровня и input lag примерно +26 мс"
+            )
+            first = False
+        lines.append(f"SLEEP_U16 {sleep_ms}")
+        lines.append("PRESS_MK hidmouse_0")
+        lines.append(f"SLEEP_U16 {tap_down_ms}")
+        lines.append("RELEASE_MK hidmouse_0")
+        lines.append("//")
+        prev = frame
+    return "\n".join(lines)
+
+
 # ------------------------------------------------------------
 # RECORD
 # ------------------------------------------------------------
-def do_record(agent: Agent) -> None:
+def do_record(agent: Agent, cfg: dict) -> None:
     log.info("=== RECORD ===")
     print("Войдите на уровень в замороженном состоянии.")
     input("Enter — НАЧАТЬ запись... ")
@@ -210,11 +276,22 @@ def do_record(agent: Agent) -> None:
         "rng_log": rng[:2000] if rng else None,
     }
 
+    fps = float(cfg.get("orchestrator", {}).get("nominal_fps", 60))
+    tap_down_ms = int(cfg.get("phantom", {}).get("tap_down_to_up_ms", 1))
+    macro = build_macro_script(events, anchor, fps, tap_down_ms)
+
+    # Преамбула в трёх кавычках — удобно копировать как plain text.
+    preamble = '"""\n'
+    preamble += f"jumps: {jumps_count}\n"
+    preamble += f"anchor: {kind}@{anchor}\n"
+    preamble += f"fps: {fps:.0f}\n"
+    preamble += f"tap_down_ms: {tap_down_ms}\n"
+    if macro:
+        preamble += "\n" + macro + "\n"
+    preamble += '"""\n\n'
+
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    payload = (
-        f"# jumps: {jumps_count}\n"
-        + json.dumps(out, indent=2, ensure_ascii=False)
-    )
+    payload = preamble + json.dumps(out, indent=2, ensure_ascii=False)
     REPLAY_PATH.write_text(payload, encoding="utf-8")
 
     log.info(
@@ -380,6 +457,7 @@ def do_dry_run(agent: Agent, cfg: dict) -> None:
             f"delta={p['frame_delta']:4d}"
         )
     print(f"total: {len(plan)} jumps")
+    print('   macro: see logs/replay.json (block between """)')
 
 
 MENU = """
@@ -418,10 +496,10 @@ def main() -> None:
             break
         try:
             if cmd in ("", "rehearse", "r"):
-                do_record(agent)
+                do_record(agent, cfg)
                 do_play(agent, phantom, cfg)
             elif cmd in ("record", "rec"):
-                do_record(agent)
+                do_record(agent, cfg)
             elif cmd in ("play", "p"):
                 do_play(agent, phantom, cfg)
             elif cmd in ("calibrate", "cal"):
