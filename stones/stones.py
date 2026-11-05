@@ -1,18 +1,13 @@
 """stones.py — доп. модуль: получение камней соперника.
 
-v12 (burst-режим):
-  * Тапаем НЕПРЕРЫВНО каждые `burst_interval_ms` пока не придёт новый
-    rival_update. Пришёл — оценили: MATCH → стоп, non-match → тот же
-    темп продолжается.
-  * Первый тап в серии — после `skip_wait_ms` (UI-сеттл), чтобы не
-    бить в ещё не готовый экран.
-  * `stall_timeout_ms` — если за это время нет ни одного rival_update
-    в состоянии tapping, стоп + warning (чтоб не тапать в пустоту).
-  * `stones tune <wait> <burst> [stall]` — подстройка на лету.
-  * `stones show` — текущие параметры.
+v13 (cleanup):
+  * Убраны `stones tune` и `stones show` — параметры задаются только
+    через config.yaml при старте модуля. Дефолты работают из коробки.
+  * Вся burst-логика и help без runtime-тюнинга.
 
-v11: ускорение (тик 10мс, tune/show, дефолты 200/400).
-v10: ретрай отложенного skip; один тап на пачку pending.
+v12: burst-режим (непрерывные тапы до rival_update).
+v11: ускорение (тик 10мс).
+v10: ретрай отложенного skip.
 v9: skip_wait_ms, skip_delay_ms.
 v8: auto-skip на non-match, стоп на MATCH.
 v7: `stones <filter>` без префикса live; `clear` внутри LIVE.
@@ -24,7 +19,7 @@ v5: автопоказ (live), robust loading rival_hook.js, sanity-check,
   stones                      справка
   stones <filter>             автопоказ (Ctrl+C — выход)
   stones live [filter]        то же
-  stones now / log / reset / stop / clear / debug / show / tune
+  stones now / log / reset / stop / clear / debug
 
 Фильтры:
   gold <MIN>                   gold >= MIN
@@ -425,15 +420,13 @@ def _print_live_banner(module: StonesModule, has_filter: bool) -> None:
     print("Слежение за Find a Match. Каждый новый соперник печатается "
           "автоматически.")
     print("Во время LIVE: `stones <filter>` — фильтр, `clear` — консоль, "
-          "`stones tune <wait> <burst> [stall]` — тайминги, "
-          "`stones show` — текущие, `stones stop` — выход.")
+          "`stones stop` — выход.")
     if has_filter and module.skip_xy is not None and module.phantom is not None:
         x, y = module.skip_xy
         print(f"AUTO-SKIP (burst): non-match → tap ({x},{y})  "
               f"wait={module.skip_wait_ms}ms  "
               f"burst_interval={module.burst_interval_ms}ms  "
-              f"stall={module.stall_timeout_ms}ms  "
-              f"tick={int(LIVE_TICK_S*1000)}ms")
+              f"stall={module.stall_timeout_ms}ms")
         print("  Логика: тапаем непрерывно каждые burst_interval, пока "
               "не придёт rival_update.")
         print("  MATCH → стоп. non-match → тот же темп продолжается.")
@@ -463,8 +456,8 @@ def _handle_live_line(line: str, ctx: dict) -> bool:
 
     parts = line.split()
     if not parts or parts[0].lower() != "stones":
-        print(f"(during LIVE: `stones <filter>`, `stones tune`, `clear`, "
-              f"`stones stop`, Ctrl+C; ignored: {line!r})")
+        print(f"(during LIVE: `stones <filter>`, `clear`, `stones stop`, "
+              f"Ctrl+C; ignored: {line!r})")
         return True
 
     if len(parts) == 1:
@@ -497,38 +490,6 @@ def _handle_live_line(line: str, ctx: dict) -> bool:
                 print("[now] no rival yet")
         return True
 
-    if sub == "show":
-        if mod is not None:
-            print(f"wait={mod.skip_wait_ms}ms  "
-                  f"burst={mod.burst_interval_ms}ms  "
-                  f"stall={mod.stall_timeout_ms}ms  "
-                  f"tick={int(LIVE_TICK_S*1000)}ms  "
-                  f"phantom={'on' if mod.phantom else 'off'}  "
-                  f"skip_xy={mod.skip_xy}  state={ctx['state']}  "
-                  f"taps={ctx['taps_sent']}")
-        return True
-
-    if sub == "tune":
-        if mod is None:
-            return True
-        try:
-            new_wait = int(parts[2])
-            new_burst = int(parts[3])
-        except (IndexError, ValueError):
-            print("usage: stones tune <wait_ms> <burst_ms> [stall_ms]")
-            return True
-        mod.skip_wait_ms = max(0, new_wait)
-        mod.burst_interval_ms = max(10, new_burst)
-        if len(parts) >= 5:
-            try:
-                mod.stall_timeout_ms = max(500, int(parts[4]))
-            except ValueError:
-                pass
-        print(f"   (tuned: wait={mod.skip_wait_ms}ms  "
-              f"burst={mod.burst_interval_ms}ms  "
-              f"stall={mod.stall_timeout_ms}ms)")
-        return True
-
     if sub == "live":
         fn, label = _build_filter(parts[2:])
         ctx["fn"] = fn
@@ -549,8 +510,8 @@ def _handle_live_line(line: str, ctx: dict) -> bool:
         _print_live_header(label)
         return True
 
-    print(f"(during LIVE: `stones <filter>`, `stones tune`, `clear`, "
-          f"`stones stop`, Ctrl+C; ignored: {line!r})")
+    print(f"(during LIVE: `stones <filter>`, `clear`, `stones stop`, "
+          f"Ctrl+C; ignored: {line!r})")
     return True
 
 
@@ -646,7 +607,7 @@ def stones_live(module: StonesModule,
                             print(f"   (burst START: первый тап через "
                                   f"{module.skip_wait_ms}ms, "
                                   f"interval={module.burst_interval_ms}ms)")
-                        # уже tapping — каденция не сбрасываем, продолжаем
+                        # уже tapping — каденция не сбрасывается, продолжаем
 
             # ---------- 2) burst: тап по расписанию ----------
             if ctx["state"] == "tapping" and module.phantom and module.skip_xy:
@@ -718,21 +679,9 @@ BURST-логика (config.yaml `stones.skip_on_no_match`):
       non-match → тот же темп продолжается.
   * Первый тап в серии — через skip_wait_ms (UI-сеттл).
   * Нет rival_update дольше stall_timeout_ms → стоп + warning.
-  * Один тап = один rival_update. Если tap → rival занимает L мс,
-    ставьте burst_interval_ms ≈ L (напр. 120–200).
-
-Ускорение во время LIVE:
-  stones show                    текущие параметры
-  stones tune <wait> <burst> [stall]
-  Пример: stones tune 50 100      очень агрессивно
-  Пример: stones tune 150 250     безопасно
-  Если игра не успевает (двойной skip) — увеличьте burst.
-  Если тапы «уходят в пустоту» — увеличьте wait.
 
 Во время LIVE:
   stones <new filter>        сменить фильтр (сброс state)
-  stones tune W B [S]        настроить тайминги
-  stones show                текущие параметры
   clear  /  stones clear     очистить консоль
   stones now                 показать последний снимок
   stones stop                выйти в меню
@@ -796,34 +745,6 @@ def handle(module: StonesModule, argv: list) -> None:
 
     if sub in ("clear", "cls"):
         _clear_console()
-        return
-
-    if sub == "show":
-        print(f"wait={module.skip_wait_ms}ms  "
-              f"burst={module.burst_interval_ms}ms  "
-              f"stall={module.stall_timeout_ms}ms  "
-              f"tick={int(LIVE_TICK_S*1000)}ms  "
-              f"phantom={'on' if module.phantom else 'off'}  "
-              f"skip_xy={module.skip_xy}")
-        return
-
-    if sub == "tune":
-        try:
-            new_wait = int(argv[1])
-            new_burst = int(argv[2])
-        except (IndexError, ValueError):
-            print("usage: stones tune <wait_ms> <burst_ms> [stall_ms]")
-            return
-        module.skip_wait_ms = max(0, new_wait)
-        module.burst_interval_ms = max(10, new_burst)
-        if len(argv) >= 4:
-            try:
-                module.stall_timeout_ms = max(500, int(argv[3]))
-            except ValueError:
-                pass
-        print(f"   (tuned: wait={module.skip_wait_ms}ms  "
-              f"burst={module.burst_interval_ms}ms  "
-              f"stall={module.stall_timeout_ms}ms)")
         return
 
     if sub == "debug":
