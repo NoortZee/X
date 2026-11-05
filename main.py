@@ -1,49 +1,23 @@
 #!/usr/bin/env python3
-r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.3).
+r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.8).
 
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
 
-v6.3:
-  * clear (c) теперь чистит и replay.json, и консоль:
-      - ANSI CSI \033[H\033[2J\033[3J — экран + scrollback;
-      - не форкает `clear`-процесс, работает в любом терминале;
-      - "cleared" больше не печатается (иначе висело бы над меню);
-      - ошибка удаления печатается ПОСЛЕ очистки, чтобы её не смыло.
+v6.8:
+  * stones burst-mode: skip_wait_ms / burst_interval_ms / stall_timeout_ms
+    из config.yaml прокидываются в модуль.
+  * `stones tune` на лету, `stones show` — параметры.
 
-v6.2:
-  * Ctrl+C во время любой команды возвращает в меню, а не убивает процесс.
-  * do_play: KeyboardInterrupt → мягкий выход (orchestrator.run() сам
-    делает play_stop() в finally).
-  * do_record: KeyboardInterrupt во время «Enter — ОСТАНОВИТЬ…» всё равно
-    вызывает detect_stop() — иначе detectRec остаётся true в агенте.
-  * Главный цикл ловит KeyboardInterrupt до общего except Exception.
+v6.7: пауза перед тапом + интервал, один тап на пачку.
+v6.6: auto-skip через phantom + skip_on_no_match.
+v6.5: `help` — stones-справка; `stones <filter>` — live без префикса.
+v6.4: доп. модуль stones.py.
+v6.3: clear (c) чистит replay.json + консоль.
+v6.2: Ctrl+C возвращает в меню.
 
 Логи:
-  * в logs/ хранится только replay.json;
-  * .log-файлы не создаются;
-  * play_*.json не создаются;
-  * replay.json перезаписывается при каждом record;
-  * преамбула обёрнута в тройные кавычки — удобно копировать:
-        """
-        jumps: N
-        anchor: <kind>@<frame>
-        fps: 60
-        tap_down_ms: 1
-
-        // задержка загрузки уровня и input lag примерно +26 мс
-        SLEEP_U16 <ms>
-        PRESS_MK hidmouse_0
-        SLEEP_U16 <tap_down_ms>
-        RELEASE_MK hidmouse_0
-        //
-        ...
-        """
-        {
-          "version": 3,
-          ...
-        }
-    Макрос НЕ печатается в консоль.
+  * в logs/ хранится только replay.json.
 '''
 from __future__ import annotations
 
@@ -51,7 +25,6 @@ import json
 import logging
 import sys
 import threading
-import time
 from pathlib import Path
 
 import frida
@@ -66,6 +39,7 @@ from orchestrator import (
     build_plan,
     resolve_tap,
 )
+from stones import StonesModule, handle as stones_handle, HELP as STONES_HELP
 
 PROJECT = Path(__file__).resolve().parent
 CFG_PATH = PROJECT / "config.yaml"
@@ -87,7 +61,6 @@ log = logging.getLogger("main")
 
 
 def setup_logging(level: str = "INFO") -> None:
-    """Только консоль. Файловые .log больше не создаются."""
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     root = logging.getLogger()
@@ -106,7 +79,6 @@ def setup_logging(level: str = "INFO") -> None:
 
 
 def prune_logs_dir() -> None:
-    """Оставляем в logs/ только replay.json. Всё остальное удаляем."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     for p in LOG_DIR.iterdir():
         if p.name == REPLAY_PATH.name:
@@ -119,21 +91,6 @@ def prune_logs_dir() -> None:
 
 
 def clear_console() -> None:
-    """Полностью очищает консоль: видимый экран + scrollback.
-
-    ANSI CSI:
-      \\033[H   — курсор в (1,1)
-      \\033[2J  — стереть весь экран
-      \\033[3J  — стереть saved-lines (scrollback). Поддерживается
-                 kitty/alacritty/foot/gnome-terminal/konsole/xterm/tmux.
-                 На остальных терминалах последовательность просто
-                 игнорируется — экран всё равно очистится через 2J.
-
-    В отличие от os.system('clear'):
-      * не форкает процесс;
-      * реально стирает scrollback, а не «сдвигает» экран вверх,
-        оставляя историю доступной при прокрутке.
-    """
     sys.stdout.write("\033[H\033[2J\033[3J")
     sys.stdout.flush()
 
@@ -151,6 +108,7 @@ class Agent:
         self.session = None
         self.script = None
         self._pump_installed = False
+        self._stones = None
 
     def attach(self) -> None:
         device = frida.get_device_manager().add_remote_device(
@@ -177,17 +135,50 @@ class Agent:
         self.script = self.session.create_script(src)
         self.script.on("message", self._on_msg)
         self.script.load()
-        # ВАЖНО: pump_install НЕ вызываем здесь. Слишком дорого для idle.
-        # detect_install дёшев (только 3 event hooks, не per-frame).
         self.script.exports_sync.detect_install()
 
     def ensure_pump(self) -> None:
-        """Lazy pump_install — вызывать перед record/play/calibrate."""
         if self._pump_installed:
             return
         self.script.exports_sync.pump_install()
         self._pump_installed = True
         log.info("pump installed (lazy)")
+
+    def stones_module(self, phantom=None) -> StonesModule:
+        if self._stones is None:
+            if self.session is None:
+                raise RuntimeError("frida session not attached")
+
+            sc = self.cfg.get("stones") or {}
+            skip = sc.get("skip_on_no_match") or {}
+            skip_xy = None
+            if isinstance(skip, dict) and "x" in skip and "y" in skip:
+                try:
+                    skip_xy = (int(skip["x"]), int(skip["y"]))
+                except (TypeError, ValueError):
+                    log.warning("stones.skip_on_no_match: bad x/y: %r", skip)
+            skip_wait_ms = int(sc.get("skip_wait_ms", 80))
+            # backward compat: burst_interval_ms, fallback skip_delay_ms
+            burst_interval_ms = int(sc.get(
+                "burst_interval_ms", sc.get("skip_delay_ms", 120)))
+            stall_timeout_ms = int(sc.get("stall_timeout_ms", 5000))
+
+            self._stones = StonesModule(
+                self.session,
+                phantom=phantom,
+                skip_xy=skip_xy,
+                skip_wait_ms=skip_wait_ms,
+                burst_interval_ms=burst_interval_ms,
+                stall_timeout_ms=stall_timeout_ms,
+            )
+            if skip_xy is not None:
+                log.info(
+                    "stones burst: tap (%d,%d)  wait=%dms  "
+                    "burst=%dms  stall=%dms  on non-match",
+                    skip_xy[0], skip_xy[1],
+                    skip_wait_ms, burst_interval_ms, stall_timeout_ms,
+                )
+        return self._stones
 
     def _on_msg(self, msg, _data):
         if msg["type"] == "send":
@@ -209,6 +200,12 @@ class Agent:
         return _call
 
     def close(self):
+        if self._stones is not None:
+            try:
+                self._stones.stop()
+            except Exception:
+                pass
+            self._stones = None
         if self.session:
             try:
                 self.session.detach()
@@ -217,11 +214,6 @@ class Agent:
 
 
 def load_replay(path: Path = REPLAY_PATH) -> dict:
-    r'''Читает replay.json.
-
-    Всё до первого '{' считается преамбулой (блок с макросом) и
-    пропускается. JSON-объект начинается с '{'.
-    '''
     if not path.exists():
         return {}
     text = path.read_text(encoding="utf-8")
@@ -235,17 +227,6 @@ def load_replay(path: Path = REPLAY_PATH) -> dict:
 
 
 def build_macro_script(events, anchor, fps, tap_down_ms=1):
-    """Строит текстовый скрипт в формате Phantom KeyMapper.
-
-    // задержка загрузки уровня и input lag примерно +26 мс
-    SLEEP_U16 <ms>
-    PRESS_MK hidmouse_0
-    SLEEP_U16 <tap_down_ms>
-    RELEASE_MK hidmouse_0
-    //
-
-    Время считается по frame_delta от anchor при nominal_fps.
-    """
     if anchor is None:
         return ""
     jumps = sorted(
@@ -280,23 +261,17 @@ def build_macro_script(events, anchor, fps, tap_down_ms=1):
     return "\n".join(lines)
 
 
-# ------------------------------------------------------------
-# RECORD
-# ------------------------------------------------------------
 def do_record(agent: Agent, cfg: dict) -> None:
     log.info("=== RECORD ===")
     print("Войдите на уровень в замороженном состоянии.")
     input("Enter — НАЧАТЬ запись... ")
 
-    agent.ensure_pump()          # lazy install
+    agent.ensure_pump()
     agent.detect_start()
     print("🔴 запись... Играйте (первый тап — старт уровня).")
     try:
         input("Enter — ОСТАНОВИТЬ... ")
     except KeyboardInterrupt:
-        # Ctrl+C в ожидании стопа — всё равно корректно закрываем запись,
-        # иначе detectRec останется true в агенте и будет писать события
-        # во время play.
         log.warning("record stop forced by Ctrl+C")
 
     events = agent.detect_stop()
@@ -321,7 +296,6 @@ def do_record(agent: Agent, cfg: dict) -> None:
     tap_down_ms = int(cfg.get("phantom", {}).get("tap_down_to_up_ms", 1))
     macro = build_macro_script(events, anchor, fps, tap_down_ms)
 
-    # Преамбула в трёх кавычках — удобно копировать как plain text.
     preamble = '"""\n'
     preamble += f"jumps: {jumps_count}\n"
     preamble += f"anchor: {kind}@{anchor}\n"
@@ -347,9 +321,6 @@ def do_record(agent: Agent, cfg: dict) -> None:
         )
 
 
-# ------------------------------------------------------------
-# PLAY
-# ------------------------------------------------------------
 def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     replay = load_replay()
     if not replay.get("events"):
@@ -364,15 +335,12 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
         log.warning("play cancelled before start")
         return
 
-    # playSetup внутри orchestrator.run() сам вызовет pump.install()
     agent.ensure_pump()
 
     orch = Orchestrator(cfg, agent, phantom, replay)
     try:
         report = orch.run()
     except KeyboardInterrupt:
-        # orchestrator.run() уже сделал play_stop() в finally.
-        # Просто возвращаемся в меню.
         log.warning("play aborted by Ctrl+C — returning to menu")
         return
     except (ReplayError, PhantomError) as e:
@@ -394,26 +362,23 @@ def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     print("   report: console only (logs/replay.json is the only saved file)")
 
 
-# ------------------------------------------------------------
-# CALIBRATE
-# ------------------------------------------------------------
 def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     print("=== CALIBRATE (async, no gate) ===")
     print("Нужен активный уровень — персонаж бежит, не frozen.")
-    print("Каждый тап: снимок cur_frame → tap → ждём 200 ms → ищем переход a0/g80.")
     try:
         input("Enter — старт... ")
     except KeyboardInterrupt:
         log.warning("calibrate cancelled before start")
         return
 
-    agent.ensure_pump()          # lazy install
+    agent.ensure_pump()
 
     x, y = resolve_tap(cfg)
     fps = float(cfg["orchestrator"]["nominal_fps"])
-    samples_lead_ms: list[float] = []
-    samples_tap_ms: list[float] = []
+    samples_lead_ms: list = []
+    samples_tap_ms: list = []
 
+    import time as _time
     for i in range(10):
         st = agent.play_state()
         cur = int(st.get("frame", 0))
@@ -425,11 +390,11 @@ def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
         tr = phantom.tap(x, y)
         if not tr.ok:
             print(f"[{i}] tap failed: {tr.error}")
-            time.sleep(0.5)
+            _time.sleep(0.5)
             continue
         samples_tap_ms.append(tr.duration_ms)
 
-        time.sleep(0.2)
+        _time.sleep(0.2)
 
         tail = agent.ring_tail(200) or []
         change_frame = None
@@ -453,7 +418,7 @@ def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
 
         if change_frame is None:
             print(f"[{i}] cur={cur} no change in 200ms")
-            time.sleep(0.5)
+            _time.sleep(0.5)
             continue
 
         lead_frames = change_frame - cur
@@ -464,7 +429,7 @@ def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
             f"lead_frames={lead_frames} lead≈{lead_ms:.1f}ms "
             f"tap={tr.duration_ms:.1f}ms"
         )
-        time.sleep(0.4)
+        _time.sleep(0.4)
 
     if not samples_lead_ms:
         print("не удалось зафиксировать ни одного отклика")
@@ -486,13 +451,10 @@ def do_calibrate(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
             f"tap_ms: med="
             f"{sorted(samples_tap_ms)[len(samples_tap_ms) // 2]:.1f}ms"
         )
-    print(f"\n⚠ калибровка шумит (FPS-джиттер). "
-          f"Дефолт predict_lead_ms=0 — работает лучше.")
+    print("\n⚠ калибровка шумит (FPS-джиттер). "
+          "Дефолт predict_lead_ms=0 — работает лучше.")
 
 
-# ------------------------------------------------------------
-# DRY RUN
-# ------------------------------------------------------------
 def do_dry_run(agent: Agent, cfg: dict) -> None:
     replay = load_replay()
     if not replay.get("events"):
@@ -514,6 +476,15 @@ def do_dry_run(agent: Agent, cfg: dict) -> None:
     print('   macro: see logs/replay.json (block between """)')
 
 
+def do_stones(agent: Agent, phantom: PhantomBridge, argv: list) -> None:
+    try:
+        mod = agent.stones_module(phantom=phantom)
+        stones_handle(mod, argv)
+    except frida.InvalidOperationError as e:
+        log.error("frida session lost: %s", e)
+        raise
+
+
 MENU = """
 ─────────────────────────────────────────────────
   Enter / rehearse    record + play
@@ -521,6 +492,8 @@ MENU = """
   play                only play
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
+  stones <filter>     rival stones live + burst-skip (см. help)
+  help                справка по stones
   clear               wipe console + delete replay.json
   exit / q            quit
 ─────────────────────────────────────────────────
@@ -560,20 +533,22 @@ def main() -> None:
                 do_calibrate(agent, phantom, cfg)
             elif cmd in ("dry-run", "dry"):
                 do_dry_run(agent, cfg)
+            elif cmd in ("help", "h", "?"):
+                print(STONES_HELP)
+            elif cmd.startswith("stones"):
+                parts = cmd.split()
+                if parts[0] == "stones":
+                    do_stones(agent, phantom, parts[1:])
+                else:
+                    print(f"unknown command: {cmd}")
             elif cmd in ("clear", "c"):
-                # 1) Удаляем replay.json
                 err = None
                 if REPLAY_PATH.exists():
                     try:
                         REPLAY_PATH.unlink()
                     except OSError as e:
                         err = e
-                # 2) Стираем консоль (экран + scrollback).
-                #    Делаем ДО печати ошибки — иначе сообщение смоет.
                 clear_console()
-                # 3) При успехе намеренно ничего не печатаем: следующая
-                #    итерация while True напечатает MENU на чистом экране.
-                #    Строка "cleared" висела бы над меню и портила эффект.
                 if err is not None:
                     log.warning("failed to delete %s: %s", REPLAY_PATH, err)
             elif cmd in ("exit", "quit", "q"):
@@ -581,9 +556,6 @@ def main() -> None:
             else:
                 print(f"unknown command: {cmd}")
         except KeyboardInterrupt:
-            # Ctrl+C во время любой команды → мягко назад в меню.
-            # KeyboardInterrupt наследуется от BaseException, поэтому
-            # общий except Exception его НЕ ловит — нужен явный handler.
             log.warning("interrupted by user (Ctrl+C) — back to menu")
         except frida.InvalidOperationError as e:
             log.error("frida session lost: %s", e)
