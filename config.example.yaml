@@ -1,0 +1,124 @@
+# ============================================================================
+# King of Thieves TAS — конфиг
+# ----------------------------------------------------------------------------
+# Скопируй этот файл в config.yaml и заполни свои значения:
+#     cp config.example.yaml config.yaml
+#
+# ⚠ config.yaml держи локально (в .gitignore) — там bot_token и chat_id.
+# ⚠ bot_token никому не показывай. Если засветился — отзови:
+#       @BotFather → /mybots → бот → API Token → Revoke current token
+# ============================================================================
+
+phantom:
+  # TCP-адрес phantom-server (adb forward tcp:27183 tcp:27183)
+  host: "127.0.0.1"
+  port: 27183
+  connect_timeout_ms: 2000
+  ping_timeout_ms: 1000
+  # "async" — не ждём ответа от Android (правильно для frozen-уровня).
+  # "wait_for_finish" — зависает на frozen → не использовать.
+  sync_mode: "async"
+  tap_down_to_up_ms: 1
+  post_tap_wait_ms: 0
+  slot: 0
+  reconnect_attempts: 1
+
+tap:
+  # "explicit" — взять x/y из полей ниже.
+  # "center_lower_third" — x=width/2, y=height*2/3 (нужны screen_width/height).
+  position: "explicit"
+  x: 540
+  y: 960
+
+stones:
+  # Координаты тапа «найти следующего» (кнопка next в Find a Match).
+  # Тап выполняется при non-match, если включён AUTO-SKIP.
+  skip_on_no_match:
+    x: 1775
+    y: 970
+
+  # Пауза перед первым тапом серии (дать UI отрисоваться).
+  skip_wait_ms: 80
+
+  # Интервал между тапами в burst-серии.
+  # Ставь ≈ задержке tap → rival_update (эмпирически 100–200 мс).
+  burst_interval_ms: 120
+
+  # Если rival_update не приходил дольше stall_timeout_ms — стоп + warn.
+  stall_timeout_ms: 5000
+
+  # Периодический cooldown: каждые N тапов пауза M мс (защита от
+  # переполнения InputDispatcher в Waydroid). 0 = выключить.
+  burst_pause_every: 500
+  burst_pause_ms: 1500
+
+  # Abort LIVE после N подряд FAILED-тапов (phantom/game сдохли).
+  tap_fail_abort: 10
+
+  # Периодическая health-check Frida-сессии, сек. 0 = выключить.
+  health_check_interval_s: 3
+
+  # true — полный дамп (каждый rival и каждый тап в лог).
+  # false — компакт (детали только для MATCH, тап раз в 10).
+  verbose_output: true
+
+telegram:
+  # false — уведомления не отправляются.
+  enabled: true
+
+  # Токен от @BotFather. Формат: "<bot_id>:<rest>".
+  # ⚠ НЕ коммить в git, НЕ показывай в чатах. При компрометации — revoke.
+  bot_token: "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+  # chat_id получателя:
+  #   * личный чат: https://api.telegram.org/bot<TOKEN>/getUpdates
+  #     после /start боту → "chat": {"id": 123456789}
+  #   * группа: "chat": {"id": -1001234567890} — бот должен быть в группе
+  #   ⚠ НЕ -<bot_id> и НЕ <bot_id>! Это частая ошибка → HTTP 400 chat not found.
+  chat_id: "123456789"
+
+  # HTTP timeout для запроса к api.telegram.org, сек.
+  timeout_s: 5
+
+  # Антиспам: не отправлять чаще, чем раз в N сек.
+  # 0 = без throttle (каждый MATCH даёт сообщение).
+  min_interval_s: 10
+
+orchestrator:
+  # Номинальный FPS для расчёта таймингов.
+  nominal_fps: 60
+
+  # Упреждение тапа в мс. 0 — работает лучше (async-режим).
+  predict_lead_ms: 0
+  predict_margin_ms: 0
+
+  # Интервал опроса play_state(), мс.
+  poll_interval_ms: 3
+
+  # Пауза после tap перед проверкой jump-count, мс.
+  post_tap_check_ms: 30
+
+  # Повторный тап, если не пришёл jumpFn.
+  retry_on_miss: true
+  retry_delay_ms: 50
+
+  # Жёсткий дедлайн на один tap, сек.
+  fire_hard_deadline_s: 15
+
+  # Общий wall-timeout на прогон play, сек.
+  wall_timeout_s: 300
+
+  # Сверять body-состояние при play (тяжело, обычно false).
+  verify_body_frames: false
+
+frida:
+  # adb forward tcp:41337 localabstract:/data/local/tmp/sysmon.sock
+  device: "127.0.0.1:41337"
+  package: "com.zeptolab.thieves.google"
+
+logging:
+  # DEBUG / INFO / WARNING / ERROR
+  level: "INFO"
+
+  # Каталог логов (внутри хранится только replay.json).
+  log_dir: "logs"
