@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.8).
+r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.9).
 
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
 
-v6.8:
-  * stones burst-mode: skip_wait_ms / burst_interval_ms / stall_timeout_ms
-    из config.yaml прокидываются в модуль.
-  * `stones tune` на лету, `stones show` — параметры.
+v6.9:
+  * stones stability: burst_pause_every / burst_pause_ms / tap_fail_abort /
+    health_check_interval_s / verbose_output из config.yaml.
+    Health-checks и session.on('detached') — против падений Waydroid
+    при долгих LIVE-сессиях.
 
+v6.8: stones burst-mode: skip_wait_ms / burst_interval_ms / stall_timeout_ms.
 v6.7: пауза перед тапом + интервал, один тап на пачку.
 v6.6: auto-skip через phantom + skip_on_no_match.
 v6.5: `help` — stones-справка; `stones <filter>` — live без префикса.
@@ -158,10 +160,15 @@ class Agent:
                 except (TypeError, ValueError):
                     log.warning("stones.skip_on_no_match: bad x/y: %r", skip)
             skip_wait_ms = int(sc.get("skip_wait_ms", 80))
-            # backward compat: burst_interval_ms, fallback skip_delay_ms
             burst_interval_ms = int(sc.get(
                 "burst_interval_ms", sc.get("skip_delay_ms", 120)))
             stall_timeout_ms = int(sc.get("stall_timeout_ms", 5000))
+
+            burst_pause_every = int(sc.get("burst_pause_every", 500))
+            burst_pause_ms = int(sc.get("burst_pause_ms", 3000))
+            tap_fail_abort = int(sc.get("tap_fail_abort", 10))
+            health_check_interval_s = float(sc.get("health_check_interval_s", 3))
+            verbose_output = bool(sc.get("verbose_output", False))
 
             self._stones = StonesModule(
                 self.session,
@@ -170,13 +177,22 @@ class Agent:
                 skip_wait_ms=skip_wait_ms,
                 burst_interval_ms=burst_interval_ms,
                 stall_timeout_ms=stall_timeout_ms,
+                burst_pause_every=burst_pause_every,
+                burst_pause_ms=burst_pause_ms,
+                tap_fail_abort=tap_fail_abort,
+                health_check_interval_s=health_check_interval_s,
+                verbose_output=verbose_output,
             )
             if skip_xy is not None:
                 log.info(
                     "stones burst: tap (%d,%d)  wait=%dms  "
-                    "burst=%dms  stall=%dms  on non-match",
+                    "burst=%dms  stall=%dms  pause=%d/%dms  "
+                    "fail_abort=%d  hc=%.0fs  verbose=%s",
                     skip_xy[0], skip_xy[1],
                     skip_wait_ms, burst_interval_ms, stall_timeout_ms,
+                    burst_pause_every, burst_pause_ms,
+                    tap_fail_abort, health_check_interval_s,
+                    verbose_output,
                 )
         return self._stones
 

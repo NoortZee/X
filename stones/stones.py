@@ -1,31 +1,23 @@
 """stones.py — доп. модуль: получение камней соперника.
 
-v13 (cleanup):
-  * Убраны `stones tune` и `stones show` — параметры задаются только
-    через config.yaml при старте модуля. Дефолты работают из коробки.
-  * Вся burst-логика и help без runtime-тюнинга.
+v14 (stability):
+  * `burst_pause_every` / `burst_pause_ms` — периодический cooldown,
+    чтобы Waydroid/Android InputDispatcher не забивался.
+  * Health-check Frida-сессии раз в `health_check_interval_s`.
+  * `session.on('detached')` — мгновенный abort если игра/Frida умерли.
+  * `tap_fail_abort` — abort после N подряд FAILED-тапов (phantom dead).
+  * `verbose_output=false` по умолчанию: 1 строка на non-match,
+    детали только для MATCH; каждый тап — раз в 10.
 
-v12: burst-режим (непрерывные тапы до rival_update).
+v13: без `stones tune`/`stones show`.
+v12: burst-режим.
 v11: ускорение (тик 10мс).
 v10: ретрай отложенного skip.
 v9: skip_wait_ms, skip_delay_ms.
 v8: auto-skip на non-match, стоп на MATCH.
 v7: `stones <filter>` без префикса live; `clear` внутри LIVE.
 v6: stdin polling через select().
-v5: автопоказ (live), robust loading rival_hook.js, sanity-check,
-    ASCII fallback, `stones debug`.
-
-Команды:
-  stones                      справка
-  stones <filter>             автопоказ (Ctrl+C — выход)
-  stones live [filter]        то же
-  stones now / log / reset / stop / clear / debug
-
-Фильтры:
-  gold <MIN>                   gold >= MIN
-  1stone <MIN>                 хотя бы 1 камень rating >= MIN
-  2stone <MIN>                 хотя бы 2 камня  rating >= MIN
-  3stone <MIN>                 все камни rating >= MIN
+v5: автопоказ, robust loading rival_hook.js, sanity-check, ASCII fallback.
 """
 from __future__ import annotations
 
@@ -79,7 +71,7 @@ def _sanity_check_source(src: str) -> None:
                 f"rival_hook.js содержит не JavaScript, а чужой файл "
                 f"(начинается с {marker!r}). Скорее всего, кто-то записал "
                 f"main.py поверх rival_hook.js. Перезапишите {HOOK_PATH} "
-                f"правильным rival_hook.js (v4). "
+                f"правильным rival_hook.js. "
                 f"Первая строка сейчас: {head.splitlines()[0][:120]!r}"
             )
     if "RivalDungeon" not in src[:2000] and "0xF680D0" not in src[:2000]:
@@ -139,7 +131,12 @@ class StonesModule:
                  skip_xy: Optional[tuple] = None,
                  skip_wait_ms: int = 80,
                  burst_interval_ms: int = 120,
-                 stall_timeout_ms: int = 5000):
+                 stall_timeout_ms: int = 5000,
+                 burst_pause_every: int = 500,
+                 burst_pause_ms: int = 3000,
+                 tap_fail_abort: int = 10,
+                 health_check_interval_s: float = 3.0,
+                 verbose_output: bool = False):
         self.session = session
         self.script: Optional[frida.core.Script] = None
         self._installed = False
@@ -150,13 +147,45 @@ class StonesModule:
         self.skip_wait_ms = max(0, int(skip_wait_ms))
         self.burst_interval_ms = max(10, int(burst_interval_ms))
         self.stall_timeout_ms = max(500, int(stall_timeout_ms))
+
+        # stability
+        self.burst_pause_every = max(0, int(burst_pause_every))
+        self.burst_pause_ms = max(0, int(burst_pause_ms))
+        self.tap_fail_abort = max(1, int(tap_fail_abort))
+        self.health_check_interval_s = max(0.5, float(health_check_interval_s))
+        self.verbose_output = bool(verbose_output)
+
         self._last_skip_t = 0.0
+        self._tap_ok_count = 0
+        self._session_dead = False
+        self._session_detach_reason = None
 
         # live-mode plumbing
         self._live = False
         self._pending_seqs: list = []
         self._live_event = threading.Event()
         self._live_lock = threading.Lock()
+
+        # Listen for session detach (game crash / frida-server death)
+        self._attach_session_listener()
+
+    # ---------- session listener ----------
+    def _attach_session_listener(self) -> None:
+        try:
+            self.session.on("detached", self._on_session_detached)
+        except Exception as e:
+            log.warning("session.on('detached') not available: %s", e)
+
+    def _on_session_detached(self, reason, crash):
+        self._session_dead = True
+        self._session_detach_reason = f"reason={reason} crash={crash}"
+        log.error("frida session detached: %s", self._session_detach_reason)
+
+    def is_session_dead(self) -> bool:
+        return self._session_dead
+
+    def session_detach_reason(self) -> Optional[str]:
+        return self._session_detach_reason
 
     @property
     def last_skip_monotonic(self) -> float:
@@ -198,7 +227,7 @@ class StonesModule:
         log.info("rival_hook loaded, module_base=%s", base)
         self.script.exports_sync.install_hooks()
         self._installed = True
-        log.info("rival_hook installed on 0xF680D0")
+        log.info("rival_hook installed")
 
     def stop(self) -> None:
         self._live = False
@@ -237,9 +266,10 @@ class StonesModule:
         self._live_event.clear()
 
     # ---------- auto-skip ----------
-    def do_skip(self) -> None:
+    def do_skip(self) -> bool:
+        """Тап «найти следующего». Возвращает True при успехе."""
         if self.phantom is None or self.skip_xy is None:
-            return
+            return False
         x, y = self.skip_xy
         t_now = time.monotonic()
         since_last = (t_now - self._last_skip_t) * 1000.0 \
@@ -248,14 +278,21 @@ class StonesModule:
             tr = self.phantom.tap(x, y)
             self._last_skip_t = time.monotonic()
             if tr.ok:
-                print(f"   (skip: tap {x},{y}  {tr.duration_ms:.1f}ms  "
-                      f"[+{since_last:.0f}ms])")
-            else:
-                log.warning("skip tap failed: %s", tr.error)
-                print(f"   (skip tap FAILED: {tr.error})")
+                self._tap_ok_count += 1
+                # вывод: всегда первые 10 тапов, потом раз в 10; verbose — всё
+                if (self.verbose_output
+                        or self._tap_ok_count <= 10
+                        or self._tap_ok_count % 10 == 0):
+                    print(f"   (skip: tap {x},{y}  {tr.duration_ms:.1f}ms  "
+                          f"[+{since_last:.0f}ms]  #{self._tap_ok_count})")
+                return True
+            log.warning("skip tap failed: %s", tr.error)
+            print(f"   (skip tap FAILED: {tr.error})")
+            return False
         except Exception as e:
             log.warning("skip tap exception: %s", e)
             print(f"   (skip tap exception: {e})")
+            return False
 
     # ---------- frida message handler ----------
     def _on_msg(self, msg, _data):
@@ -271,8 +308,12 @@ class StonesModule:
                     self._live_event.set()
             elif t == "ready":
                 log.info("[rival] ready base=%s", p.get("base"))
+            elif t == "rival_aob":
+                log.info("[rival] rival_aob method=%s offset=%s",
+                         p.get("method"), p.get("offset"))
             elif t == "hooked":
-                log.info("[rival] hooked at %s", p.get("at"))
+                log.info("[rival] hooked at %s offset=%s",
+                         p.get("at"), p.get("offset"))
             elif t == "err":
                 log.error("[rival] err where=%s: %s",
                           p.get("where"), p.get("msg"))
@@ -425,11 +466,14 @@ def _print_live_banner(module: StonesModule, has_filter: bool) -> None:
         x, y = module.skip_xy
         print(f"AUTO-SKIP (burst): non-match → tap ({x},{y})  "
               f"wait={module.skip_wait_ms}ms  "
-              f"burst_interval={module.burst_interval_ms}ms  "
+              f"burst={module.burst_interval_ms}ms  "
               f"stall={module.stall_timeout_ms}ms")
-        print("  Логика: тапаем непрерывно каждые burst_interval, пока "
-              "не придёт rival_update.")
-        print("  MATCH → стоп. non-match → тот же темп продолжается.")
+        if module.burst_pause_every > 0:
+            print(f"  Cooldown: каждые {module.burst_pause_every} тапов → "
+                  f"{module.burst_pause_ms}ms пауза")
+        print(f"  Health-check: каждые {module.health_check_interval_s:.0f}s  "
+              f"tap_fail_abort={module.tap_fail_abort}")
+        print(f"  verbose_output={module.verbose_output}")
     elif has_filter:
         print("AUTO-SKIP: отключён (нет stones.skip_on_no_match "
               "в config.yaml или phantom).")
@@ -442,6 +486,9 @@ def _reset_live_state(ctx: dict) -> None:
     ctx["last_rival_at"] = 0.0
     ctx["taps_sent"] = 0
     ctx["matched_seqs"] = []
+    ctx["fail_streak"] = 0
+    ctx["last_health_check"] = 0.0
+    ctx["pause_until"] = 0.0
 
 
 def _handle_live_line(line: str, ctx: dict) -> bool:
@@ -526,12 +573,14 @@ def stones_live(module: StonesModule,
         "fn": filter_fn,
         "label": filter_label,
         "module": module,
-        # state: idle | tapping | frozen_match | stalled
         "state": "idle",
         "next_tap_at": 0.0,
         "last_rival_at": 0.0,
         "taps_sent": 0,
         "matched_seqs": [],
+        "fail_streak": 0,
+        "last_health_check": time.monotonic(),
+        "pause_until": 0.0,
     }
 
     print()
@@ -554,7 +603,25 @@ def stones_live(module: StonesModule,
             module.clear_live_event()
             pending = module.drain_pending()
 
-            # ---------- 1) обработка новых соперников ----------
+            # --- 0) fatal: Frida session detached (game crash / server death)
+            if module.is_session_dead():
+                print(f"\nLIVE ABORT: frida session detached "
+                      f"({module.session_detach_reason()})")
+                return
+
+            # --- 0.1) periodic health-check
+            now = time.monotonic()
+            if (module.health_check_interval_s > 0
+                    and now - ctx["last_health_check"]
+                        >= module.health_check_interval_s):
+                ctx["last_health_check"] = now
+                try:
+                    module.script.exports_sync.module_base()
+                except Exception as e:
+                    print(f"\nLIVE ABORT: frida session dead: {e}")
+                    return
+
+            # --- 1) обработка новых соперников
             if pending:
                 lg = module.log()
                 by_seq = {rr.get("seq"): rr
@@ -578,7 +645,8 @@ def stones_live(module: StonesModule,
                             hit = False
                         marker = "  >>> MATCH <<<" if hit else ""
                     print(f"[{seq:>3}]{marker} {_row(rr)}")
-                    _print_stones_detail(rr)
+                    if hit or module.verbose_output:
+                        _print_stones_detail(rr)
 
                     if hit:
                         any_match = True
@@ -601,19 +669,18 @@ def stones_live(module: StonesModule,
                     elif any_nonmatch and ctx["state"] != "frozen_match":
                         if ctx["state"] != "tapping":
                             ctx["state"] = "tapping"
-                            now = time.monotonic()
-                            ctx["next_tap_at"] = now + \
+                            now2 = time.monotonic()
+                            ctx["next_tap_at"] = now2 + \
                                 module.skip_wait_ms / 1000.0
                             print(f"   (burst START: первый тап через "
                                   f"{module.skip_wait_ms}ms, "
                                   f"interval={module.burst_interval_ms}ms)")
-                        # уже tapping — каденция не сбрасывается, продолжаем
 
-            # ---------- 2) burst: тап по расписанию ----------
+            # --- 2) burst: тап по расписанию
             if ctx["state"] == "tapping" and module.phantom and module.skip_xy:
                 now = time.monotonic()
 
-                # stall: давно нет новых соперников — стоп
+                # stall
                 if (ctx["last_rival_at"] > 0
                         and now - ctx["last_rival_at"]
                             > module.stall_timeout_ms / 1000.0):
@@ -621,13 +688,32 @@ def stones_live(module: StonesModule,
                           f"{module.stall_timeout_ms}ms — прекращаю тапы)")
                     ctx["state"] = "stalled"
                     ctx["next_tap_at"] = 0.0
+                elif now < ctx["pause_until"]:
+                    # cooldown активен — пропускаем тик
+                    pass
                 elif now >= ctx["next_tap_at"]:
-                    module.do_skip()
+                    ok = module.do_skip()
                     ctx["taps_sent"] += 1
-                    ctx["next_tap_at"] = now + \
-                        module.burst_interval_ms / 1000.0
+                    if ok:
+                        ctx["fail_streak"] = 0
+                    else:
+                        ctx["fail_streak"] += 1
+                        if ctx["fail_streak"] >= module.tap_fail_abort:
+                            print(f"\nLIVE ABORT: {ctx['fail_streak']} "
+                                  f"подряд FAILED-тапов — phantom/game dead")
+                            return
 
-            # ---------- 3) stdin ----------
+                    # cooldown после N успешных
+                    if (module.burst_pause_every > 0
+                            and ctx["taps_sent"] % module.burst_pause_every == 0
+                            and ctx["taps_sent"] > 0):
+                        ctx["pause_until"] = now + module.burst_pause_ms / 1000.0
+                        print(f"   (cooldown: {module.burst_pause_ms}ms "
+                              f"после {ctx['taps_sent']} тапов)")
+
+                    ctx["next_tap_at"] = now + module.burst_interval_ms / 1000.0
+
+            # --- 3) stdin
             if not is_interactive:
                 continue
             try:
@@ -671,14 +757,24 @@ HELP = """\
   stones 2stone 100000       хотя бы 2 камня  rating >= 100000
   stones 3stone 200000       все камни rating >= 200000
 
-BURST-логика (config.yaml `stones.skip_on_no_match`):
+BURST + STABILITY (config.yaml `stones.*`):
+  skip_on_no_match   координаты тапа «следующий»
+  skip_wait_ms       пауза перед первым тапом серии (default 80)
+  burst_interval_ms  интервал между тапами (default 120)
+  stall_timeout_ms   нет rival дольше → стоп (default 5000)
+
+  burst_pause_every  каждые N тапов пауза (default 500, 0=off)
+  burst_pause_ms     длительность паузы (default 3000)
+  tap_fail_abort     N подряд FAILED-тапов → abort (default 10)
+  health_check_interval_s  проверка Frida-сессии, сек (default 3)
+  verbose_output     true = полный дамп (как раньше), false = компакт
+
+Логика:
   * non-match → тап (x,y), потом ещё тап через burst_interval_ms,
     ещё... — непрерывно, пока не придёт rival_update.
-  * rival пришёл → оценили.
-      MATCH     → стоп (не тапаем).
-      non-match → тот же темп продолжается.
-  * Первый тап в серии — через skip_wait_ms (UI-сеттл).
-  * Нет rival_update дольше stall_timeout_ms → стоп + warning.
+  * rival пришёл → MATCH → стоп; non-match → тот же темп.
+  * Game/Frida умерли (session.on('detached') или health-check) → ABORT.
+  * Phantom сдох (N подряд FAILED) → ABORT.
 
 Во время LIVE:
   stones <new filter>        сменить фильтр (сброс state)
