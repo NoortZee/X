@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v6.9).
+r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v7.0).
 
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
 
-v6.9:
-  * stones stability: burst_pause_every / burst_pause_ms / tap_fail_abort /
-    health_check_interval_s / verbose_output из config.yaml.
-    Health-checks и session.on('detached') — против падений Waydroid
-    при долгих LIVE-сессиях.
+v7.0:
+  * Telegram-уведомления при MATCH (config.yaml `telegram.*`).
+    TgNotifier читает token/chat_id/enabled, отправляет через stdlib
+    urllib в daemon-thread. `stones tg-test` — проверка.
+    Backward-compat: без секции `telegram` — notifier disabled.
 
-v6.8: stones burst-mode: skip_wait_ms / burst_interval_ms / stall_timeout_ms.
-v6.7: пауза перед тапом + интервал, один тап на пачку.
-v6.6: auto-skip через phantom + skip_on_no_match.
-v6.5: `help` — stones-справка; `stones <filter>` — live без префикса.
+v6.9: stability (cooldown, health-check, tap_fail_abort).
+v6.8: stones burst-mode.
+v6.7: пауза перед тапом + интервал.
+v6.6: auto-skip через phantom.
+v6.5: `help` — stones-справка; `stones <filter>` без live.
 v6.4: доп. модуль stones.py.
 v6.3: clear (c) чистит replay.json + консоль.
 v6.2: Ctrl+C возвращает в меню.
@@ -41,7 +42,9 @@ from orchestrator import (
     build_plan,
     resolve_tap,
 )
-from stones import StonesModule, handle as stones_handle, HELP as STONES_HELP
+from stones import (
+    StonesModule, TgNotifier, handle as stones_handle, HELP as STONES_HELP,
+)
 
 PROJECT = Path(__file__).resolve().parent
 CFG_PATH = PROJECT / "config.yaml"
@@ -170,6 +173,16 @@ class Agent:
             health_check_interval_s = float(sc.get("health_check_interval_s", 3))
             verbose_output = bool(sc.get("verbose_output", False))
 
+            # --- Telegram ---
+            tg_cfg = self.cfg.get("telegram") or {}
+            tg_notifier = TgNotifier(
+                bot_token=str(tg_cfg.get("bot_token", "") or ""),
+                chat_id=str(tg_cfg.get("chat_id", "") or ""),
+                enabled=bool(tg_cfg.get("enabled", False)),
+                timeout_s=float(tg_cfg.get("timeout_s", 5)),
+                min_interval_s=float(tg_cfg.get("min_interval_s", 10)),
+            )
+
             self._stones = StonesModule(
                 self.session,
                 phantom=phantom,
@@ -182,17 +195,18 @@ class Agent:
                 tap_fail_abort=tap_fail_abort,
                 health_check_interval_s=health_check_interval_s,
                 verbose_output=verbose_output,
+                tg_notifier=tg_notifier,
             )
             if skip_xy is not None:
                 log.info(
                     "stones burst: tap (%d,%d)  wait=%dms  "
                     "burst=%dms  stall=%dms  pause=%d/%dms  "
-                    "fail_abort=%d  hc=%.0fs  verbose=%s",
+                    "fail_abort=%d  hc=%.0fs  verbose=%s  tg=%s",
                     skip_xy[0], skip_xy[1],
                     skip_wait_ms, burst_interval_ms, stall_timeout_ms,
                     burst_pause_every, burst_pause_ms,
                     tap_fail_abort, health_check_interval_s,
-                    verbose_output,
+                    verbose_output, tg_notifier.enabled,
                 )
         return self._stones
 

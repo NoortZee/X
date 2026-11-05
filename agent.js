@@ -1,5 +1,5 @@
 // agent.js — TAS agent for King of Thieves x86_64
-// v5.6 — READ-ONLY + JUMP monitor + strict FRAME_FUNC resolver
+// v5.7 — READ-ONLY + JUMP monitor + SMART FRAME_FUNC resolver
 //        + refined FRAME_FUNC AOB (1 матч, 8B 87 B0 00 00 00)
 //        + lazy pump install (main.py вызывает pump_install только в record/play)
 //        + FPS-optimized hot path (1 try/catch, no findRangeByAddress)
@@ -31,8 +31,6 @@ send({ type: 'module_base', name: MODULE_NAME,
 // Старая сигнатура матчила и FrogBody/BoilerBody (0x161B7C0). Refined
 // добавлен хвост `41 89 F4 48 89 FB 8B 87 B0 00 00 00` — чтение +0xB0,
 // характерное только для HeroBody.
-//
-// AOB-сигнатуры остальных функций — без изменений, по 1 матчу.
 const SIGS = {
     FRAME_FUNC:      '48 83 7F 20 00 0F 84 ?? ?? ?? ?? 55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 41 89 F4 48 89 FB 8B 87 B0 00 00 00',
     JUMP:            '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 84 C0 74 ?? 48 89 DF 48 83 C4 08 5B 5D E9 ?? ?? ?? ??',
@@ -62,6 +60,19 @@ function _scanModule(sig) {
     }
     return null;
 }
+function _scanModuleAll(sig) {
+    const out = [];
+    const ranges = Process.enumerateRanges('r-x');
+    for (const r of ranges) {
+        if (r.base < MODULE_BASE) continue;
+        if (r.base >= MODULE_BASE.add(MODULE_SIZE)) continue;
+        try {
+            const m = Memory.scanSync(r.base, r.size, sig);
+            for (const x of m) out.push(x.address);
+        } catch (_) {}
+    }
+    return out;
+}
 function _resolveBySig(name) {
     const sig = SIGS[name];
     if (!sig) return null;
@@ -80,35 +91,68 @@ function _resolveByFallback(name) {
 }
 function _resolveSimple(name) { return _resolveBySig(name) || _resolveByFallback(name); }
 
-function _resolveFrameFuncStrict() {
+// v5.7: SMART resolver — больше не отклоняем правильный AOB при сдвиге
+// функции. Логика:
+//   * 1 матч refined AOB → доверяем (refined AOB уже уникален — хвост
+//     `8B 87 B0 00 00 00` отличает HeroBody от FrogBody/BoilerBody)
+//   * 0 матчей → fallback на захардкоженный RVA + warning
+//   * 2+ матча → выбираем ближайший к expectedOffset (страховка)
+function _resolveFrameFuncSmart() {
     const expectedOffset = FALLBACK['FRAME_FUNC'];
-    const aob = _resolveBySig('FRAME_FUNC');
-    if (aob) {
-        const off = aob.sub(MODULE_BASE);
-        if (off.toInt32() !== expectedOffset) {
-            send({
-                type: 'dbg',
-                where: 'resolver',
-                msg: 'FRAME_FUNC AOB mismatch → use fallback',
-                aob_offset: '0x' + off.toString(16),
-                 expected_offset: '0x' + expectedOffset.toString(16),
-            });
-            _resolutionLog.pop();
-            const fb = MODULE_BASE.add(expectedOffset);
-            _resolutionLog.push({
-                name: 'FRAME_FUNC',
-                method: 'AOB_REJECTED_FALLBACK',
-                addr: fb.toString(),
-                                offset: '0x' + expectedOffset.toString(16),
-            });
-            return fb;
-        }
-        return aob;
+    const matches = _scanModuleAll(SIGS['FRAME_FUNC']);
+
+    if (matches.length === 1) {
+        _resolutionLog.push({
+            name: 'FRAME_FUNC',
+            method: 'AOB_UNIQUE',
+            addr: matches[0].toString(),
+                            offset: matches[0].sub(MODULE_BASE).toString(),
+        });
+        return matches[0];
     }
-    return _resolveByFallback('FRAME_FUNC');
+
+    if (matches.length === 0) {
+        send({
+            type: 'dbg',
+            where: 'resolver',
+            msg: 'FRAME_FUNC AOB not found → use fallback',
+            expected_offset: '0x' + expectedOffset.toString(16),
+        });
+        return _resolveByFallback('FRAME_FUNC');
+    }
+
+    // 2+ matches — выбираем ближайший к expected
+    let best = null;
+    let bestDist = Infinity;
+    const candidates = [];
+    for (const a of matches) {
+        const off = a.sub(MODULE_BASE).toInt32();
+        candidates.push('0x' + (off >>> 0).toString(16));
+        const dist = Math.abs(off - expectedOffset);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = a;
+        }
+    }
+    send({
+        type: 'dbg',
+        where: 'resolver',
+        msg: 'FRAME_FUNC AOB gave multiple matches → pick closest to expected',
+        candidates,
+        expected_offset: '0x' + expectedOffset.toString(16),
+         picked_offset: best.sub(MODULE_BASE).toString(),
+    });
+    _resolutionLog.push({
+        name: 'FRAME_FUNC',
+        method: 'AOB_CLOSEST',
+        addr: best.toString(),
+                        offset: best.sub(MODULE_BASE).toString(),
+                        candidates,
+    });
+    return best;
 }
 
-const FRAME_FUNC           = _resolveFrameFuncStrict();
+const FRAME_FUNC           = _resolveFrameFuncSmart();
 const ADDR_JUMP            = _resolveSimple('JUMP');
 const ADDR_UNFREEZE        = _resolveSimple('UNFREEZE');
 const ADDR_UNFREEZE_ATTACK = _resolveSimple('UNFREEZE_ATTACK');

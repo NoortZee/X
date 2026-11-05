@@ -1,23 +1,24 @@
 """stones.py — доп. модуль: получение камней соперника.
 
-v14 (stability):
-  * `burst_pause_every` / `burst_pause_ms` — периодический cooldown,
-    чтобы Waydroid/Android InputDispatcher не забивался.
-  * Health-check Frida-сессии раз в `health_check_interval_s`.
-  * `session.on('detached')` — мгновенный abort если игра/Frida умерли.
-  * `tap_fail_abort` — abort после N подряд FAILED-тапов (phantom dead).
-  * `verbose_output=false` по умолчанию: 1 строка на non-match,
-    детали только для MATCH; каждый тап — раз в 10.
+v16 (telegram):
+  * TgNotifier — отправка уведомления в Telegram при MATCH.
+    Использует только stdlib (urllib), без внешних зависимостей.
+  * Отправка в daemon-thread — не блокирует stones loop.
+  * Антиспам `min_interval_s` между сообщениями.
+  * `stones tg-test` — проверить отправку.
+  * Фикс: matched_seqs теперь per-batch (раньше копились между пачками).
 
-v13: без `stones tune`/`stones show`.
-v12: burst-режим.
-v11: ускорение (тик 10мс).
+v15 (diagnostics): обработка rival_data_suspect / rival_data_invalid.
+v14: stability (cooldown, health-check, tap_fail_abort).
+v13: без tune/show.
+v12: burst.
+v11: ускорение.
 v10: ретрай отложенного skip.
 v9: skip_wait_ms, skip_delay_ms.
-v8: auto-skip на non-match, стоп на MATCH.
-v7: `stones <filter>` без префикса live; `clear` внутри LIVE.
+v8: auto-skip на non-match.
+v7: `stones <filter>` без live; clear внутри LIVE.
 v6: stdin polling через select().
-v5: автопоказ, robust loading rival_hook.js, sanity-check, ASCII fallback.
+v5: автопоказ, robust loading, sanity-check, ASCII fallback.
 """
 from __future__ import annotations
 
@@ -26,6 +27,8 @@ import select
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -122,6 +125,129 @@ def _log_source_head(src: str, n_lines: int = 3, hex_bytes: int = 100) -> None:
 
 
 # ------------------------------------------------------------
+# Telegram notifier
+# ------------------------------------------------------------
+class TgNotifier:
+    """Отправка уведомлений в Telegram Bot API через stdlib urllib.
+
+    - enabled=False или пустой token/chat_id → no-op.
+    - min_interval_s: антиспам между сообщениями.
+    - Отправка в daemon-thread → не блокирует stones loop.
+    """
+
+    API_TMPL = "https://api.telegram.org/bot{token}/sendMessage"
+
+    def __init__(self,
+                 bot_token: str = "",
+                 chat_id: str = "",
+                 enabled: bool = False,
+                 timeout_s: float = 5.0,
+                 min_interval_s: float = 10.0):
+        self.bot_token = (bot_token or "").strip()
+        self.chat_id = str(chat_id or "").strip()
+        self.timeout_s = max(1.0, float(timeout_s))
+        self.min_interval_s = max(0.0, float(min_interval_s))
+
+        raw_enabled = bool(enabled)
+        self.enabled = raw_enabled and bool(self.bot_token) and bool(self.chat_id)
+
+        if raw_enabled and not self.enabled:
+            log.warning(
+                "telegram: enabled=true, но token/chat_id пустые — "
+                "уведомления отключены"
+            )
+        if self.enabled:
+            log.info(
+                "telegram: enabled (chat_id=%s, min_interval=%.0fs, timeout=%.0fs)",
+                self.chat_id, self.min_interval_s, self.timeout_s,
+            )
+
+        self._last_sent_t = 0.0
+        self._lock = threading.Lock()
+
+    # ---------- internals ----------
+    def _should_send(self) -> bool:
+        if not self.enabled:
+            return False
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_sent_t < self.min_interval_s:
+                return False
+            self._last_sent_t = now
+            return True
+
+    def _http_send(self, text: str) -> bool:
+        url = self.API_TMPL.format(token=self.bot_token)
+        data = urllib.parse.urlencode({
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                body = resp.read()
+                if resp.status != 200:
+                    log.warning("telegram: HTTP %s body=%r",
+                                resp.status, body[:200])
+                    return False
+                return True
+        except Exception as e:
+            log.warning("telegram send failed: %s", e)
+            return False
+
+    @staticmethod
+    def _format_rival(r: dict) -> str:
+        seq = r.get("seq", "?")
+        gold = r.get("gold")
+        lvl = r.get("player_level")
+        total = r.get("total_rating")
+        lines = [f"seq={seq} gold={gold} lvl={lvl} total={total}"]
+        for s in (r.get("stones") or []):
+            if not isinstance(s, dict):
+                continue
+            if s.get("rating") is None:
+                continue
+            lines.append(
+                f"  slot={s.get('slot')} rating={s.get('rating')} "
+                f"cnt={s.get('cnt')} flag={s.get('flag')}"
+            )
+        return "\n".join(lines)
+
+    # ---------- public ----------
+    def force_send(self, text: str) -> bool:
+        """Синхронная отправка без throttle. Для `stones tg-test`."""
+        if not self.enabled:
+            return False
+        return self._http_send(text)
+
+    def notify_match(self, rivals: list, filter_label: str = "") -> None:
+        """Отправляет уведомление о MATCH в фоне (не блокирует caller)."""
+        if not self.enabled:
+            return
+        if not self._should_send():
+            log.debug("telegram: throttled (min_interval=%.0fs)",
+                      self.min_interval_s)
+            return
+
+        header = f"🎯 <b>MATCH</b> — filter: {filter_label or 'none'}"
+        body_parts = [header]
+        for r in rivals:
+            body_parts.append("")
+            body_parts.append(self._format_rival(r))
+        text = "\n".join(body_parts)
+
+        t = threading.Thread(
+            target=self._http_send,
+            args=(text,),
+            name="tg-send",
+            daemon=True,
+        )
+        t.start()
+
+
+# ------------------------------------------------------------
 # StonesModule
 # ------------------------------------------------------------
 class StonesModule:
@@ -136,40 +262,38 @@ class StonesModule:
                  burst_pause_ms: int = 3000,
                  tap_fail_abort: int = 10,
                  health_check_interval_s: float = 3.0,
-                 verbose_output: bool = False):
+                 verbose_output: bool = False,
+                 tg_notifier: Optional[TgNotifier] = None):
         self.session = session
         self.script: Optional[frida.core.Script] = None
         self._installed = False
 
-        # auto-skip
         self.phantom = phantom
         self.skip_xy = skip_xy
         self.skip_wait_ms = max(0, int(skip_wait_ms))
         self.burst_interval_ms = max(10, int(burst_interval_ms))
         self.stall_timeout_ms = max(500, int(stall_timeout_ms))
 
-        # stability
         self.burst_pause_every = max(0, int(burst_pause_every))
         self.burst_pause_ms = max(0, int(burst_pause_ms))
         self.tap_fail_abort = max(1, int(tap_fail_abort))
         self.health_check_interval_s = max(0.5, float(health_check_interval_s))
         self.verbose_output = bool(verbose_output)
 
+        self.tg_notifier = tg_notifier
+
         self._last_skip_t = 0.0
         self._tap_ok_count = 0
         self._session_dead = False
         self._session_detach_reason = None
 
-        # live-mode plumbing
         self._live = False
         self._pending_seqs: list = []
         self._live_event = threading.Event()
         self._live_lock = threading.Lock()
 
-        # Listen for session detach (game crash / frida-server death)
         self._attach_session_listener()
 
-    # ---------- session listener ----------
     def _attach_session_listener(self) -> None:
         try:
             self.session.on("detached", self._on_session_detached)
@@ -191,7 +315,6 @@ class StonesModule:
     def last_skip_monotonic(self) -> float:
         return self._last_skip_t
 
-    # ---------- lifecycle ----------
     def ensure_loaded(self) -> None:
         if self.script is not None:
             return
@@ -246,7 +369,6 @@ class StonesModule:
         self._installed = False
         log.info("rival_hook stopped")
 
-    # ---------- live plumbing ----------
     def set_live(self, on: bool) -> None:
         with self._live_lock:
             self._live = on
@@ -265,9 +387,7 @@ class StonesModule:
     def clear_live_event(self) -> None:
         self._live_event.clear()
 
-    # ---------- auto-skip ----------
     def do_skip(self) -> bool:
-        """Тап «найти следующего». Возвращает True при успехе."""
         if self.phantom is None or self.skip_xy is None:
             return False
         x, y = self.skip_xy
@@ -279,7 +399,6 @@ class StonesModule:
             self._last_skip_t = time.monotonic()
             if tr.ok:
                 self._tap_ok_count += 1
-                # вывод: всегда первые 10 тапов, потом раз в 10; verbose — всё
                 if (self.verbose_output
                         or self._tap_ok_count <= 10
                         or self._tap_ok_count % 10 == 0):
@@ -294,7 +413,6 @@ class StonesModule:
             print(f"   (skip tap exception: {e})")
             return False
 
-    # ---------- frida message handler ----------
     def _on_msg(self, msg, _data):
         if msg["type"] == "send":
             p = msg["payload"] or {}
@@ -314,13 +432,25 @@ class StonesModule:
             elif t == "hooked":
                 log.info("[rival] hooked at %s offset=%s",
                          p.get("at"), p.get("offset"))
+            elif t == "rival_data_suspect":
+                log.warning("[rival] suspect data seq=%s issues=%s sample=%s",
+                            p.get("seq"), p.get("issues"), p.get("sample"))
+            elif t == "rival_data_invalid":
+                print()
+                print("=" * 64)
+                print("!!!  RIVAL DATA INVALID — offsets или AOB устарели  !!!")
+                print("=" * 64)
+                print("msg:", p.get("msg"))
+                print("hint:", p.get("hint"))
+                print("=" * 64)
+                print()
+                log.error("[rival] rival_data_invalid: %s", p.get("msg"))
             elif t == "err":
                 log.error("[rival] err where=%s: %s",
                           p.get("where"), p.get("msg"))
         else:
             log.error("[rival frida] %s", msg)
 
-    # ---------- data ----------
     def last(self) -> dict:
         self.ensure_loaded()
         return self.script.exports_sync.get_last_rival() or {}
@@ -450,7 +580,7 @@ def _build_filter(argv: list):
 # ------------------------------------------------------------
 # LIVE
 # ------------------------------------------------------------
-LIVE_TICK_S = 0.01  # 10 мс тик
+LIVE_TICK_S = 0.01
 
 
 def _print_live_header(filter_label: str) -> None:
@@ -477,6 +607,12 @@ def _print_live_banner(module: StonesModule, has_filter: bool) -> None:
     elif has_filter:
         print("AUTO-SKIP: отключён (нет stones.skip_on_no_match "
               "в config.yaml или phantom).")
+    tg = getattr(module, "tg_notifier", None)
+    if tg is not None and tg.enabled:
+        print(f"  TELEGRAM: enabled (chat_id={tg.chat_id}, "
+              f"min_interval={tg.min_interval_s:.0f}s)")
+    else:
+        print("  TELEGRAM: disabled")
     print()
 
 
@@ -485,7 +621,6 @@ def _reset_live_state(ctx: dict) -> None:
     ctx["next_tap_at"] = 0.0
     ctx["last_rival_at"] = 0.0
     ctx["taps_sent"] = 0
-    ctx["matched_seqs"] = []
     ctx["fail_streak"] = 0
     ctx["last_health_check"] = 0.0
     ctx["pause_until"] = 0.0
@@ -537,6 +672,16 @@ def _handle_live_line(line: str, ctx: dict) -> bool:
                 print("[now] no rival yet")
         return True
 
+    if sub in ("tg-test", "tg_test", "tgtest"):
+        tg = getattr(mod, "tg_notifier", None) if mod else None
+        if tg is None or not tg.enabled:
+            print("telegram disabled (config.yaml: telegram.enabled / "
+                  "bot_token / chat_id)")
+            return True
+        ok = tg.force_send("🧪 <b>stones</b>: test message")
+        print("tg-test sent (check chat)" if ok else "tg-test FAILED (см. лог)")
+        return True
+
     if sub == "live":
         fn, label = _build_filter(parts[2:])
         ctx["fn"] = fn
@@ -577,7 +722,6 @@ def stones_live(module: StonesModule,
         "next_tap_at": 0.0,
         "last_rival_at": 0.0,
         "taps_sent": 0,
-        "matched_seqs": [],
         "fail_streak": 0,
         "last_health_check": time.monotonic(),
         "pause_until": 0.0,
@@ -603,13 +747,13 @@ def stones_live(module: StonesModule,
             module.clear_live_event()
             pending = module.drain_pending()
 
-            # --- 0) fatal: Frida session detached (game crash / server death)
+            # --- 0) fatal
             if module.is_session_dead():
                 print(f"\nLIVE ABORT: frida session detached "
                       f"({module.session_detach_reason()})")
                 return
 
-            # --- 0.1) periodic health-check
+            # --- 0.1) health-check
             now = time.monotonic()
             if (module.health_check_interval_s > 0
                     and now - ctx["last_health_check"]
@@ -630,6 +774,7 @@ def stones_live(module: StonesModule,
 
                 any_match = False
                 any_nonmatch = False
+                batch_matched = []
 
                 for seq in sorted(pending):
                     rr = by_seq.get(seq)
@@ -650,7 +795,7 @@ def stones_live(module: StonesModule,
 
                     if hit:
                         any_match = True
-                        ctx["matched_seqs"].append(seq)
+                        batch_matched.append(seq)
                     elif fn is not None:
                         any_nonmatch = True
 
@@ -661,11 +806,19 @@ def stones_live(module: StonesModule,
                         ctx["state"] = "frozen_match"
                         ctx["next_tap_at"] = 0.0
                         if prev == "tapping":
-                            print(f"   (MATCH on seq {ctx['matched_seqs']} — "
+                            print(f"   (MATCH on seq {batch_matched} — "
                                   f"останавливаю тапы)")
                         else:
-                            print(f"   (MATCH on seq {ctx['matched_seqs']} — "
+                            print(f"   (MATCH on seq {batch_matched} — "
                                   f"авто-скип НЕ делаю, стоп)")
+                        # Telegram — только на текущий batch, без throttle
+                        # от прошлых матчей (throttle внутри notify_match)
+                        tg = getattr(module, "tg_notifier", None)
+                        if tg is not None and tg.enabled:
+                            matched_rivals = [by_seq[s] for s in batch_matched
+                                              if s in by_seq]
+                            tg.notify_match(matched_rivals, ctx["label"])
+                            print(f"   (telegram: уведомление отправляется)")
                     elif any_nonmatch and ctx["state"] != "frozen_match":
                         if ctx["state"] != "tapping":
                             ctx["state"] = "tapping"
@@ -676,11 +829,10 @@ def stones_live(module: StonesModule,
                                   f"{module.skip_wait_ms}ms, "
                                   f"interval={module.burst_interval_ms}ms)")
 
-            # --- 2) burst: тап по расписанию
+            # --- 2) burst
             if ctx["state"] == "tapping" and module.phantom and module.skip_xy:
                 now = time.monotonic()
 
-                # stall
                 if (ctx["last_rival_at"] > 0
                         and now - ctx["last_rival_at"]
                             > module.stall_timeout_ms / 1000.0):
@@ -689,7 +841,6 @@ def stones_live(module: StonesModule,
                     ctx["state"] = "stalled"
                     ctx["next_tap_at"] = 0.0
                 elif now < ctx["pause_until"]:
-                    # cooldown активен — пропускаем тик
                     pass
                 elif now >= ctx["next_tap_at"]:
                     ok = module.do_skip()
@@ -703,7 +854,6 @@ def stones_live(module: StonesModule,
                                   f"подряд FAILED-тапов — phantom/game dead")
                             return
 
-                    # cooldown после N успешных
                     if (module.burst_pause_every > 0
                             and ctx["taps_sent"] % module.burst_pause_every == 0
                             and ctx["taps_sent"] > 0):
@@ -749,6 +899,7 @@ HELP = """\
   stones stop                detach хука
   stones clear               очистить консоль
   stones debug               диагностика rival_hook.js
+  stones tg-test             отправить тестовое сообщение в Telegram
   help                       то же, что stones help
 
 Фильтры (live + burst-тапы на non-match):
@@ -757,29 +908,25 @@ HELP = """\
   stones 2stone 100000       хотя бы 2 камня  rating >= 100000
   stones 3stone 200000       все камни rating >= 200000
 
+Telegram (config.yaml `telegram.*`):
+  enabled        false = выключено
+  bot_token      токен от @BotFather
+  chat_id        твой user_id / -100… для группы
+  timeout_s      HTTP timeout (default 5)
+  min_interval_s антиспам между сообщениями (default 10)
+
+  При MATCH уходит сообщение в чат. Проверить: `stones tg-test`.
+
 BURST + STABILITY (config.yaml `stones.*`):
-  skip_on_no_match   координаты тапа «следующий»
-  skip_wait_ms       пауза перед первым тапом серии (default 80)
-  burst_interval_ms  интервал между тапами (default 120)
-  stall_timeout_ms   нет rival дольше → стоп (default 5000)
-
-  burst_pause_every  каждые N тапов пауза (default 500, 0=off)
-  burst_pause_ms     длительность паузы (default 3000)
-  tap_fail_abort     N подряд FAILED-тапов → abort (default 10)
-  health_check_interval_s  проверка Frida-сессии, сек (default 3)
-  verbose_output     true = полный дамп (как раньше), false = компакт
-
-Логика:
-  * non-match → тап (x,y), потом ещё тап через burst_interval_ms,
-    ещё... — непрерывно, пока не придёт rival_update.
-  * rival пришёл → MATCH → стоп; non-match → тот же темп.
-  * Game/Frida умерли (session.on('detached') или health-check) → ABORT.
-  * Phantom сдох (N подряд FAILED) → ABORT.
+  skip_on_no_match, skip_wait_ms, burst_interval_ms, stall_timeout_ms
+  burst_pause_every, burst_pause_ms, tap_fail_abort,
+  health_check_interval_s, verbose_output
 
 Во время LIVE:
   stones <new filter>        сменить фильтр (сброс state)
   clear  /  stones clear     очистить консоль
   stones now                 показать последний снимок
+  stones tg-test             тест Telegram
   stones stop                выйти в меню
   Ctrl+C                     выйти в меню
 """
@@ -841,6 +988,16 @@ def handle(module: StonesModule, argv: list) -> None:
 
     if sub in ("clear", "cls"):
         _clear_console()
+        return
+
+    if sub in ("tg-test", "tg_test", "tgtest"):
+        tg = getattr(module, "tg_notifier", None)
+        if tg is None or not tg.enabled:
+            print("telegram disabled (config.yaml: telegram.enabled / "
+                  "bot_token / chat_id)")
+            return
+        ok = tg.force_send("🧪 <b>stones</b>: test message")
+        print("tg-test sent (check chat)" if ok else "tg-test FAILED (см. лог)")
         return
 
     if sub == "debug":
