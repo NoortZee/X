@@ -1,4 +1,16 @@
-"""orchestrator.py — async replay (NO frame gate). v7.7.
+"""orchestrator.py — async replay (NO frame gate). v7.8.
+
+v7.8:
+  * wall_timeout_s теперь АДАПТИВНЫЙ (см. _effective_wall_timeout):
+      - если `wall_timeout_s` <= 0 или отсутствует → глобального лимита нет;
+      - иначе effective = max(configured, plan_duration_est * 1.5 + 60);
+      - plan_duration_est считается по frame_delta последнего прыжка / fps.
+    Раньше при длинных планах (loop-скрипты на час) глобальный
+    wall_timeout убивал play на ~5-й минуте. Теперь длинные планы
+    доигрываются, а зависание всё равно ловится per-jump deadline'ом
+    и stall-детектором.
+  * В отчёт добавлено поле wall_limit_s — можно увидеть, какой лимит
+    реально применялся.
 
 v7.7:
   * run() обёрнут в try/finally — play_stop() вызывается ВСЕГДА,
@@ -105,10 +117,65 @@ class Orchestrator:
         self.tap_x, self.tap_y = resolve_tap(cfg)
         self._wall0 = None
         self.jc_baseline = None
+        self._wall_limit_s: Optional[float] = None
+
+    # ------------------------------------------------------------
+    # Adaptive wall timeout
+    # ------------------------------------------------------------
+    def _effective_wall_timeout(self, o, plan) -> Optional[float]:
+        '''Возвращает глобальный лимит на весь play в секундах или None.
+
+        Логика:
+          * configured <= 0 или отсутствует  → без лимита (None);
+          * иначе adaptive = plan_duration_est * 1.5 + 60,
+            effective = max(configured, adaptive).
+
+        plan_duration_est — оценка длительности «полезного» куска плана:
+        (frame_delta последнего прыжка) / nominal_fps.
+        '''
+        configured_raw = o.get("wall_timeout_s", None)
+        if configured_raw is None:
+            return None
+        try:
+            configured = float(configured_raw)
+        except (TypeError, ValueError):
+            log.warning("wall_timeout_s=%r is not numeric — ignoring", configured_raw)
+            return None
+        if configured <= 0:
+            return None
+        if not plan:
+            return configured
+
+        fps = float(o.get("nominal_fps", 60) or 60)
+        if fps <= 0:
+            return configured
+
+        last_delta = max(0, int(plan[-1].get("frame_delta", 0)))
+        est = last_delta / fps
+        adaptive = est * 1.5 + 60.0
+        effective = max(configured, adaptive)
+
+        if effective > configured:
+            log.warning(
+                "wall_timeout_s=%.0fs < plan duration est %.0fs "
+                "(last frame_delta=%d @ %.0f fps) — auto-raising to %.0fs",
+                configured, est, last_delta, fps, effective,
+            )
+        self._wall_limit_s = effective
+        return effective
 
     def _wait_playing(self):
         o = self.cfg["orchestrator"]
         t0 = time.monotonic()
+        # для ожидания входа в playing используем именно сконфигурированный
+        # лимит (не адаптивный) — это про старт, а не про длину плана.
+        wait_limit = o.get("wall_timeout_s", None)
+        try:
+            wait_limit = float(wait_limit) if wait_limit is not None else None
+        except (TypeError, ValueError):
+            wait_limit = None
+        if wait_limit is not None and wait_limit <= 0:
+            wait_limit = None
         while True:
             st = self.agent.play_state()
             phase = st.get("phase")
@@ -116,7 +183,7 @@ class Orchestrator:
                 return st
             if phase == "idle":
                 raise ReplayError("play setup not initialised")
-            if time.monotonic() - t0 > o["wall_timeout_s"]:
+            if wait_limit is not None and (time.monotonic() - t0) > wait_limit:
                 raise ReplayError(f"wall_timeout (phase={phase})")
             time.sleep(o["poll_interval_ms"] / 1000.0)
 
@@ -224,7 +291,6 @@ class Orchestrator:
             if frames_to_go < 0:
                 overshoot = -frames_to_go
                 if overshoot <= OVERSHOOT_TOLERANCE:
-                    # На случай если user-tap запоздал и уже прыгнул:
                     covered = self._try_covered_by_user_tap(jump, target_frame)
                     if covered is not None:
                         return covered
@@ -282,7 +348,6 @@ class Orchestrator:
             self.tap_x, self.tap_y,
             pre_state.get("a0"), pre_state.get("g80"))
 
-        # для idx=0 используем baseline (0), для остальных — текущий count
         if jump["idx"] == 0 and self.jc_baseline is not None:
             jc_before = self.jc_baseline
         else:
@@ -376,14 +441,12 @@ class Orchestrator:
             raise ReplayError(f"playSetup failed: {setup}")
 
         try:
-            # Pre-connect phantom (экономит 5-10 мс на первом tap)
             try:
                 self.phantom.connect()
                 log.info("phantom pre-connected")
             except Exception as e:
                 log.warning("phantom pre-connect failed: %s", e)
 
-            # Baseline jump count до пользовательского тапа
             try:
                 self.jc_baseline = int(self.agent.pump_jump_count())
             except Exception as e:
@@ -391,22 +454,27 @@ class Orchestrator:
                 self.jc_baseline = None
 
             o = self.cfg["orchestrator"]
+            wall_limit_s = self._effective_wall_timeout(o, plan)
+
             log.info(
                 "playSetup: anchor=%s@%s jumps=%d lead=%dms check=%dms retry=%s "
-                "overshoot_tol=%d jc_baseline=%s",
+                "overshoot_tol=%d jc_baseline=%s wall_limit_s=%s",
                 anchor_kind, anchor_rec, len(plan),
                 o["predict_lead_ms"], o["post_tap_check_ms"],
                 o.get("retry_on_miss", False), OVERSHOOT_TOLERANCE,
-                self.jc_baseline)
+                self.jc_baseline,
+                ("none" if wall_limit_s is None else f"{wall_limit_s:.0f}"))
             log.info("tap position: (%d, %d)", self.tap_x, self.tap_y)
 
             self._wall0 = time.monotonic()
             st = self._wait_playing()
 
             for i, j in enumerate(plan):
-                if time.monotonic() - self._wall0 > o["wall_timeout_s"]:
+                if wall_limit_s is not None \
+                        and (time.monotonic() - self._wall0) > wall_limit_s:
                     raise ReplayError(
-                        f"wall_timeout (fired={len(self.fire_log)}/{len(plan)})")
+                        f"wall_timeout (fired={len(self.fire_log)}/{len(plan)}, "
+                        f"limit={wall_limit_s:.0f}s)")
                 fr = self._fire_async(j, initial_state=st if i == 0 else None)
                 self.fire_log.append(fr)
 
@@ -424,7 +492,7 @@ class Orchestrator:
 
             report = {
                 "ok": True,
-                "mode": "async_no_gate_v7.7",
+                "mode": "async_no_gate_v7.8",
                 "anchor_kind": anchor_kind,
                 "anchor_rec": anchor_rec,
                 "tap_xy": [self.tap_x, self.tap_y],
@@ -434,6 +502,7 @@ class Orchestrator:
                 "covered_by_user_tap": sum(
                     1 for fr in self.fire_log if fr.note == "covered_by_user_tap"),
                 "retries": sum(1 for tc in tap_counts if tc > 1),
+                "wall_limit_s": wall_limit_s,
                 "frame_error_stats": {
                     "min": min(errors) if errors else None,
                     "med": statistics.median(errors) if errors else None,

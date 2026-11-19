@@ -4,20 +4,40 @@ r'''main.py — CLI for King of Thieves TAS (Phantom + Frida, async v7.0).
 FPS-optimized: pump_install вызывается ЛЕНИВО — только в record/play/calibrate.
 Idle-режим (после attach, до действий) — без Interceptor на FRAME_FUNC.
 
-v7.0:
-  * Telegram-уведомления при MATCH (config.yaml `telegram.*`).
-    TgNotifier читает token/chat_id/enabled, отправляет через stdlib
-    urllib в daemon-thread. `stones tg-test` — проверка.
-    Backward-compat: без секции `telegram` — notifier disabled.
+Формат комментария в replay.json:
 
-v6.9: stability (cooldown, health-check, tap_fail_abort).
-v6.8: stones burst-mode.
-v6.7: пауза перед тапом + интервал.
-v6.6: auto-skip через phantom.
-v6.5: `help` — stones-справка; `stones <filter>` без live.
-v6.4: доп. модуль stones.py.
-v6.3: clear (c) чистит replay.json + консоль.
-v6.2: Ctrl+C возвращает в меню.
+  """
+  jumps: N
+  anchor: <kind>@<frame>
+  fps: 60
+  tap_down_ms: 1
+  delta: true
+
+  +26
+  +14
+  loop 10 {
+    +51
+  }
+  +60
+  """
+
+  * delta: true  → числа ниже — ДЕЛЬТЫ в кадрах: первый прыжок считается
+    от якоря, каждый следующий — от предыдущего прыжка. Так удобно
+    писать/править руками.
+  * без delta:   → числа — абсолютные кадры (старый формат, совместим).
+  * loop N { ... } — повторить блок N раз. Дельты внутри блока
+    продолжают накапливаться от предыдущего значения; вложенные циклы
+    поддерживаются. Семантика: cursor = anchor; для каждой итерации
+    цикла cursor += delta; emit(cursor).
+  * Каждая запись — либо `+51`, `51`, `-3`, `{"frame": 51},` —
+    любая из форм распознаётся. Пустые строки и `//...` игнорируются.
+  * mode: comment  → play игнорирует JSON-тело и берёт только список
+    кадров из комментария (используй после ручной правки).
+  * Если JSON-тело есть, но кадры в комментарии разошлись с
+    events[].frame — play автоматически переключается на комментарий
+    (body_frames отключаются, verify не работает).
+
+Lazy pump: pump_install вызывается только в record/play/calibrate.
 
 Логи:
   * в logs/ хранится только replay.json.
@@ -26,6 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import threading
 from pathlib import Path
@@ -243,21 +264,314 @@ class Agent:
                 pass
 
 
+# ------------------------------------------------------------
+# replay.json parsing (comment format: header + frame list)
+# ------------------------------------------------------------
+_HEADER_LINE_RE = re.compile(
+    r'^(jumps|anchor|fps|tap_down_ms|delta|mode)\s*:\s*(.*)$'
+)
+_FRAME_NUM_RE = re.compile(r'^([+-]?\d+)\s*,?\s*$')
+_FRAME_OBJ_RE = re.compile(r'^\{\s*"frame"\s*:\s*([+-]?\d+)\s*\}\s*,?\s*$')
+_LOOP_OPEN_RE = re.compile(r'^loop\s+(\d+)\s*\{\s*$')
+_LOOP_CLOSE_RE = re.compile(r'^\}\s*,?\s*$')
+_JSON_BODY_RE = re.compile(r'\{\s*"version"\s*:')
+
+
+def _strip_line_comment(s: str) -> str:
+    '''Убирает `// ...` в конце строки. Строки, начинающиеся с //, → пусто.'''
+    p = s.find("//")
+    if p >= 0:
+        s = s[:p]
+    return s.strip()
+
+
+def _parse_frame_value(s: str):
+    '''Возвращает int для одной записи кадра, иначе None.
+    Понимает: `+26`, `26`, `-3`, `26,`, `{"frame": 26},`.'''
+    m = _FRAME_NUM_RE.match(s)
+    if m:
+        return int(m.group(1))
+    m = _FRAME_OBJ_RE.match(s)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _parse_header_lines(text: str) -> dict:
+    header: dict = {}
+    for raw in text.splitlines():
+        s = _strip_line_comment(raw)
+        if not s or s.startswith('"""'):
+            continue
+        m = _HEADER_LINE_RE.match(s)
+        if m:
+            header[m.group(1)] = m.group(2).strip()
+    return header
+
+
+def _exec_ops(ops, cursor, out):
+    '''Выполняет дерево операций (num | loop) в delta-режиме.
+    cursor стартует с anchor; каждая num-операция сдвигает cursor и
+    выдаёт абсолютный кадр. loop N { ... } повторяет тело N раз.
+    Возвращает финальный cursor (для вложенности).'''
+    for op in ops:
+        if op[0] == "num":
+            cursor += op[1]
+            out.append(cursor)
+        else:  # loop
+            count, body = op[1], op[2]
+            for _ in range(count):
+                cursor = _exec_ops(body, cursor, out)
+    return cursor
+
+
+def _flatten_abs(ops, out):
+    '''Абсолютный режим: собираем все num-значения. Циклы расширяем
+    один раз (loop count игнорируется — warn делается в парсере).'''
+    for op in ops:
+        if op[0] == "num":
+            out.append(op[1])
+        else:
+            _flatten_abs(op[2], out)
+
+
+def _contains_loop(ops) -> bool:
+    for op in ops:
+        if op[0] == "loop":
+            return True
+    return False
+
+
+def _recover_from_header_frames(text: str) -> dict:
+    '''Восстанавливает минимальный replay из шапки + списка кадров
+    (с поддержкой loop N { ... }). Возвращает dict или {}.'''
+    header: dict = {}
+    root: list = []
+    stack: list = [root]
+
+    for raw in text.splitlines():
+        s = _strip_line_comment(raw)
+        if not s:
+            continue
+        m = _HEADER_LINE_RE.match(s)
+        if m:
+            header[m.group(1)] = m.group(2).strip()
+            continue
+        m = _LOOP_OPEN_RE.match(s)
+        if m:
+            body: list = []
+            stack[-1].append(("loop", int(m.group(1)), body))
+            stack.append(body)
+            continue
+        if _LOOP_CLOSE_RE.match(s):
+            if len(stack) <= 1:
+                log.warning("unbalanced '}' in replay.json — ignored")
+                continue
+            stack.pop()
+            continue
+        v = _parse_frame_value(s)
+        if v is not None:
+            stack[-1].append(("num", v))
+            continue
+        # неизвестная строка — молча игнорируем (комментарии, мусор)
+
+    if len(stack) != 1:
+        log.warning("unclosed loop in replay.json — treating as closed at EOF")
+        while len(stack) > 1:
+            stack.pop()
+
+    # anchor
+    anchor_frame = None
+    anchor_kind = None
+    a = header.get("anchor", "")
+    if "@" in a:
+        kind_part, _, frame_part = a.partition("@")
+        anchor_kind = kind_part.strip() or None
+        try:
+            anchor_frame = int(frame_part.strip())
+        except ValueError:
+            anchor_frame = None
+
+    is_delta = header.get("delta", "").lower() in ("1", "true", "yes")
+    if is_delta and anchor_frame is None:
+        log.warning("delta: true but no valid anchor — treating as absolute")
+        is_delta = False
+
+    abs_frames: list = []
+    if is_delta:
+        _exec_ops(root, anchor_frame, abs_frames)
+    else:
+        if _contains_loop(root):
+            log.warning(
+                "loop { ... } in replay.json requires 'delta: true' — "
+                "expanding loops once (count ignored)")
+        _flatten_abs(root, abs_frames)
+
+    if not abs_frames:
+        return {}
+
+    declared = header.get("jumps")
+    if declared is not None:
+        try:
+            n = int(declared)
+            if n != len(abs_frames):
+                log.warning(
+                    "replay.json: 'jumps: %d' declared but %d frame values "
+                    "after expansion", n, len(abs_frames))
+        except ValueError:
+            pass
+
+    events: list = []
+    if anchor_frame is not None:
+        events.append({
+            "frame": anchor_frame,
+            "name": anchor_kind or "first_hero_update",
+            "snap": {},
+        })
+    for f in abs_frames:
+        events.append({"frame": f, "name": "jump", "snap": {}})
+
+    return {
+        "version": 3,
+        "anchor_frame": anchor_frame,
+        "anchor_kind": anchor_kind or "first_hero_update",
+        "events": events,
+        "body_frames": [],
+        "timeline_ns": [],
+        "rng_log": None,
+        "_recovered": True,
+        "_recovered_jumps": len(abs_frames),
+        "_recovered_delta_mode": is_delta,
+        "_fps_from_header": header.get("fps"),
+        "_tap_down_from_header": header.get("tap_down_ms"),
+    }
+
+
 def load_replay(path: Path = REPLAY_PATH) -> dict:
+    '''Читает replay.json. Приоритет:
+
+      1) mode: comment → только список кадров из комментария.
+      2) JSON-тело + комментарий, кадры совпадают → JSON-тело
+         (со snap и body_frames).
+      3) JSON-тело + комментарий, кадры расходятся → комментарий
+         (значит правили руками; body_frames отключаются).
+      4) Только JSON-тело → оно.
+      5) Только комментарий → восстановленный replay.
+      6) Ничего → {}.
+
+    Никогда не падает с трейсбеком.'''
     if not path.exists():
         return {}
-    text = path.read_text(encoding="utf-8")
-    brace = text.find("{")
-    if brace < 0:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        log.error("failed to read %s: %s", path, e)
         return {}
-    raw = text[brace:].strip()
-    if not raw:
+
+    header = _parse_header_lines(text)
+    mode = header.get("mode", "").lower()
+    force_comment = mode in ("comment", "frames_only", "frames")
+
+    body = None
+    for m in _JSON_BODY_RE.finditer(text):
+        candidate = text[m.start():].strip()
+        try:
+            body = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            last = candidate.rfind("}")
+            if last > 0:
+                try:
+                    body = json.loads(candidate[:last + 1])
+                    break
+                except json.JSONDecodeError:
+                    pass
+
+    recovered = _recover_from_header_frames(text)
+
+    if force_comment:
+        if recovered:
+            log.info("replay.json: mode=comment → using frame list from comment")
+            return recovered
+        if body:
+            log.warning("mode=comment but no frame list — fallback to JSON body")
+            return body
         return {}
-    return json.loads(raw)
+
+    if body and recovered:
+        body_jumps = sorted(
+            int(e["frame"]) for e in body.get("events", [])
+            if e.get("name") == "jump"
+        )
+        cmt_jumps = sorted(
+            int(e["frame"]) for e in recovered.get("events", [])
+            if e.get("name") == "jump"
+        )
+        if body_jumps != cmt_jumps:
+            log.warning(
+                "replay.json: comment frame list diverges from JSON body "
+                "(%d vs %d jumps) — using comment; body_frames disabled",
+                len(cmt_jumps), len(body_jumps))
+            return recovered
+        return body
+
+    if body:
+        return body
+    if recovered:
+        log.warning(
+            "replay.json has no JSON body; recovered %d jumps (delta=%s)",
+            recovered.get("_recovered_jumps", 0),
+            recovered.get("_recovered_delta_mode"),
+        )
+        return recovered
+
+    log.error("replay.json is empty or unparsable")
+    return {}
 
 
-def build_macro_script(events, anchor, fps, tap_down_ms=1):
-    if anchor is None:
+# ------------------------------------------------------------
+# Comment generation with auto-loop detection
+# ------------------------------------------------------------
+def _emit_delta_lines(deltas: list[int]) -> list[str]:
+    '''Сворачивает повторяющиеся серии дельт в `loop N { ... }` и
+    возвращает строки для комментария. Поддерживает только один уровень
+    вложенности на выходе (это генератор, ему хватает).'''
+    n = len(deltas)
+    lines: list[str] = []
+    i = 0
+    while i < n:
+        max_plen = min(6, (n - i) // 2)
+        best_pat = None
+        best_len = 0
+        best_reps = 0
+        for plen in range(1, max_plen + 1):
+            pat = deltas[i:i + plen]
+            reps = 1
+            j = i + plen
+            while j + plen <= n and deltas[j:j + plen] == pat:
+                reps += 1
+                j += plen
+            if reps >= 2 and reps * plen > best_reps * best_len:
+                best_pat = pat
+                best_len = plen
+                best_reps = reps
+        if best_pat is not None and best_reps >= 2:
+            lines.append(f"loop {best_reps} {{")
+            for d in best_pat:
+                lines.append(f"+{d}")
+            lines.append("}")
+            i += best_reps * best_len
+        else:
+            lines.append(f"+{deltas[i]}")
+            i += 1
+    return lines
+
+
+def build_frame_script(events, anchor_frame):
+    '''Скрипт-комментарий: в шапке delta: true, дальше дельты в кадрах
+    от якоря (первый прыжок) и от предыдущего прыжка (остальные).
+    Повторяющиеся серии сворачиваются в `loop N { ... }`.'''
+    if anchor_frame is None:
         return ""
     jumps = sorted(
         (e for e in events if e.get("name") == "jump"),
@@ -265,30 +579,13 @@ def build_macro_script(events, anchor, fps, tap_down_ms=1):
     )
     if not jumps:
         return ""
-    fps = float(fps) if fps and fps > 0 else 60.0
-    tap_down_ms = max(1, int(tap_down_ms))
-
-    lines = []
-    prev = int(anchor)
-    first = True
+    deltas: list[int] = []
+    prev = int(anchor_frame)
     for j in jumps:
-        frame = int(j["frame"])
-        delta = frame - prev
-        if delta < 0:
-            delta = 0
-        sleep_ms = max(1, int(round(delta * 1000.0 / fps)))
-        if first:
-            lines.append(
-                "// задержка загрузки уровня и input lag примерно +26 мс"
-            )
-            first = False
-        lines.append(f"SLEEP_U16 {sleep_ms}")
-        lines.append("PRESS_MK hidmouse_0")
-        lines.append(f"SLEEP_U16 {tap_down_ms}")
-        lines.append("RELEASE_MK hidmouse_0")
-        lines.append("//")
-        prev = frame
-    return "\n".join(lines)
+        f = int(j["frame"])
+        deltas.append(f - prev)
+        prev = f
+    return "\n".join(_emit_delta_lines(deltas))
 
 
 def do_record(agent: Agent, cfg: dict) -> None:
@@ -324,20 +621,32 @@ def do_record(agent: Agent, cfg: dict) -> None:
 
     fps = float(cfg.get("orchestrator", {}).get("nominal_fps", 60))
     tap_down_ms = int(cfg.get("phantom", {}).get("tap_down_to_up_ms", 1))
-    macro = build_macro_script(events, anchor, fps, tap_down_ms)
+    frame_script = build_frame_script(events, anchor)
 
     preamble = '"""\n'
     preamble += f"jumps: {jumps_count}\n"
     preamble += f"anchor: {kind}@{anchor}\n"
     preamble += f"fps: {fps:.0f}\n"
     preamble += f"tap_down_ms: {tap_down_ms}\n"
-    if macro:
-        preamble += "\n" + macro + "\n"
+    if frame_script:
+        preamble += "delta: true\n"
+        preamble += "\n" + frame_script + "\n"
     preamble += '"""\n\n'
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     payload = preamble + json.dumps(out, indent=2, ensure_ascii=False)
-    REPLAY_PATH.write_text(payload, encoding="utf-8")
+
+    # Атомарная запись: Ctrl+C во время записи не оставит полуфайл.
+    tmp = REPLAY_PATH.with_suffix(REPLAY_PATH.suffix + ".tmp")
+    try:
+        tmp.write_text(payload, encoding="utf-8")
+        tmp.replace(REPLAY_PATH)
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
 
     log.info(
         "saved replay: %d events, %d body_frames, %d jumps, anchor=%s@%s",
@@ -354,10 +663,26 @@ def do_record(agent: Agent, cfg: dict) -> None:
 def do_play(agent: Agent, phantom: PhantomBridge, cfg: dict) -> None:
     replay = load_replay()
     if not replay.get("events"):
-        print("нет replay.json — сначала record.")
+        if REPLAY_PATH.exists():
+            print("replay.json есть, но в нём нет events.")
+            print(f"Файл: {REPLAY_PATH}")
+            print("Похоже, файл повреждён или был записан не до конца — "
+                  "сделайте record заново.")
+        else:
+            print("нет replay.json — сначала record.")
         return
+
+    if replay.get("_recovered"):
+        d = "delta" if replay.get("_recovered_delta_mode") else "absolute"
+        print(
+            f"⚠ replay.json без JSON-тела: восстановлено "
+            f"{replay.get('_recovered_jumps', 0)} прыжков "
+            f"(mode={d}); body_frames недоступны (verify отключён)."
+        )
+
+    jumps_n = sum(1 for e in replay["events"] if e["name"] == "jump")
     print(f"anchor: {replay.get('anchor_kind')}={replay.get('anchor_frame')}, "
-          f"jumps={sum(1 for e in replay['events'] if e['name'] == 'jump')}")
+          f"jumps={jumps_n}")
     print("Войдите на уровень в замороженном состоянии.")
     try:
         input("Enter — старт play... ")
@@ -503,7 +828,7 @@ def do_dry_run(agent: Agent, cfg: dict) -> None:
             f"delta={p['frame_delta']:4d}"
         )
     print(f"total: {len(plan)} jumps")
-    print('   macro: see logs/replay.json (block between """)')
+    print('   frame script: see logs/replay.json (block between """)')
 
 
 def do_stones(agent: Agent, phantom: PhantomBridge, argv: list) -> None:
