@@ -32,7 +32,7 @@ function fixture(matches = 1, production = false, underground = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('underground: true', 'underground: ' + underground) : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground) : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -730,4 +730,13 @@ test('underground descent times out without retry, and stop clears forced vertic
     f.c.testTime=4000;f.leave();assert.equal(f.memory.get(0x20044),0);
     const stopped=noFallFixture(true);stopped.leave();assert.equal(stopped.memory.get(0x20044),2);
     stopped.rpc.stop();assert.equal(stopped.memory.get(0x20044),0);assert.equal(stopped.memory.get(0x200A8),1);
+});
+
+
+test('shipped configuration disables underground descent while preserving no-fall, speed and masks',()=>{
+    const profile=fs.readFileSync(path.join(root,'memory/offsets.js'),'utf8');
+    const values=vm.runInNewContext(profile+'; ({fall: MEMORY_LAYOUT.catacombs.no_fall, mask: MEMORY_LAYOUT.catacombs.mask_test.enabled, speed: MEMORY_LAYOUT.catacombs.speed_test.multiplier, auto: MEMORY_LAYOUT.catacombs.auto_teleport.enabled})');
+    assert.equal(values.fall.underground,false);
+    assert.equal(values.fall.enabled,true);
+    assert.equal(values.mask,true);assert.equal(values.speed,5);assert.equal(values.auto,true);
 });
