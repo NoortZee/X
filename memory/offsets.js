@@ -71,6 +71,8 @@ const MEMORY_LAYOUT = {
         world: { hero: 0x18 },
         object: { x: 0x34, y: 0x38, body: 0x198, image: 0x1A0, flag_a: 0x1A8, flag_b: 0x1A9 },
         hero_body: { physics: 0x20 },
+        candy_body_probe: { physics_candidate: 0x20, scale: 100, tolerance: 0.05,
+            body_name: '20EndlessMazeCandyBody', direct_calls: 8 },
         candy: { name: '16EndlessMazeCandy', rarity: 0x1F0 },
         move_white: { ahead: 24, direction: 0x9C, rarity: 1, expiry_ms: 5000,
             state_name: '20EndlessMazePlayState', hero_name: '4Hero',

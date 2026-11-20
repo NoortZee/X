@@ -101,8 +101,52 @@ function methodProbe(object, offsets) {
         return targets;
     });
 }
+// Read-only candidate: matching HeroBody's +0x20 is not evidence of Candy ABI.
+function candyPhysicsProbe(object) {
+    return safe(() => {
+        const body = object.add(C.object.body).readPointer();
+        if (body.isNull()) return { null: true };
+        requireClass(body, C.candy_body_probe.body_name);
+        const physics = body.add(C.candy_body_probe.physics_candidate).readPointer();
+        const out = { candidate_only: true, body: body.toString(), address: physics.toString() };
+        if (physics.isNull()) return { ...out, null: true };
+        const range = Process.findRangeByAddress(physics);
+        if (!range || !range.protection.includes('r')) throw new Error('physics candidate unreadable');
+        const B = MEMORY_LAYOUT.tas.body;
+        const end = Math.max(...['XF_PX', 'XF_PY', 'VX', 'VY', 'SW_A', 'AV', 'GRAVITY'].map(k => B[k])) + 4;
+        if (Number(range.base.add(range.size).sub(physics).toString()) < end)
+            throw new Error('physics candidate crosses range');
+        out.type = physics.add(B.TYPE).readS32();
+        out.fields = {};
+        for (const k of ['XF_PX', 'XF_PY', 'VX', 'VY', 'SW_A', 'AV', 'GRAVITY'])
+            out.fields[k] = numberAt(physics, B[k]);
+        out.object_position = position(object);
+        out.position_matches = Math.abs(out.fields.XF_PX * C.candy_body_probe.scale - out.object_position.x) < C.candy_body_probe.tolerance &&
+            Math.abs(out.fields.XF_PY * C.candy_body_probe.scale - out.object_position.y) < C.candy_body_probe.tolerance;
+        return out;
+    });
+}
+function bodyCallProbe(body) {
+    return safe(() => {
+        if (body.isNull()) return { null: true };
+        const handler = body.readPointer().add(C.method_probe.body_methods.slot3).readPointer();
+        const key = captureMethodCode(handler);
+        const record = methodCode.get(key);
+        const calls = [];
+        // Exactly one level, direct calls only; no arbitrary recursive disassembly.
+        for (const ins of (record && record.instructions) || []) {
+            if (calls.length >= C.candy_body_probe.direct_calls) break;
+            if (ins.mnemonic !== 'call' || !/^0x[0-9a-f]+$/i.test(ins.operands)) continue;
+            const target = handler.add(Number(ins.operands) - Number(handler.toString()));
+            calls.push({ callsite: ins.address, target: address(target), code_key: captureMethodCode(target) });
+        }
+        return { candidate_only: true, handler: key, calls };
+    });
+}
 function candySnapshot(p, id) {
     return { ...id, position: position(p),
+        physics_candidate: candyPhysicsProbe(p),
+        body_handler_calls: safe(() => bodyCallProbe(p.add(C.object.body).readPointer())),
         rarity_raw: safe(() => p.add(C.candy.rarity).readS32()),
         flag_a: safe(() => p.add(C.object.flag_a).readU8()),
         flag_b: safe(() => p.add(C.object.flag_b).readU8()),
