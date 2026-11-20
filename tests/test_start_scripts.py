@@ -16,14 +16,20 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK = r'''#!PYTHON
-import json, os, pathlib, sys, time
+import json, os, pathlib, subprocess, sys, time
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ['MOCK_LOG'], 'a') as f:
     f.write(json.dumps([name, *args]) + '\n')
 if name == 'sleep':
     time.sleep(0.02)
+elif name == 'konsole':
+    if os.environ.get('CLOSE_CONSOLE'):
+        sys.exit(1)
+    sys.exit(subprocess.run(args[args.index('-e') + 1:]).returncode)
 elif name == 'sudo':
+    if 'echo $$' in ' '.join(args) and 'exec ' in ' '.join(args):
+        time.sleep(30)  # fake connected foreground server
     if 'waydroid' in args and 'kill -0' in ' '.join(args) and os.environ.get('FAIL_WATCH'):
         sys.exit(1)
 elif name == 'adb':
@@ -209,7 +215,7 @@ class LauncherTests(unittest.TestCase):
         shutil.copy2(ROOT / 'config.example.yaml', self.root / 'config.yaml')
         self.bin = self.root / 'mock-bin'
         self.bin.mkdir()
-        for name in ('adb', 'sudo', 'waydroid', 'sleep'):
+        for name in ('adb', 'sudo', 'waydroid', 'sleep', 'konsole'):
             self.executable(self.bin / name)
         data = self.root / 'data/kot-tas'
         self.executable(data / 'venv/bin/python')
@@ -248,6 +254,29 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_cleanup()
         self.assertTrue(any(c[0] == 'kot-tas' for c in self.commands()))
+
+    def test_separate_server_windows_and_persistent_logs(self):
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        windows = [c for c in self.commands() if c[0] == 'konsole']
+        self.assertEqual(len(windows), 2)
+        for window in windows:
+            self.assertIn('--separate', window)
+            self.assertIn('--nofork', window)
+            runner = Path(window[-1])
+            self.assertTrue(runner.is_file())
+            content = runner.read_text()
+            self.assertIn('waydroid shell', content)
+            self.assertNotIn('nohup', content)
+            self.assertNotIn('& echo', content)
+            subprocess.run(['bash', '-n', runner], check=True)
+        self.assertTrue(list((self.root / 'data/kot-tas/sessions').glob('session.*/health.log')))
+
+    def test_closed_server_console_aborts_startup(self):
+        result = self.run_launcher(CLOSE_CONSOLE='1', FAIL_HEALTH='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(any(c[0] == 'kot-tas' for c in self.commands()))
+        self.assert_cleanup()
 
     def test_tas_failure_preserves_exit_status(self):
         result = self.run_launcher(APP_EXIT='7')
