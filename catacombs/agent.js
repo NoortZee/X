@@ -1,4 +1,4 @@
-// Read-only, bounded observation. All candidate offsets are in memory/offsets.js.
+// Bounded diagnostics with an explicit single-object position experiment. All candidate offsets are in memory/offsets.js.
 'use strict';
 const C = MEMORY_LAYOUT.catacombs;
 let hook = null, enabled = false, error = null, moduleInfo = null;
@@ -6,6 +6,7 @@ let calls = 0, samples = 0, skipped = 0, lastTime = null, latest = null;
 let history = [], events = [], previous = new Map(), previousState = null;
 let resolution = null;
 let methodCode = new Map();
+let pendingMove = null, lastMove = null, movesExecuted = 0;
 function event(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -193,13 +194,93 @@ function sample(state) {
         candies: graph.candies, error: graph.error, complete: graph.complete });
     if (history.length > C.limits.history) history.shift();
 }
-function stop() { enabled = false; if (hook) hook.detach(); hook = null; }
+function requireClass(p, name) {
+    const id = identity(p);
+    if (!id.rtti || id.rtti.name !== name) throw new Error('unexpected class; expected ' + name);
+}
+function writableFloat(p) {
+    const range = Process.findRangeByAddress(p);
+    if (!range || !range.protection.includes('w') ||
+        Number(range.base.add(range.size).sub(p).toString()) < 4)
+        throw new Error('position field not writable');
+}
+function performMove(state) {
+    if (!pendingMove) return;
+    const request = pendingMove;
+    pendingMove = null; // Exactly one attempt; never retry automatically.
+    const result = { time: Date.now(), request_time: request.time, success: false,
+        collection_confirmed: false, experiment: 'object coordinates only; Body sync unverified' };
+    try {
+        if (Date.now() - request.time > C.move_white.expiry_ms) throw new Error('request expired');
+        if (state.toString() !== request.state) throw new Error('state changed');
+        requireClass(state, C.move_white.state_name);
+        if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0)
+            throw new Error('run is not active');
+        const world = state.add(C.state.world).readPointer();
+        const hero = world.add(C.world.hero).readPointer();
+        requireClass(hero, C.move_white.hero_name);
+        const body = hero.add(C.object.body).readPointer();
+        requireClass(body, C.move_white.hero_body_name);
+        const direction = body.add(C.move_white.direction).readS32();
+        if (direction !== 1 && direction !== -1) throw new Error('invalid hero direction');
+        const hx = numberAt(hero, C.object.x), hy = numberAt(hero, C.object.y);
+        const target = { x: hx + direction * C.move_white.ahead, y: hy };
+        const array = state.add(C.state.objects).readPointer();
+        const count = array.add(C.array.slots).readS32();
+        if (count < 0 || count > C.limits.slots) throw new Error('array invalid or too large for experiment');
+        const data = array.add(C.array.data).readPointer();
+        let selected = null, distance = Infinity;
+        for (let i = 0; i < count; i++) {
+            const candidate = data.add(i * Process.pointerSize).readPointer();
+            if (candidate.isNull()) continue;
+            const id = identity(candidate);
+            if (!id.rtti || id.rtti.name !== C.candy.name) continue;
+            if (candidate.add(C.candy.rarity).readS32() !== C.move_white.rarity) continue;
+            const x = numberAt(candidate, C.object.x), y = numberAt(candidate, C.object.y);
+            const d = Math.hypot(x - hx, y - hy);
+            if (d < distance) { selected = candidate; distance = d; }
+        }
+        if (!selected) throw new Error('no common Candy in current array');
+        const setter = selected.readPointer().add(C.method_probe.object_methods.position_set_candidate).readPointer();
+        const m = Process.findModuleByAddress(setter);
+        const range = Process.findRangeByAddress(setter);
+        if (!m || m.name !== MEMORY_LAYOUT.module_name || !range || !range.protection.includes('x'))
+            throw new Error('unexpected setter location');
+        const bytes = new Uint8Array(setter.readByteArray(C.move_white.setter_bytes.length));
+        if (!C.move_white.setter_bytes.every((b, i) => bytes[i] === b)) throw new Error('setter bytes changed');
+        const xField = selected.add(C.object.x), yField = selected.add(C.object.y);
+        writableFloat(xField); writableFloat(yField);
+        const before = { x: numberAt(selected, C.object.x), y: numberAt(selected, C.object.y) };
+        result.object = selected.toString(); result.before = before; result.target = target;
+        // Reproduce only the verified two-float object setter; no unknown ABI/native call.
+        try {
+            xField.writeFloat(target.x);
+            yField.writeFloat(target.y);
+        } catch (e) {
+            result.rollback = safe(() => { xField.writeFloat(before.x); yField.writeFloat(before.y); return true; });
+            throw e;
+        }
+        result.readback = position(selected);
+        result.success = true; movesExecuted++;
+    } catch (e) { result.error = String(e); }
+    lastMove = result; event('move_white_result', result);
+}
+function requestMove() {
+    if (!enabled || !latest) throw new Error('start module and enter Catacombs first');
+    if (pendingMove) throw new Error('move already queued');
+    if (Date.now() - latest.time > C.move_white.expiry_ms) throw new Error('state snapshot stale');
+    pendingMove = { time: Date.now(), state: latest.state.address };
+    event('move_white_queued', pendingMove);
+    return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
+}
+function stop() { pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
 function status() { return { enabled, error, calls, samples, skipped, resolution,
-    method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
+    move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map();
+    pendingMove = null; lastMove = null; movesExecuted = 0;
     try {
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         if (!m) throw new Error('game module not loaded');
@@ -213,16 +294,19 @@ function install() {
         hook = Interceptor.attach(target, { onEnter(args) {
             if (!enabled) return;
             calls++;
+            this.updateState = args[0];
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
+        }, onLeave() {
+            if (enabled && pendingMove) performMove(this.updateState);
         } });
         enabled = true; event('enabled', { diagnostic_only: true });
     } catch (e) { stop(); error = String(e); throw e; }
     return status();
 }
 rpc.exports = {
-    install, status, stop() { stop(); return status(); },
+    install, status, moveWhite: requestMove, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
-    report() { return { schema_version: 1, diagnostic_only: true, ...status(),
+    report() { return { schema_version: 2, diagnostic_only: movesExecuted === 0, experimental_position_moves: true, ...status(),
         metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
