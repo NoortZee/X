@@ -70,6 +70,8 @@ const MEMORY_LAYOUT = {
     catacombs: {
         // Candidate profile supplied by static analysis, not runtime verified.
         signatures: {
+            play_update: '55 48 89 E5 41 56 53 48 83 EC 10 80 BF C0 00 00 00 00 74 11 48 8B 07 48 83 C4 10 5B 41 5E 5D FF A0 C0 00 00 00 80 BF C1 00 00 00 00 74 11 48 8B 07 48 83 C4 10 5B 41 5E 5D FF A0 B8 00 00 00',
+            play_update_heroes: '55 48 89 E5 41 56 53 48 89 FB 4C 8B B7 98 00 00 00 4D 85 F6 74 1A 48 8D 05 ?? ?? ?? ?? F3 0F 10 00 E8 ?? ?? ?? ?? 4C 89 F7 89 C6 E8 ?? ?? ?? ?? 4C 8B B3 A0 00 00 00',
             replay_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB E8 ?? ?? ?? ?? 48 8B BB 60 01 00 00',
             skull_spawn: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 F3 0F 11 45 D4 48 89 FB E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B B3 B8 00 00 00 48 89 C7 F3 0F 10 45 D4',
             skull_commit: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 41 89 F6 48 89 FB 48 8B 87 08 01 00 00 48 85 C0 75 1B',
@@ -78,6 +80,10 @@ const MEMORY_LAYOUT = {
         },
         // Itanium ABI: object vptr is already the address point (past _ZTV header).
         rtti: { object_vptr: 0, typeinfo_from_vptr: -8, name_from_typeinfo: 8, max_name_bytes: 128 },
+        play_state: { world: 0x40, world_content: 0x18, paused: 0x88,
+            hero1: 0x98, hero2: 0xA0, timer: 0xB0, frame_time: 0xB4,
+            mode1: 0xC0, mode2: 0xC1, optional: 0xD0,
+            methods: { next_frame: 0x148, apply_frame: 0x150 } },
         state: { skull_begin: 0x120, skull_end: 0x128, skull_objects: 0x138, level: 0x98 },
         descriptor: { data: 0x18, active: 0x98 },
         skull: { active: 0x1A9 },

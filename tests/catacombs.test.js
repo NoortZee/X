@@ -34,10 +34,10 @@ test('opt-in hooks, idempotent start, report and complete cleanup', () => {
     assert.equal(f.hooks.length, 0);
     assert.equal(f.rpc.install().enabled, true);
     f.rpc.install();
-    assert.equal(f.hooks.length, 6);
+    assert.equal(f.hooks.length, 8);
     assert.equal(f.rpc.report().events.length, 1);
     f.rpc.stop(); f.rpc.stop();
-    assert.equal(f.detached(), 6);
+    assert.equal(f.detached(), 8);
 });
 for (const matches of [0, 2]) test('reject nonunique signatures: ' + matches, () => {
     const f = fixture(matches);
@@ -55,7 +55,7 @@ test('invalid runtime field disables the entire module and records reason', () =
     f.hooks[2].onEnter([f.pointer()]);
     assert.equal(f.rpc.status().enabled, false);
     assert.match(f.rpc.status().last_error, /invalid skull active/);
-    assert.equal(f.detached(), 6);
+    assert.equal(f.detached(), 8);
 });
 test('read-only implementation never writes memory or invokes game functions', () => {
     const source = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
@@ -241,4 +241,64 @@ test('hero values use shared body offsets and isolate invalid physics reads', ()
     assert.equal(values.read_error, undefined);
     invalid = true;
     assert.match(vm.runInContext('heroValues(heroPointer).read_error', f.context), /non-finite/);
+});
+
+test('PlayState snapshots preserve counters and partial data on candidate read errors', () => {
+    const f = fixture(); f.rpc.install();
+    for (const index of [6, 7]) {
+        for (let i = 0; i < 10; i++) f.hooks[index].onEnter([f.pointer()]);
+    }
+    const status = f.rpc.status();
+    assert.equal(status.counters.play_update, 10);
+    assert.equal(status.counters.play_update_heroes, 10);
+    assert.equal(status.enabled, true);
+    assert.ok(status.last_play_states.play_update.identity.rtti_error);
+    assert.equal(status.last_play_states.play_update.flags.paused, 3);
+    assert.ok(status.last_play_states.play_update.timer_error);
+    assert.equal(f.rpc.report().events.filter(e => e.kind === 'play_update').length, 1);
+});
+
+test('PlayState reads actual vptr method addresses without calling them', () => {
+    const f = fixture(); f.rpc.install();
+    const pointers = new Map([[0x1000, 0x2000], [0x1040, 0x3000], [0x3018, 0x4000],
+        [0x1098, 0x5000], [0x10A0, 0], [0x10D0, 0],
+        [0x2148, 0x6000], [0x2150, 0x7000]]);
+    class Pointer {
+        constructor(n) { this.n = n; }
+        add(n) { return new Pointer(this.n + n); }
+        toString() { return '0x' + this.n.toString(16); }
+        isNull() { return this.n === 0; }
+        readPointer() {
+            if (!pointers.has(this.n)) throw new Error('unmapped candidate');
+            return new Pointer(pointers.get(this.n));
+        }
+        readU8() { return 0; }
+        readFloat() { return 1.5; }
+        readS32() { return 15; }
+    }
+    f.hooks[7].onEnter([new Pointer(0x1000)]);
+    const sample = f.rpc.status().last_play_states.play_update_heroes;
+    assert.equal(sample.pointers.world, '0x3000');
+    assert.equal(sample.world_content, '0x4000');
+    assert.equal(sample.hero1.object, '0x5000');
+    assert.equal(sample.hero2, undefined);
+    assert.equal(sample.methods.next_frame.address, '0x6000');
+    assert.equal(sample.methods.apply_frame.address, '0x7000');
+    assert.equal(sample.timer, 1.5);
+    assert.equal(f.rpc.status().enabled, true);
+});
+
+
+test('PlayState entry signatures match supplied disassembly with relocatable operands', () => {
+    const f = fixture();
+    const fixtures = {'play_update': '55 48 89 e5 41 56 53 48 83 ec 10 80 bf c0 00 00 00 00 74 11 48 8b 07 48 83 c4 10 5b 41 5e 5d ff a0 c0 00 00 00 80 bf c1 00 00 00 00 74 11 48 8b 07 48 83 c4 10 5b 41 5e 5d ff a0 b8 00 00 00', 'play_update_heroes': '55 48 89 e5 41 56 53 48 89 fb 4c 8b b7 98 00 00 00 4d 85 f6 74 1a 48 8d 05 03 70 d2 00 f3 0f 10 00 e8 6a f4 a2 ff 4c 89 f7 89 c6 e8 30 c3 32 00 4c 8b b3 a0 00 00 00'};
+    for (const [name, dump] of Object.entries(fixtures)) {
+        const pattern = vm.runInContext('C.signatures.' + name, f.context).split(/\s+/);
+        const bytes = Buffer.from(dump.replace(/\s/g, ''), 'hex');
+        assert.equal(bytes.length, pattern.length);
+        assert.ok(pattern.every((token, i) => token === '??' || parseInt(token, 16) === bytes[i]), name);
+        const changed = Buffer.from(bytes);
+        pattern.forEach((token, i) => { if (token === '??') changed[i] ^= 0xFF; });
+        assert.ok(pattern.every((token, i) => token === '??' || parseInt(token, 16) === changed[i]), name);
+    }
 });
