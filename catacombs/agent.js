@@ -432,8 +432,8 @@ function performMove(state) {
     finally { lastMove = result; event('move_white_result', result); }
 }
 function wallBlockMatches(pointer) {
-    return C.wall_pass.neighbours.every(([offset, value]) =>
-        Math.abs(numberAt(pointer, offset) - value) <= C.wall_pass.tolerance);
+    return C.wall_pass.neighbours.every(([offset, value, required]) =>
+        required === false || Math.abs(numberAt(pointer, offset) - value) <= C.wall_pass.tolerance);
 }
 function restoreWalls(reason) {
     if (!wallPatch) return;
@@ -470,7 +470,7 @@ function enableWalls(state) {
                     Number(pointer.add(C.wall_pass.neighbours[C.wall_pass.neighbours.length - 1][0] + 4).sub(module.base).toString()) > module.size) continue;
                 if (wallState.candidates.length < 6) wallState.candidates.push({
                     parameter: address(pointer), value: safe(() => pointer.readFloat()),
-                    neighbours: C.wall_pass.neighbours.map(([offset, expected]) => ({ offset, expected,
+                    neighbours: C.wall_pass.neighbours.map(([offset, expected, required]) => ({ offset, expected, required: required !== false,
                         actual: safe(() => numberAt(pointer, offset)) })) });
                 if (safe(() => Math.abs(pointer.readFloat() - C.wall_pass.original) <= C.wall_pass.tolerance && wallBlockMatches(pointer)) === true)
                     candidates.set(pointer.toString(), pointer);
@@ -486,6 +486,7 @@ function enableWalls(state) {
         pointer.writeFloat(C.wall_pass.patched);
         if (Math.abs(pointer.readFloat() - C.wall_pass.patched) > C.wall_pass.tolerance) throw new Error('wall parameter readback mismatch');
         wallState.status = 'applied'; wallState.parameter = address(pointer);
+        wallState.original = original; wallState.patched = C.wall_pass.patched; wallState.readback = pointer.readFloat();
         event('wall_pass_applied', { parameter: wallState.parameter });
     } catch (e) {
         wallState.status = 'unavailable'; wallState.error = String(e);

@@ -67,8 +67,8 @@ const MEMORY_LAYOUT = {
     catacombs: {
         wall_pass: { enabled: true, pattern: '66 66 d5 41', original: 26.67499923706,
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
-            // Neighbours from supplied Lua. Values validate the block, not arbitrary first-match writes.
-            neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12]] },
+            // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.
+            neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12, false]] },
         diagnostics: false,
         auto_teleport: { enabled: true, delay_ms: 300, interval_ms: 20, rarities: [1, 2, 3, 4], events: 80 },
         profile: '2.84.2 live candidates; not automatic game version detection',
