@@ -14,6 +14,7 @@ let wallEvents = [];
 let fixtureReport = null, filterSymbols = null;
 let maskTest = null, maskBackup = null;
 let speedTest = null, speedBackup = null;
+let fallStatus = null, fallBackup = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -382,6 +383,47 @@ function restoreHeroMasks(reason) {
         maskTest = { ...maskTest, status: 'restored', reason };
     } catch (e) { maskTest = { ...maskTest, status: 'restore_failed', reason, error: String(e) }; }
     event('hero_mask_restore', { result: maskTest });
+}
+function restoreNoFall(reason) {
+    if (!fallBackup) return;
+    try {
+        const context = heroMaskContext(fallBackup.state);
+        if (context.physics.toString() !== fallBackup.physics || context.hero.toString() !== fallBackup.hero)
+            throw new Error('Hero changed; gravity restore refused');
+        const gravity = context.physics.add(MEMORY_LAYOUT.tas.body.GRAVITY);
+        writableFloat(gravity);
+        if (gravity.readFloat() !== 0 && gravity.readFloat() !== fallBackup.gravity)
+            throw new Error('gravity changed externally; restore refused');
+        gravity.writeFloat(fallBackup.gravity);
+        fallBackup = null; fallStatus = { ...fallStatus, status: 'restored', reason };
+    } catch (e) { fallStatus = { ...fallStatus, status: 'restore_failed', error: String(e), reason }; }
+}
+function preventFall(state) {
+    if (!C.no_fall.enabled) return;
+    try {
+        if (state.add(C.state.phase).readS32() !== 1) { restoreNoFall('level inactive'); return; }
+        if (state.add(C.state.paused).readU8() !== 0) return;
+        if (!maskTest || maskTest.status !== 'applied' || maskTest.state !== state.toString()) return;
+        const context = heroMaskContext(state), B = MEMORY_LAYOUT.tas.body;
+        if (context.physics.add(B.TYPE).readS32() !== B.DYNAMIC_TYPE) throw new Error('Hero physics is not dynamic');
+        if (fallBackup && (fallBackup.physics !== context.physics.toString() || fallBackup.state.toString() !== state.toString())) {
+            restoreNoFall('Hero changed'); if (fallBackup) return;
+        }
+        const gravity = context.physics.add(B.GRAVITY), vy = context.physics.add(B.VY);
+        writableFloat(gravity); writableFloat(vy);
+        const g = numberAt(context.physics, B.GRAVITY), velocity = numberAt(context.physics, B.VY);
+        if (!fallBackup) {
+            if (g < 0 || g > 10) throw new Error('unexpected gravity scale');
+            fallBackup = { state, physics: context.physics.toString(), hero: context.hero.toString(), gravity: g };
+            fallStatus = { status: 'active', original_gravity: g, physics: context.physics.toString(),
+                note: 'gravity and vertical velocity suppressed; no position writes' };
+        }
+        mutationAttempted = true;
+        if (g !== 0) gravity.writeFloat(0);
+        if (velocity !== 0) vy.writeFloat(0);
+        fallStatus.status = 'active'; delete fallStatus.error;
+        fallStatus.gravity = gravity.readFloat(); fallStatus.vy = vy.readFloat();
+    } catch (e) { fallStatus = { ...fallStatus, status: 'deferred_or_failed', error: String(e) }; }
 }
 function applyHeroMasks(state) {
     if (!C.mask_test.enabled) return;
@@ -790,11 +832,12 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    if (!fallBackup) fallStatus = null;
     if (!speedBackup) speedTest = null;
     if (!maskBackup) maskTest = null;
     autoRun = null; autoSeen.clear(); fixtureReport = null; filterSymbols = null;
@@ -816,11 +859,13 @@ function install() {
             if (!enabled) return;
             calls++;
             this.updateState = args[0];
+            preventFall(args[0]);
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
         }, onLeave() {
             if (!enabled) return;
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
+            preventFall(this.updateState);
             if (pendingMove) performMove(this.updateState);
             else autoTeleport(this.updateState);
         } });

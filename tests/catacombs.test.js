@@ -32,7 +32,7 @@ function fixture(matches = 1, production = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -98,7 +98,7 @@ test('report never dereferences a retained pointer', () => {
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 12);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 15);
     assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
@@ -682,4 +682,32 @@ test('automatic series does not halt on float32 roundoff at live large Y',()=>{
     assert.equal(f.rpc.status().auto_run.halted,false);
     assert.equal(f.rpc.status().auto_run.moved,1);
     assert.equal(f.rpc.status().last_move.position_check.matches,true);
+});
+
+function noFallFixture() {
+    const f=maskFixture();
+    f.memory.set(0x20000,2);f.memory.set(0x200A8,1);f.memory.set(0x20044,20);
+    return f;
+}
+test('no-fall disables gravity/vertical velocity, restores gravity but not stale falling speed',()=>{
+    const f=noFallFixture();f.leave();
+    assert.equal(f.memory.get(0x200A8),0);assert.equal(f.memory.get(0x20044),0);
+    assert.equal(f.rpc.status().no_fall.status,'active');
+    f.memory.set(0x20044,5);f.tick();assert.equal(f.memory.get(0x20044),0);
+    f.memory.set(0x20044,-5);f.leave();assert.equal(f.memory.get(0x20044),0);
+    f.rpc.stop();assert.equal(f.memory.get(0x200A8),1);assert.equal(f.memory.get(0x20044),0);
+    assert.equal(f.rpc.status().no_fall.status,'restored');
+});
+test('no-fall restores gravity on phase exit and avoids locked-world writes',()=>{
+    const f=noFallFixture();f.leave();f.memory.set(0x1138,2);f.leave();
+    assert.equal(f.memory.get(0x200A8),1);
+    const locked=noFallFixture();locked.memory.set(0xF000+0x19298,2);locked.leave();
+    assert.equal(locked.memory.get(0x200A8),1);assert.equal(locked.memory.get(0x20044),20);
+});
+test('no-fall restore refuses stale Hero and externally changed gravity',()=>{
+    for(const [address,value] of [[0x6020,0],[0x200A8,2]]) {
+        const f=noFallFixture();f.leave();f.memory.set(address,value);f.rpc.stop();
+        assert.equal(f.rpc.status().no_fall.status,'restore_failed');
+        if(address===0x200A8)assert.equal(f.memory.get(address),2);
+    }
 });
