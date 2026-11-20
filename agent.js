@@ -348,28 +348,24 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                 onLeave(ret) {
                     if (pump._recordTime && this._ts && isReadablePtr(this._ts)) {
                         try {
-                            let ns;
-                            if (this._fn === 'gettimeofday') {
-                                const s = this._ts.readS64();
-                                const us = this._ts.add(8).readS64();
-                                ns = Number(s) * 1e9 + Number(us) * 1000;
-                            } else {
-                                const s = this._ts.readS64();
-                                const nsPart = this._ts.add(8).readS64();
-                                ns = Number(s) * 1e9 + Number(nsPart);
-                            }
-                            pump._timeLog.push({ f: pump._frame, fn: this._fn, clk: this._clk, ns });
+                            const s = BigInt(this._ts.readS64().toString());
+                            const sub = BigInt(this._ts.add(8).readS64().toString());
+                            const ns = (this._fn === 'gettimeofday')
+                                ? (s * 1000000000n + sub * 1000n)
+                                : (s * 1000000000n + sub);
+                            pump._timeLog.push({ f: pump._frame, fn: this._fn, clk: this._clk, ns: ns.toString() });
                         } catch (_) {}
                     }
-                    if (pump._freezeTime && this._ts && isReadablePtr(this._ts)) {
+                    if (pump._freezeTime && pump._frozenNs !== null && this._ts && isReadablePtr(this._ts)) {
                         try {
-                            const ns = pump._frozenNs;
+                            const ns = BigInt(pump._frozenNs);
+                            const sec = ns / 1000000000n;
+                            const rem = ns % 1000000000n;
+                            this._ts.writeS64(Number(sec));
                             if (this._fn === 'gettimeofday') {
-                                this._ts.writeS64(Math.floor(ns / 1e9));
-                                this._ts.add(8).writeS64(Math.floor((ns % 1e9) / 1000));
+                                this._ts.add(8).writeS64(Number(rem / 1000n));
                             } else {
-                                this._ts.writeS64(Math.floor(ns / 1e9));
-                                this._ts.add(8).writeS64(ns % 1e9);
+                                this._ts.add(8).writeS64(Number(rem));
                             }
                             ret.replace(0);
                         } catch (_) {}
@@ -492,24 +488,6 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                             Thread.sleep(0.001);
                             if (++g > 60000) break;
                         }
-                    }
-                    const incoming = pump._frame + 1;
-                    if (gate.armed && incoming === gate.target) {
-                        gate.waiting = true;
-                        gate.released = false;
-                        gate.enteredAtFrame = incoming;
-                        const tEnter = Date.now();
-                        let g = 0;
-                        while (gate.armed && !gate.released) {
-                            Thread.sleep(0.001);
-                            if (++g > 30000) break;
-                        }
-                        gate.waiting = false;
-                        gate.armed = false;
-                        gate.releasedAtFrame = incoming;
-                        gate.waitMs = Date.now() - tEnter;
-                        send({ type: 'gate_released', frame: gate.releasedAtFrame,
-                            wait_ms: gate.waitMs });
                     }
                     if (pump._budget > 0) pump._budget--;
                     pump._frame++;
@@ -668,6 +646,8 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
             pump._playbackBodyMap = null;
             pump._playbackAnchorFrame = null;
             pump._playbackAnchorRecFrame = null;
+            pump._replayBodyFrames = [];
+            pump._divergences = [];
             pump._replayRng = null;
         },
     };
@@ -802,8 +782,10 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
 
         function playSetup(events, opts) {
             opts = opts || {};
+            const verifyBody = !!opts.verify_body;
             const bodyFramesIn = Array.isArray(opts.body_frames) ? opts.body_frames : null;
 
+            playStop();
             pump.install();
             pump._ringActive = true;
             pump.reset();
@@ -849,7 +831,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
             }));
 
             let bodyMapSize = 0;
-            if (bodyFramesIn && bodyFramesIn.length) {
+            if (verifyBody && bodyFramesIn && bodyFramesIn.length) {
                 bodyMapSize = pump.setPlaybackBody(bodyFramesIn);
             }
 
