@@ -1,6 +1,17 @@
 //! Opt-in, read-only diagnostic module; no reward or movement modifications.
 use std::path::PathBuf;
-use frida::{Script, ScriptOption, Session};
+use frida::{Message, Script, ScriptHandler, ScriptOption, Session};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+struct CatacombsHandler;
+impl ScriptHandler for CatacombsHandler {
+    fn on_message(&mut self, message: Message, _data: Option<Vec<u8>>) {
+        if let Message::Error(error) = message {
+            eprintln!("ERROR catacombs agent: {error:?}");
+        }
+    }
+}
 
 pub struct CatacombsModule<'a> {
     session: &'a Session<'a>,
@@ -13,7 +24,7 @@ impl<'a> CatacombsModule<'a> {
         Self { session, root, script: None }
     }
 
-    pub fn command(&mut self, command: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn command(&mut self, command: &str, aborted: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
         match command {
             "start" => {
                 if self.script.is_none() {
@@ -22,8 +33,11 @@ impl<'a> CatacombsModule<'a> {
                     let source = crate::memory::prepend_layout(&path, &source)?;
                     let mut options = ScriptOption::default();
                     let mut script = self.session.create_script(&source, &mut options)?;
+                    // Required by this Frida binding for RPC replies as well as diagnostics.
+                    script.handle_message(CatacombsHandler)?;
                     script.load()?;
-                    match script.exports.call("install", None) {
+                    println!("catacombs: scanning signatures (Ctrl+C cancels waiting)...");
+                    match script.exports.call_cancellable("install", None, Duration::from_secs(30), || aborted.load(Ordering::SeqCst)) {
                         Ok(status) => {
                             println!("catacombs: {status:?}");
                             self.script = Some(script);
@@ -34,7 +48,7 @@ impl<'a> CatacombsModule<'a> {
                         }
                     }
                 } else if let Some(script) = self.script.as_mut() {
-                    println!("catacombs: {:?}", script.exports.call("install", None)?);
+                    println!("catacombs: {:?}", script.exports.call_cancellable("install", None, Duration::from_secs(30), || aborted.load(Ordering::SeqCst))?);
                 }
             }
             "stop" => {
@@ -43,7 +57,10 @@ impl<'a> CatacombsModule<'a> {
             }
             "status" | "dump" => {
                 if let Some(script) = self.script.as_mut() {
-                    let value = script.exports.call(if command == "dump" { "report" } else { "status" }, None)?;
+                    let value = script.exports.call_cancellable(
+                        if command == "dump" { "report" } else { "status" }, None,
+                        Duration::from_secs(5), || aborted.load(Ordering::SeqCst),
+                    )?;
                     if command == "dump" {
                         let dir = self.root.join("logs");
                         std::fs::create_dir_all(&dir)?;
@@ -64,7 +81,7 @@ impl<'a> CatacombsModule<'a> {
 
     pub fn stop(&mut self) {
         if let Some(mut script) = self.script.take() {
-            let _ = script.exports.call("stop", None);
+            // Unload runs Frida interceptor cleanup; do not wait for an extra stop RPC.
             let _ = script.unload();
         }
     }

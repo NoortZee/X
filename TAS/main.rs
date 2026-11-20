@@ -558,7 +558,7 @@ fn main() {
                 let parts: Vec<&str> = s.split_whitespace().collect();
                 if parts.len() > 2 {
                     println!("usage: catacombs start|status|dump|stop");
-                } else if let Err(e) = catacombs_mod.command(parts.get(1).copied().unwrap_or("help")) {
+                } else if let Err(e) = catacombs_mod.command(parts.get(1).copied().unwrap_or("help"), &aborted) {
                     eprintln!("ERROR catacombs: {e}");
                 }
             }
