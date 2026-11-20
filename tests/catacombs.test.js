@@ -1016,3 +1016,20 @@ test('gold spawn still rejects altered original bytes after observer detachment'
     assert.equal(r.success,false);assert.equal(r.native_started,false);assert.equal(f.calls.length,0);
     assert.match(r.error,/spawn signature mismatch at 15e9700/);
 });
+
+test('spawn attach signature uses pristine pre-observer prologue, not a captured Frida jump',()=>{
+    const profile=fs.readFileSync(path.join(root,'memory/offsets.js'),'utf8');
+    const cfg=vm.runInNewContext(profile+'; MEMORY_LAYOUT.catacombs');
+    const sig=cfg.spawn_gold.signatures.find(s=>s.rva===cfg.spawn_gold.attach);
+    assert.equal(sig.bytes.length,64);
+    assert.equal(sig.bytes.slice(0,cfg.spawn_probe.attach_prefix.length).join(','),cfg.spawn_probe.attach_prefix.join(','));
+    assert.equal(sig.bytes.slice(0,6).join(','),'85,72,137,229,65,86');
+});
+test('signature refusal includes expected and actual bytes, no factory call',()=>{
+    const f=goldFixture();f.memory.set(0x100000+0x15E9700,0xE9);f.rpc.spawnGold();f.leave();
+    const r=f.rpc.status().last_spawn_gold;
+    assert.equal(r.native_started,false);assert.equal(f.calls.length,0);
+    assert.equal(r.signature_mismatch.rva,'0x15e9700');assert.equal(r.signature_mismatch.first_difference,0);
+    assert.ok(r.signature_mismatch.expected_hex.startsWith('55 48 89 e5'));
+    assert.ok(r.signature_mismatch.actual_hex.startsWith('e9 '));
+});

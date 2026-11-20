@@ -1061,7 +1061,13 @@ function performGold(state) {
             if (!range || !range.protection.includes('r') || !range.protection.includes('x') || Number(range.base.add(range.size).sub(code).toString()) < sig.bytes.length)
                 throw new Error('spawn code unreadable/nonexecutable');
             const bytes = new Uint8Array(code.readByteArray(sig.bytes.length));
-            if (!sig.bytes.every((b,i) => bytes[i] === b)) throw new Error('spawn signature mismatch at ' + sig.rva.toString(16));
+            if (!sig.bytes.every((b,i) => bytes[i] === b)) {
+                result.signature_mismatch = { rva: '0x' + sig.rva.toString(16),
+                    first_difference: sig.bytes.findIndex((b,i) => bytes[i] !== b),
+                    expected_hex: sig.bytes.map(b => b.toString(16).padStart(2,'0')).join(' '),
+                    actual_hex: Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join(' ') };
+                throw new Error('spawn signature mismatch at ' + sig.rva.toString(16));
+            }
         }
         const direction = heroBody.add(C.move_white.direction).readS32();
         if (direction !== 1 && direction !== -1) throw new Error('invalid Hero direction');

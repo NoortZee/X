@@ -1,3 +1,9 @@
+## Без выпуска — исправить загрязнённый Frida-патчем эталон attach
+
+- Причина повторного до-native отказа: ожидаемые64байта attach были взяты из post-hook дампа и начинались E9-трамплином. Эталон восстановлен по pre-observer runtime-дампу, без ослабления полного сравнения.
+- Regression test согласованности attach-signature с pristine observer-prefix; mismatch сохраняет RVA/первое расхождение/expected и actual64байта в dump.
+- 92 Node mock-теста, syntax/diff-check прошли. Live native spawn ещё не подтверждён. Rust/README не менялись, rebuild не нужен.
+
 ## Без выпуска — снять attach-observer перед spawn signature checks
 
 - Runtime spawn-gold отказал до native из-за нашего же Interceptor-патча пролога attach0x15E9700. Перед native spawn проверками снимается только собственный observer с Interceptor.flush(), затем повторно проверяются все исходные64байта и остальные сигнатуры.
