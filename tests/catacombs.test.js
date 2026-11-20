@@ -1033,3 +1033,26 @@ test('signature refusal includes expected and actual bytes, no factory call',()=
     assert.ok(r.signature_mismatch.expected_hex.startsWith('55 48 89 e5'));
     assert.ok(r.signature_mismatch.actual_hex.startsWith('e9 '));
 });
+
+test('bounded gold cycle schedules spaced attempts, stops at ten and cannot be rearmed',()=>{
+    const f=goldFixture();let time=vm.runInContext("Date.now()",f.c);f.c.Date={now:()=>time};
+    f.rpc.spawnGoldCycle();f.leave();
+    assert.equal(f.rpc.status().spawn_cycle.registered,1);
+    f.leave();assert.equal(f.rpc.status().spawn_cycle.attempted,1);
+    // Reuse the mock free slot; real runtime must find a fresh null slot each time.
+    for(let i=1;i<10;i++){time+=2000;f.memory.set(0x2808,0);f.leave();}
+    const c=f.rpc.status().spawn_cycle;
+    assert.equal(c.attempted,10);assert.equal(c.registered,10);assert.equal(c.active,false);
+    assert.equal(c.reason,'limit reached');f.force();f.tick();assert.throws(()=>f.rpc.spawnGoldCycle(),/fresh module/);
+});
+test('cycle stops on native error, explicit cancellation, state/phase change and module stop',()=>{
+    for(const mode of ['failure','cancel','phase','stop']){
+        const f=goldFixture();f.rpc.spawnGoldCycle();
+        if(mode==='failure')f.c.NativeFunction=function(){return ()=>{throw Error('fault');};};
+        if(mode==='cancel')f.rpc.spawnGoldStop();
+        if(mode==='phase')f.memory.set(0x1138,2);
+        if(mode==='stop')f.rpc.stop();
+        f.leave();assert.equal(f.rpc.status().spawn_cycle.active,false,mode);
+        assert.equal(f.rpc.status().spawn_cycle.registered,0,mode);
+    }
+});

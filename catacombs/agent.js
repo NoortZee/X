@@ -19,6 +19,7 @@ let pendingAltitude = null;
 let pendingSpawnProbe = null, spawnInspection = null;
 let earlySpawnArray = null;
 let pendingGold = null, goldResult = null, goldAttempted = false;
+let goldCycle = null;
 let attachObserver = null, attachObservationStatus = null, attachObservations = [];
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
@@ -1023,10 +1024,34 @@ function detachAttachObserverForSpawn() {
         reason: 'restore original code before strict native spawn signature checks' };
     return true;
 }
+function stopGoldCycle(reason = 'user') {
+    if (goldCycle) { goldCycle.active = false; goldCycle.reason = reason; }
+    if (pendingGold && pendingGold.cycle) pendingGold = null;
+    return { spawn_cycle: goldCycle };
+}
+function startGoldCycle() {
+    if (!enabled || !latest || latest.phase_raw !== 1 || Date.now()-latest.time > C.spawn_gold.expiry_ms)
+        throw new Error('enter active Catacombs first');
+    if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
+    goldCycle = { active: true, state: latest.state.address, attempted: 0, registered: 0,
+        limit: 10, interval_ms: 2000, next: Date.now(), reason: null };
+    event('spawn_cycle_started', { ...goldCycle });
+    return { ...goldCycle, warning: 'Experimental: at most ten objects, no proof of visible spawn or credit.' };
+}
+function tickGoldCycle(state) {
+    if (!goldCycle || !goldCycle.active) return;
+    if (state.toString() !== goldCycle.state || state.add(C.state.phase).readS32() !== 1) {
+        stopGoldCycle('state/phase changed'); return;
+    }
+    if (state.add(C.state.paused).readU8() !== 0 || pendingGold || Date.now() < goldCycle.next) return;
+    pendingGold = { state: goldCycle.state, time: Date.now(), cycle: true };
+    goldCycle.attempted++;
+    goldCycle.next = Date.now() + goldCycle.interval_ms;
+}
 function requestGold() {
     if (!enabled || !latest || latest.phase_raw !== 1 || Date.now() - latest.time > C.spawn_gold.expiry_ms)
         throw new Error('enter active Catacombs first');
-    if (goldAttempted || pendingGold) throw new Error('one spawn attempt per module; inspect dump before restarting');
+    if (goldCycle || goldAttempted || pendingGold) throw new Error('one spawn attempt per module; inspect dump before restarting');
     pendingGold = { state: latest.state.address, time: Date.now() };
     return { queued: true, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
 }
@@ -1114,6 +1139,13 @@ function performGold(state) {
         if (result.native_started) result.warning = 'native spawn started; possible partial/orphan object. No guessed destructor, rollback or retry; restart game after failure.';
     }
     goldResult = result; event('spawn_gold_result',result);
+    if (request.cycle && goldCycle) {
+        if (!result.success) stopGoldCycle('spawn failed; inspect last_spawn_gold');
+        else {
+            goldCycle.registered++;
+            if (goldCycle.attempted >= goldCycle.limit) stopGoldCycle('limit reached');
+        }
+    }
 }
 function requestSpawnProbe() {
     if (!enabled || !latest || latest.phase_raw !== 1) throw new Error('start module and enter active Catacombs first');
@@ -1171,12 +1203,12 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: false, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
-    pendingGold = null; goldResult = null; goldAttempted = false;
+    pendingGold = null; goldResult = null; goldAttempted = false; goldCycle = null;
     pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
     attachObservationStatus = null; attachObservations = [];
     pendingAltitude = null;
@@ -1210,6 +1242,7 @@ function install() {
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             preventFall(this.updateState);
+            tickGoldCycle(this.updateState);
             if (pendingGold) performGold(this.updateState);
             else if (pendingMove) performMove(this.updateState);
             else autoTeleport(this.updateState);
@@ -1220,7 +1253,7 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, spawnGold: requestGold, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, spawnGoldCycle: startGoldCycle, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
