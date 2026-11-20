@@ -23,12 +23,21 @@ with open(os.environ['MOCK_LOG'], 'a') as f:
     f.write(json.dumps([name, *args]) + '\n')
 if name == 'sleep':
     time.sleep(0.02)
-elif name == 'konsole':
-    if os.environ.get('CLOSE_CONSOLE'):
-        sys.exit(1)
-    sys.exit(subprocess.run(args[args.index('-e') + 1:]).returncode)
 elif name == 'sudo':
     if 'echo $$' in ' '.join(args) and 'exec ' in ' '.join(args):
+        print('foreground server output', flush=True)
+        if os.environ.get('FAIL_BRIDGE'):
+            print('simulated bridge failure', flush=True)
+            sys.exit(1)
+        assert sys.stdin.read() == ''  # server bridges must not consume TAS input
+        if os.environ.get('DIE_BRIDGE_AFTER'):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if any(json.loads(line)[0] == 'kot-tas' for line in pathlib.Path(os.environ['MOCK_LOG']).read_text().splitlines()):
+                    break
+                time.sleep(0.01)
+            time.sleep(float(os.environ['DIE_BRIDGE_AFTER']))
+            sys.exit(1)
         time.sleep(30)  # fake connected foreground server
     if 'waydroid' in args and 'kill -0' in ' '.join(args) and os.environ.get('FAIL_WATCH'):
         sys.exit(1)
@@ -186,6 +195,7 @@ elif name == 'sudo':
             self.assertIn(package, install)
         self.assertNotIn('python3-venv', install)
         self.assertNotIn('shellcheck', install)
+        self.assertNotIn('konsole', install)
         self.assertEqual(len(commands), 2)  # sudo -v and the targeted install only
         for command in commands:
             if command[0] == 'pacman':
@@ -234,7 +244,7 @@ class LauncherTests(unittest.TestCase):
         shutil.copy2(ROOT / 'config.example.yaml', self.root / 'config.yaml')
         self.bin = self.root / 'mock-bin'
         self.bin.mkdir()
-        for name in ('adb', 'sudo', 'waydroid', 'sleep', 'konsole'):
+        for name in ('adb', 'sudo', 'waydroid', 'sleep'):
             self.executable(self.bin / name)
         data = self.root / 'data/kot-tas'
         self.executable(data / 'venv/bin/python')
@@ -292,27 +302,41 @@ class LauncherTests(unittest.TestCase):
         log = next(sessions.glob('session.*/health.log')).read_text()
         self.assertGreaterEqual(log.count('health check: monitor'), 2)
 
-    def test_separate_server_windows_and_persistent_logs(self):
+    def test_background_servers_without_graphical_session(self):
+        self.env.pop('DISPLAY', None)
+        self.env.pop('WAYLAND_DISPLAY', None)
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
-        windows = [c for c in self.commands() if c[0] == 'konsole']
-        self.assertEqual(len(windows), 2)
-        for window in windows:
-            self.assertIn('--separate', window)
-            self.assertIn('--nofork', window)
-            runner = Path(window[-1])
-            self.assertTrue(runner.is_file())
+        commands = self.commands()
+        self.assertFalse(any(c[0] in ('konsole', 'xterm', 'gnome-terminal') for c in commands))
+        bridges = [c for c in commands if c[0] == 'sudo' and 'echo $$' in ' '.join(c)]
+        self.assertEqual(len(bridges), 2)
+        for bridge in bridges:
+            self.assertEqual(bridge[1:5], ['-n', 'waydroid', 'shell', '--'])
+        session = next((self.root / 'data/kot-tas/sessions').glob('session.*'))
+        for name in ('sysmon', 'phantom'):
+            runner = session / f'{name}.sh'
             content = runner.read_text()
-            self.assertIn('waydroid shell', content)
+            self.assertIn('sudo -n waydroid shell', content)
             self.assertNotIn('nohup', content)
             self.assertNotIn('& echo', content)
             subprocess.run(['bash', '-n', runner], check=True)
-        self.assertTrue(list((self.root / 'data/kot-tas/sessions').glob('session.*/health.log')))
+            self.assertIn('foreground server output', (session / f'{name}.log').read_text())
+        self.assertNotIn('foreground server output', result.stdout)
+        self.assertTrue((session / 'health.log').is_file())
+        self.assert_cleanup()
 
-    def test_closed_server_console_aborts_startup(self):
-        result = self.run_launcher(CLOSE_CONSOLE='1', FAIL_HEALTH='1')
+    def test_failed_bridge_aborts_startup(self):
+        result = self.run_launcher(FAIL_BRIDGE='1', FAIL_HEALTH='1')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any(c[0] == 'kot-tas' for c in self.commands()))
+        self.assertIn('simulated bridge failure', result.stderr)
+        self.assert_cleanup()
+
+    def test_background_bridge_exit_stops_tas(self):
+        result = self.run_launcher(DIE_BRIDGE_AFTER='0.3', APP_SLEEP='30')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Stopping TAS', result.stderr)
         self.assert_cleanup()
 
     def test_tas_failure_preserves_exit_status(self):

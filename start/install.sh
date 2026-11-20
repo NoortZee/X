@@ -32,14 +32,14 @@ case "$PACKAGE_MANAGER" in
         # Use existing sync databases. System upgrades and mirror maintenance belong to the user.
         sudo pacman -S --needed --noconfirm android-tools base-devel pkgconf clang llvm openssl \
             git curl ca-certificates unzip xz python python-pip python-yaml \
-            jdk17-openjdk util-linux procps-ng konsole
+            jdk17-openjdk util-linux procps-ng
         export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
         ;;
     apt-get)
         sudo apt-get update
         sudo apt-get install -y adb build-essential pkg-config libclang-dev clang libssl-dev \
             git curl ca-certificates unzip xz-utils python3 python3-venv python3-yaml \
-            openjdk-17-jdk-headless util-linux procps konsole
+            openjdk-17-jdk-headless util-linux procps
         export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
         ;;
 esac
