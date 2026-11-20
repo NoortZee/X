@@ -6,7 +6,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 function fixture(matches = 1) {
-    const memory = new Map(); let callback, detached = 0;
+    const memory = new Map(); const writes = []; let callback, detached = 0;
     class P {
         constructor(n) { this.n = n; }
         toString() { return '0x' + this.n.toString(16); }
@@ -18,6 +18,8 @@ function fixture(matches = 1) {
         readU8() { return this.value(); }
         readS32() { return this.value(); }
         readFloat() { return this.value(); }
+        writeFloat(n) { writes.push([this.n, n]); memory.set(this.n, n); }
+        readByteArray(length) { return Uint8Array.from({ length }, (_, i) => memory.get(this.n + i) || 0).buffer; }
     }
     const mod = { name: 'libthieves.so', base: new P(0x100000), size: 0x3000000,
         enumerateRanges: () => [{ base: new P(0x100000), size: 0x3000000 }] };
@@ -40,7 +42,7 @@ function fixture(matches = 1) {
     memory.set(0x3034, 12); memory.set(0x3038, 6); memory.set(0x31F0, 4);
     memory.set(0x31A8, 1); memory.set(0x31A9, 1); memory.set(0x3198, 0); memory.set(0x31A0, 0);
     memory.set(0x1040, 0); memory.set(0x1088, 0); memory.set(0x1138, 1);
-    return { c, memory, pointer: n => new P(n), rpc: c.rpc.exports, tick() { callback.onEnter([new P(0x1000)]); },
+    return { c, memory, writes, identity, leave() { callback.onLeave(); }, pointer: n => new P(n), rpc: c.rpc.exports, tick() { callback.onEnter([new P(0x1000)]); },
         force() { vm.runInContext('lastTime = null', c); }, detached: () => detached };
 }
 test('opt-in unique resolution, graph and Candy class/rarity evidence', () => {
@@ -90,9 +92,11 @@ test('report never dereferences a retained pointer', () => {
     const f = fixture(); f.rpc.install(); f.tick(); f.memory.clear();
     assert.equal(f.rpc.report().latest.object_graph.candies.length, 1);
 });
-test('no game writes or native game calls', () => {
+test('no native calls, replacements, code patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
-    assert.doesNotMatch(s, /\.write\w*\(|NativeFunction|Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
+    assert.doesNotMatch(s, /NativeFunction|Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 4);
+    assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
     const f = fixture();
@@ -157,4 +161,71 @@ test('code probe refuses non-executable memory and caps distinct target records'
     const records = Object.values(f.rpc.report().method_code);
     assert.equal(records.length, 24);
     assert.match(records[0].error, /not in readable executable/);
+});
+
+
+function movementFixture() {
+    const f = fixture();
+    f.identity(0x5000, 0x8200, 0x9200, 0xA200, '4Hero');
+    f.identity(0x6000, 0x8300, 0x9300, 0xA300, '8HeroBody');
+    for (const [p, v] of [[0x1040, 0x4000], [0x4018, 0x5000], [0x5198, 0x6000],
+        [0x6020, 0], [0x609C, 1], [0x5034, 500], [0x5038, 600],
+        [0x31F0, 1], [0x8338, 0x200000]]) f.memory.set(p, v);
+    // Candy vptr + 0x238 = 0x8338.
+    [0x48, 0x89, 0xF8, 0x0F, 0x13, 0x47, 0x34, 0xC3]
+        .forEach((b, i) => f.memory.set(0x200000 + i, b));
+    f.c.Process.findRangeByAddress = () => ({ base: f.pointer(0), size: 0x4000000, protection: 'rwx' });
+    f.rpc.install(); f.tick();
+    return f;
+}
+test('move-white is opt-in, queued, one object only, and executed after update', () => {
+    const f = movementFixture();
+    assert.equal(f.writes.length, 0);
+    f.rpc.moveWhite();
+    assert.equal(f.writes.length, 0);
+    assert.throws(() => f.rpc.moveWhite(), /already queued/);
+    f.leave();
+    assert.equal(f.rpc.status().last_move.success, true);
+    assert.equal(f.rpc.status().last_move.collection_confirmed, false);
+    assert.deepEqual(f.writes, [[0x3034, 524], [0x3038, 600]]);
+    f.leave(); assert.equal(f.writes.length, 2);
+});
+test('reject non-common, changed setter, paused run and invalid direction without writes', () => {
+    for (const [address, value] of [[0x31F0, 2], [0x200000, 0x90], [0x1088, 1], [0x609C, 0]]) {
+        const f = movementFixture(); f.memory.set(address, value); f.rpc.moveWhite(); f.leave();
+        assert.equal(f.writes.length, 0);
+        assert.equal(f.rpc.status().last_move.success, false);
+        assert.ok(f.rpc.status().last_move.error);
+    }
+});
+test('move uses current coordinates and direction, cancels on stop or state change', () => {
+    const f = movementFixture(); f.rpc.moveWhite();
+    f.memory.set(0x5034, 700); f.memory.set(0x609C, -1); f.leave();
+    assert.equal(f.memory.get(0x3034), 676);
+    const stopped = movementFixture(); stopped.rpc.moveWhite(); stopped.rpc.stop(); stopped.leave();
+    assert.equal(stopped.writes.length, 0);
+    const changed = movementFixture(); changed.rpc.moveWhite();
+    vm.runInContext('pendingMove.state = "different"', changed.c); changed.leave();
+    assert.equal(changed.writes.length, 0);
+});
+test('expired move request is consumed, not retried', () => {
+    const f = movementFixture(); f.rpc.moveWhite();
+    vm.runInContext('pendingMove.time -= 6000', f.c); f.leave();
+    assert.match(f.rpc.status().last_move.error, /expired/);
+    assert.equal(f.rpc.status().move_pending, null);
+    assert.equal(f.writes.length, 0);
+});
+test('failed second coordinate write attempts immediate rollback and reports failure', () => {
+    const f = movementFixture();
+    const prototype = Object.getPrototypeOf(f.pointer(0));
+    const original = prototype.writeFloat;
+    prototype.writeFloat = function (value) {
+        if (this.n === 0x3038 && value === 600) throw new Error('simulated write failure');
+        return original.call(this, value);
+    };
+    f.rpc.moveWhite(); f.leave();
+    assert.equal(f.rpc.status().last_move.success, false);
+    assert.equal(f.rpc.status().last_move.rollback, true);
+    assert.equal(f.memory.get(0x3034), 12);
+    assert.equal(f.memory.get(0x3038), 6);
 });
