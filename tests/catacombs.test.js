@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-function fixture(matches = 1) {
+function fixture(matches = 1, production = false) {
     const memory = new Map(); const writes = []; let callback, detached = 0;
     class P {
         constructor(n) { this.n = n; }
@@ -29,7 +29,7 @@ function fixture(matches = 1) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext(fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -164,8 +164,8 @@ test('code probe refuses non-executable memory and caps distinct target records'
 });
 
 
-function movementFixture() {
-    const f = fixture();
+function movementFixture(production = false) {
+    const f = fixture(1, production);
     f.identity(0x5000, 0x8200, 0x9200, 0xA200, '4Hero');
     f.identity(0x6000, 0x8300, 0x9300, 0xA300, '8HeroBody');
     for (const [p, v] of [[0x1040, 0x4000], [0x4018, 0x5000], [0x5198, 0x6000],
@@ -346,8 +346,8 @@ test('create root requests extended bounded window', () => {
     assert.equal(code.requested_instructions, 512);
 });
 
-function teleportFixture() {
-    const f = movementFixture();
+function teleportFixture(production = false) {
+    const f = movementFixture(production);
     f.identity(0x16000, 0xB000, 0xC000, 0xD000, '20EndlessMazeCandyBody');
     for (const [p,v] of [[0x3198,0x16000],[0x16020,0xE000],[0xE000,0],[0xE00C,0.12],
         [0xE010,0.06],[0xE040,0],[0xE044,0],[0xE038,0],[0xE048,0],[0xE0A8,1],
@@ -392,4 +392,61 @@ test('native failure is uncertain: no rollback or retry and report no longer rea
     assert.match(r.warning,/uncertain/);assert.equal(r.rollback,undefined);
     assert.equal(f.rpc.report().diagnostic_only,false);
     assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
+});
+
+function autoFixture() {
+    const f = teleportFixture(true);
+    f.c.testTime = 1000;
+    vm.runInContext('Date.now = () => testTime', f.c);
+    return f;
+}
+test('production report is compact and automation waits 300ms then moves once per object', () => {
+    const f = autoFixture(); f.leave();
+    assert.equal(f.nativeCalls(),0);
+    f.c.testTime = 1299; f.leave(); assert.equal(f.nativeCalls(),0);
+    f.c.testTime = 1300; f.leave(); assert.equal(f.nativeCalls(),1);
+    f.c.testTime = 2000; f.leave(); assert.equal(f.nativeCalls(),1);
+    const r = f.rpc.report(); assert.equal(r.compact,true);
+    assert.equal(r.method_code,undefined); assert.equal(r.history,undefined);
+    assert.equal(r.auto_run.moved,1); assert.equal(r.method_code_retained,0);
+    assert.ok(JSON.stringify(r).length < 10000);
+});
+test('automatic teleport covers all four rarities, pauses and defers locked world', () => {
+    for (const rarity of [1,2,3,4]) {
+        const f=autoFixture(); f.memory.set(0x31F0,rarity); f.leave();
+        f.c.testTime=1300; f.memory.set(0x1088,1); f.leave(); assert.equal(f.nativeCalls(),0);
+        f.memory.set(0x1088,0); f.memory.set(0xF000+0x19298,2); f.leave(); assert.equal(f.nativeCalls(),0);
+        f.memory.set(0xF000+0x19298,0); f.leave(); assert.equal(f.nativeCalls(),1);
+        assert.equal(f.rpc.status().last_move.rarity,rarity);
+    }
+});
+test('auto halts after validation failure and rearms only on observed level phase transition',()=>{
+    const f=autoFixture(); f.leave(); f.c.testTime=1300;
+    f.memory.set(0xE0B8,0); f.leave(); assert.equal(f.rpc.status().auto_run.halted,true);
+    f.memory.set(0xE0B8,0x16000); f.c.testTime=2000; f.leave(); assert.equal(f.nativeCalls(),0);
+    f.memory.set(0x1138,0); f.leave(); assert.equal(f.rpc.status().auto_run,null);
+    f.memory.set(0x1138,1); f.leave(); f.c.testTime=2300; f.leave(); assert.equal(f.nativeCalls(),1);
+    f.rpc.stop(); f.c.testTime=4000; f.leave(); assert.equal(f.nativeCalls(),1);
+});
+test('auto handles multiple Candy objects across updates, not one session-only teleport',()=>{
+    const f=autoFixture();
+    f.identity(0x4000,0x8100,0x9100,0xA100,'16EndlessMazeCandy');
+    f.identity(0x17000,0xB000,0xC000,0xD000,'20EndlessMazeCandyBody');
+    for(const [p,v] of [[0x2808,0x4000],[0x4034,40],[0x4038,60],[0x41F0,3],
+        [0x4198,0x17000],[0x17020,0x18000],[0x17038,40],[0x1703C,60],
+        [0x18000,0],[0x1800C,0.4],[0x18010,0.6],[0x18040,0],[0x18044,0],
+        [0x18038,0],[0x18048,0],[0x180A8,1],[0x180B8,0x17000],[0x18058,0xF000]]) f.memory.set(p,v);
+    let calls=0;
+    f.c.NativeFunction=function(){return body=>{
+        calls++;
+        const physics=f.memory.get(body.n+0x20);
+        f.memory.set(physics+0xC,f.memory.get(body.n+0x38)/100);
+        f.memory.set(physics+0x10,f.memory.get(body.n+0x3C)/100);
+    };};
+    f.leave(); f.c.testTime=1300; f.leave(); assert.equal(calls,1);
+    f.leave(); assert.equal(calls,1);
+    f.c.testTime=1320; f.leave(); assert.equal(calls,2);
+    f.c.testTime=1400; f.leave(); assert.equal(calls,2);
+    assert.equal(f.rpc.status().auto_run.moved,2);
+    assert.throws(()=>f.rpc.teleportWhite(),/automatic teleport enabled/);
 });

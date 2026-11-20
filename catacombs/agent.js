@@ -7,10 +7,12 @@ let history = [], events = [], previous = new Map(), previousState = null;
 let resolution = null;
 let methodCode = new Map();
 let lifecycleCode = null;
+let autoRun = null;
+let autoSeen = new Set();
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
-    if (events.length > C.limits.events) events.shift();
+    if (events.length > (C.diagnostics ? C.limits.events : C.auto_teleport.events)) events.shift();
 }
 function safe(fn) {
     try { return fn(); } catch (e) { return { error: String(e) }; }
@@ -250,6 +252,14 @@ function scanObjects(state) {
     return result;
 }
 function sample(state) {
+    if (!C.diagnostics) {
+        if (lastTime !== null && Date.now() - lastTime < C.limits.sample_ms) { skipped++; return; }
+        lastTime = Date.now(); samples++;
+        latest = { time: lastTime, state: { address: state.toString() },
+            phase_raw: safe(() => state.add(C.state.phase).readS32()),
+            paused_raw: safe(() => state.add(C.state.paused).readU8()) };
+        return;
+    }
     const now = Date.now();
     const key = state.toString();
     if (lastTime !== null && now - lastTime < C.limits.sample_ms) { skipped++; return; }
@@ -415,7 +425,62 @@ function performMove(state) {
     } catch (e) { result.error = String(e); }
     finally { lastMove = result; event('move_white_result', result); }
 }
+function autoTeleport(state) {
+    if (!C.auto_teleport.enabled) return;
+    try {
+        requireClass(state, C.move_white.state_name);
+        const phase = state.add(C.state.phase).readS32();
+        if (phase !== 1) { autoRun = null; autoSeen.clear(); return; }
+        const now = Date.now();
+        if (!autoRun || autoRun.state !== state.toString()) {
+            autoSeen.clear();
+            autoRun = { state: state.toString(), due: now + C.auto_teleport.delay_ms,
+                next: now + C.auto_teleport.delay_ms, attempted: 0, moved: 0, halted: false };
+            event('auto_level_armed', { due: autoRun.due });
+        }
+        if (autoRun.halted || now < autoRun.next || state.add(C.state.paused).readU8() !== 0) return;
+        const world = state.add(C.state.world).readPointer();
+        const hero = world.add(C.world.hero).readPointer(); requireClass(hero, C.move_white.hero_name);
+        const heroBody = hero.add(C.object.body).readPointer(); requireClass(heroBody, C.move_white.hero_body_name);
+        const direction = heroBody.add(C.move_white.direction).readS32();
+        if (direction !== 1 && direction !== -1) throw new Error('invalid hero direction');
+        const target = { x: numberAt(hero, C.object.x) + direction * C.move_white.ahead, y: numberAt(hero, C.object.y) };
+        const array = state.add(C.state.objects).readPointer();
+        const count = array.add(C.array.slots).readS32();
+        if (count < 0 || count > C.limits.slots) throw new Error('auto array invalid/too large');
+        const data = array.add(C.array.data).readPointer();
+        for (let i = 0; i < count; i++) {
+            const object = data.add(i * Process.pointerSize).readPointer();
+            if (object.isNull()) continue;
+            const id = identity(object);
+            if (!id.rtti || id.rtti.name !== C.candy.name) continue;
+            const rarity = object.add(C.candy.rarity).readS32();
+            if (!C.auto_teleport.rarities.includes(rarity)) continue;
+            const body = object.add(C.object.body).readPointer();
+            const key = object.toString() + ':' + body.toString();
+            if (autoSeen.has(key)) continue;
+            // Locked physics is a deferral, not a failed native attempt.
+            requireClass(body, C.candy_body_probe.body_name);
+            const physics = body.add(C.hero_body.physics).readPointer();
+            const physicsWorld = physics.add(C.teleport_white.world).readPointer();
+            if (physicsWorld.add(C.teleport_white.lock).readU8() & C.teleport_white.lock_mask) return;
+            autoSeen.add(key); autoRun.attempted++;
+            const result = { time: now, mode: 'auto_teleport', object: object.toString(), rarity,
+                target, success: false, collection_confirmed: false };
+            try { teleportCandy(object, target, result); result.success = true; autoRun.moved++; movesExecuted++; }
+            catch (e) { result.error = String(e); autoRun.halted = true; autoRun.error = result.error; }
+            lastMove = result; event('auto_teleport_result', result);
+            autoRun.next = now + C.auto_teleport.interval_ms;
+            return; // At most one native rebuild per update.
+        }
+    } catch (e) {
+        if (!autoRun) autoRun = { state: state.toString(), attempted: 0, moved: 0 };
+        autoRun.halted = true; autoRun.error = String(e);
+        error = String(e); event('auto_teleport_error', { error });
+    }
+}
 function requestMove(mode = 'visual') {
+    if (C.auto_teleport.enabled) throw new Error('automatic teleport enabled; manual moves disabled');
     if (mode === 'teleport' && teleportUsed) throw new Error('teleport already attempted; inspect dump before restarting module');
     if (!enabled || !latest) throw new Error('start module and enter Catacombs first');
     if (pendingMove) throw new Error('move already queued');
@@ -424,11 +489,12 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution,
+function stop() { autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    autoRun = null; autoSeen.clear();
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
     pendingMove = null; lastMove = null; movesExecuted = 0; mutationAttempted = false; teleportUsed = false;
@@ -448,7 +514,9 @@ function install() {
             this.updateState = args[0];
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
         }, onLeave() {
-            if (enabled && pendingMove) performMove(this.updateState);
+            if (!enabled) return;
+            if (pendingMove) performMove(this.updateState);
+            else autoTeleport(this.updateState);
         } });
         enabled = true; event('enabled', { diagnostic_only: true });
     } catch (e) { stop(); error = String(e); throw e; }
@@ -457,7 +525,12 @@ function install() {
 rpc.exports = {
     install, status, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
-    report() { return { schema_version: 2, diagnostic_only: !mutationAttempted, experimental_position_moves: true, ...status(),
+    report() {
+        if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
+            ...status(), metadata: { time: Date.now(), module: moduleInfo,
+                warning: 'Physics readback is not proof of collection; check HUD.' },
+            latest, events: events.slice() };
+        return { schema_version: 2, diagnostic_only: !mutationAttempted, experimental_position_moves: true, ...status(),
         metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
