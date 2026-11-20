@@ -14,6 +14,8 @@ let lastHero = null;
 let lastTraceSample = null;
 let traces = new Map();
 let metadata = null;
+let playSamples = {};
+let lastPlayStates = {};
 function emit(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -133,6 +135,46 @@ function heroValues(hero) {
     } catch (error) { values.read_error = String(error); }
     return values;
 }
+function playStateSnapshot(state) {
+    const fields = C.play_state;
+    const sample = { identity: heroIdentity(state), pointers: {}, flags: {}, methods: {} };
+    // Read independently: one unknown field must not hide the other observations.
+    for (const name of ['world', 'hero1', 'hero2', 'optional']) {
+        try {
+            const pointer = state.add(fields[name]).readPointer();
+            sample.pointers[name] = pointer.toString();
+            if (name === 'world' && !pointer.isNull())
+                sample.world_content = pointer.add(fields.world_content).readPointer().toString();
+            if ((name === 'hero1' || name === 'hero2') && !pointer.isNull())
+                sample[name] = heroIdentity(pointer); // Candidate wrappers, not assumed HeroBody.
+        } catch (error) { sample[name + '_error'] = String(error); }
+    }
+    for (const name of ['paused', 'mode1', 'mode2']) {
+        try { sample.flags[name] = state.add(fields[name]).readU8(); }
+        catch (error) { sample.flags[name + '_error'] = String(error); }
+    }
+    try {
+        const timer = state.add(fields.timer).readFloat();
+        if (!Number.isFinite(timer)) throw new Error('non-finite timer');
+        sample.timer = timer;
+        sample.frame_time = state.add(fields.frame_time).readS32();
+    } catch (error) { sample.timer_error = String(error); }
+    for (const [name, offset] of Object.entries(fields.methods)) {
+        try {
+            const vptr = state.add(C.rtti.object_vptr).readPointer();
+            sample.methods[name] = describeAddress(vptr.add(offset).readPointer());
+        } catch (error) { sample.methods[name] = { error: String(error) }; }
+    }
+    return sample;
+}
+function samplePlayState(name, state, caller) {
+    const now = Date.now();
+    if (playSamples[name] !== undefined && now - playSamples[name] < C.limits.sample_ms) return;
+    playSamples[name] = now;
+    const sample = { time: now, ...playStateSnapshot(state), caller: caller ? describeAddress(caller) : null };
+    lastPlayStates[name] = sample;
+    emit(name, sample);
+}
 function heroIdentity(hero) {
     const identity = { object: hero.toString() };
     try {
@@ -157,6 +199,7 @@ function install() {
     events = []; skulls = new Map(); counters = {}; lastSample = 0;
     resolutions = {}; lastHeroSample = null; lastHero = null;
     lastTraceSample = null; traces = new Map();
+    playSamples = {}; lastPlayStates = {};
     const gameModule = Process.findModuleByName(MEMORY_LAYOUT.module_name);
     metadata = { captured_at: Date.now(), process_id: Process.id, arch: Process.arch,
         pointer_size: Process.pointerSize, profile_game_version: MEMORY_LAYOUT.game_version,
@@ -223,13 +266,18 @@ function install() {
             captureTrace(this.context, this.returnAddress);
             emit('hero_control', lastHero);
         }) });
+        for (const name of ['play_update', 'play_update_heroes']) {
+            attach(name, { onEnter: guard(function (args) {
+                samplePlayState(name, args[0], this.returnAddress);
+            }) });
+        }
         emit('enabled', { diagnostic_only: true });
     } catch (error) { fail(error); throw error; }
     return status();
 }
 function status() {
     return { enabled, diagnostic_only: true, metadata, traces_retained: traces.size, last_error: lastError,
-        resolutions, counters, last_hero: lastHero, events_retained: events.length, skulls_retained: skulls.size };
+        resolutions, counters, last_hero: lastHero, last_play_states: lastPlayStates, events_retained: events.length, skulls_retained: skulls.size };
 }
 rpc.exports = {
     install, status,
