@@ -5,6 +5,7 @@ let hook = null, enabled = false, error = null, moduleInfo = null;
 let calls = 0, samples = 0, skipped = 0, lastTime = null, latest = null;
 let history = [], events = [], previous = new Map(), previousState = null;
 let resolution = null;
+let methodCode = new Map();
 function event(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -52,13 +53,62 @@ function methods(p) {
             safe(() => ({ slot: i, target: address(vp.add(i * Process.pointerSize).readPointer()) })));
     });
 }
+function captureMethodCode(target) {
+    const key = target.toString();
+    if (methodCode.has(key)) return key;
+    if (methodCode.size >= C.method_probe.targets) return null;
+    const record = { target: safe(() => address(target)), instructions: [],
+        function_boundary_verified: false, complete_function: false };
+    methodCode.set(key, record);
+    try {
+        const range = Process.findRangeByAddress(target);
+        const m = Process.findModuleByAddress(target);
+        if (!m || m.name !== MEMORY_LAYOUT.module_name || !range ||
+            !range.protection.includes('r') || !range.protection.includes('x'))
+            throw new Error('target not in readable executable game module');
+        const available = Number(range.base.add(range.size).sub(target).toString());
+        const moduleAvailable = Number(m.base.add(m.size).sub(target).toString());
+        const length = Math.min(C.method_probe.bytes, available, moduleAvailable);
+        if (!Number.isSafeInteger(length) || length <= 0) throw new Error('invalid code window');
+        record.window_bytes = length;
+        record.hex = Array.from(new Uint8Array(target.readByteArray(length)))
+            .map(b => b.toString(16).padStart(2, '0')).join(' ');
+        let offset = 0;
+        while (offset < length && record.instructions.length < C.method_probe.instructions) {
+            const ins = Instruction.parse(target.add(offset));
+            if (ins.size <= 0 || ins.size > length - offset) break;
+            record.instructions.push({ address: address(target.add(offset)), size: ins.size,
+                mnemonic: ins.mnemonic, operands: ins.opStr });
+            offset += ins.size;
+        }
+        // Retain a fixed window, not a guessed function body; branch targets may be outside it.
+    } catch (e) { record.error = String(e); }
+    return key;
+}
+function methodProbe(object, offsets) {
+    return safe(() => {
+        if (object.isNull()) return { null: true };
+        const vptr = object.readPointer();
+        const targets = {};
+        for (const [role, offset] of Object.entries(offsets)) {
+            targets[role] = safe(() => {
+                const pointer = vptr.add(offset).readPointer();
+                return { vptr_byte_offset: offset, target: address(pointer),
+                    code_key: captureMethodCode(pointer), role_is_candidate: true };
+            });
+        }
+        return targets;
+    });
+}
 function candySnapshot(p, id) {
     return { ...id, position: position(p),
         rarity_raw: safe(() => p.add(C.candy.rarity).readS32()),
         flag_a: safe(() => p.add(C.object.flag_a).readU8()),
         flag_b: safe(() => p.add(C.object.flag_b).readU8()),
         body: link(p, C.object.body), image: link(p, C.object.image),
-        virtual_targets: methods(p) };
+        virtual_targets: methods(p),
+        position_method_candidates: methodProbe(p, C.method_probe.object_methods),
+        body_method_candidates: safe(() => methodProbe(p.add(C.object.body).readPointer(), C.method_probe.body_methods)) };
 }
 function heroGraph(world) {
     return safe(() => {
@@ -145,11 +195,11 @@ function sample(state) {
 }
 function stop() { enabled = false; if (hook) hook.detach(); hook = null; }
 function status() { return { enabled, error, calls, samples, skipped, resolution,
-    last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
+    method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
-    history = []; events = []; previous = new Map(); previousState = null; resolution = null;
+    history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map();
     try {
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         if (!m) throw new Error('game module not loaded');
@@ -176,5 +226,5 @@ rpc.exports = {
         metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
-        latest, history: history.slice(), events: events.slice() }; },
+        method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
 };

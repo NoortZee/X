@@ -72,6 +72,13 @@ const MEMORY_LAYOUT = {
         object: { x: 0x34, y: 0x38, body: 0x198, image: 0x1A0, flag_a: 0x1A8, flag_b: 0x1A9 },
         hero_body: { physics: 0x20 },
         candy: { name: '16EndlessMazeCandy', rarity: 0x1F0 },
+        method_probe: {
+            // Byte offsets from object vptr, not _ZTV header. Roles are hypotheses.
+            object_methods: { slot2_candidate: 0x10, position_set_candidate: 0x238,
+                position_get_candidate: 0x268 },
+            body_methods: { slot0: 0, slot1: 8, slot2: 0x10, slot3: 0x18 },
+            targets: 24, bytes: 384, instructions: 128,
+        },
         array: { data: 0x10, slots: 0x18 },
         rtti: { vptr: 0, typeinfo: -8, name: 8 },
         limits: { sample_ms: 500, slots: 1024, declared_slots: 16384,
