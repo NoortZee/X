@@ -7,7 +7,7 @@ let history = [], events = [], previous = new Map(), previousState = null;
 let resolution = null;
 let methodCode = new Map();
 let lifecycleCode = null;
-let pendingMove = null, lastMove = null, movesExecuted = 0;
+let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -292,12 +292,68 @@ function writableFloat(p) {
         Number(range.base.add(range.size).sub(p).toString()) < 4)
         throw new Error('position field not writable');
 }
+function teleportCandy(selected, target, result) {
+    const T = C.teleport_white;
+    const body = selected.add(C.object.body).readPointer();
+    requireClass(body, C.candy_body_probe.body_name);
+    const probe = candyPhysicsProbe(selected);
+    if (probe.error || !probe.position_matches || probe.type !== 0)
+        throw new Error('Candy physics candidate failed validation');
+    const physics = body.add(C.hero_body.physics).readPointer();
+    if (physics.add(T.owner).readPointer().toString() !== body.toString())
+        throw new Error('physics owner mismatch');
+    const world = physics.add(T.world).readPointer();
+    if (world.isNull()) throw new Error('null physics world');
+    const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    for (const sig of T.signatures) {
+        if (!m || sig.rva + sig.bytes.length > m.size) throw new Error('native RVA outside module');
+        const code = m.base.add(sig.rva);
+        const range = Process.findRangeByAddress(code);
+        if (!range || !range.protection.includes('x') || !range.protection.includes('r') ||
+            Number(range.base.add(range.size).sub(code).toString()) < sig.bytes.length)
+            throw new Error('native code not readable executable');
+        const bytes = new Uint8Array(code.readByteArray(sig.bytes.length));
+        if (!sig.bytes.every((b, i) => bytes[i] === b)) throw new Error('native signature mismatch');
+    }
+    const recreate = body.readPointer().add(C.method_probe.body_methods.recreate_candidate).readPointer();
+    if (recreate.toString() !== m.base.add(C.lifecycle_probe.candidates.create_candidate).toString())
+        throw new Error('unexpected recreate vtable target');
+    const x = body.add(T.stored_x), y = body.add(T.stored_y);
+    writableFloat(x); writableFloat(y);
+    const before = { x: numberAt(body, T.stored_x), y: numberAt(body, T.stored_y) };
+    const objectBefore = position(selected);
+    if (objectBefore.error || Math.hypot(before.x - objectBefore.x, before.y - objectBefore.y) > T.tolerance)
+        throw new Error('stored Body position mismatch');
+    const rebuild = new NativeFunction(m.base.add(C.lifecycle_probe.candidates.destroy_candidate), 'void', ['pointer']);
+    // Same update callback thread. No deferred setImmediate or assumed physics unlock.
+    if (world.add(T.lock).readU8() & T.lock_mask) throw new Error('physics world locked');
+    result.body = body.toString(); result.physics_before = physics.toString(); result.stored_before = before;
+    result.native_started = false;
+    try {
+        result.write_attempted = true; mutationAttempted = true; teleportUsed = true;
+        x.writeFloat(target.x); y.writeFloat(target.y);
+        result.native_started = true;
+        rebuild(body); // Deletes AND tail-calls the observed Candy recreate slot. Never call create twice.
+    } catch (e) {
+        if (!result.native_started)
+            result.rollback = safe(() => { x.writeFloat(before.x); y.writeFloat(before.y); return true; });
+        else result.warning = 'native started; state uncertain, no automatic rollback or retry';
+        throw e;
+    }
+    const after = body.add(C.hero_body.physics).readPointer();
+    result.physics_after = after.toString();
+    if (after.isNull()) throw new Error('rebuild returned with null physics body; stop experiment');
+    result.physics_readback = { x: numberAt(after, MEMORY_LAYOUT.tas.body.XF_PX) * C.candy_body_probe.scale,
+        y: numberAt(after, MEMORY_LAYOUT.tas.body.XF_PY) * C.candy_body_probe.scale };
+    if (Math.hypot(result.physics_readback.x - target.x, result.physics_readback.y - target.y) > T.tolerance)
+        throw new Error('rebuilt physics position differs from target; do not retry');
+}
 function performMove(state) {
     if (!pendingMove) return;
     const request = pendingMove;
     pendingMove = null; // Exactly one attempt; never retry automatically.
     const result = { time: Date.now(), request_time: request.time, success: false,
-        collection_confirmed: false, experiment: 'object coordinates only; Body sync unverified' };
+        collection_confirmed: false, mode: request.mode || 'visual', experiment: request.mode === 'teleport' ? 'native physics rebuild; collection unverified' : 'object coordinates only; Body sync unverified' };
     try {
         if (Date.now() - request.time > C.move_white.expiry_ms) throw new Error('request expired');
         if (state.toString() !== request.state) throw new Error('state changed');
@@ -340,8 +396,14 @@ function performMove(state) {
         writableFloat(xField); writableFloat(yField);
         const before = { x: numberAt(selected, C.object.x), y: numberAt(selected, C.object.y) };
         result.object = selected.toString(); result.before = before; result.target = target;
+        if (request.mode === 'teleport') {
+            teleportCandy(selected, target, result);
+            result.success = true; movesExecuted++;
+            return;
+        }
         // Reproduce only the verified two-float object setter; no unknown ABI/native call.
         try {
+            mutationAttempted = true;
             xField.writeFloat(target.x);
             yField.writeFloat(target.y);
         } catch (e) {
@@ -351,24 +413,25 @@ function performMove(state) {
         result.readback = position(selected);
         result.success = true; movesExecuted++;
     } catch (e) { result.error = String(e); }
-    lastMove = result; event('move_white_result', result);
+    finally { lastMove = result; event('move_white_result', result); }
 }
-function requestMove() {
+function requestMove(mode = 'visual') {
+    if (mode === 'teleport' && teleportUsed) throw new Error('teleport already attempted; inspect dump before restarting module');
     if (!enabled || !latest) throw new Error('start module and enter Catacombs first');
     if (pendingMove) throw new Error('move already queued');
     if (Date.now() - latest.time > C.move_white.expiry_ms) throw new Error('state snapshot stale');
-    pendingMove = { time: Date.now(), state: latest.state.address };
+    pendingMove = { time: Date.now(), state: latest.state.address, mode };
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 function stop() { pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
 function status() { return { enabled, error, calls, samples, skipped, resolution,
-    move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
+    teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
-    pendingMove = null; lastMove = null; movesExecuted = 0;
+    pendingMove = null; lastMove = null; movesExecuted = 0; mutationAttempted = false; teleportUsed = false;
     try {
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         if (!m) throw new Error('game module not loaded');
@@ -392,9 +455,9 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, moveWhite: requestMove, stop() { stop(); return status(); },
+    install, status, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
-    report() { return { schema_version: 2, diagnostic_only: movesExecuted === 0, experimental_position_moves: true, ...status(),
+    report() { return { schema_version: 2, diagnostic_only: !mutationAttempted, experimental_position_moves: true, ...status(),
         metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },

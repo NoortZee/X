@@ -78,6 +78,12 @@ const MEMORY_LAYOUT = {
         candy_body_probe: { physics_candidate: 0x20, scale: 100, tolerance: 0.05,
             body_name: '20EndlessMazeCandyBody', direct_calls: 8 },
         candy: { name: '16EndlessMazeCandy', rarity: 0x1F0 },
+        teleport_white: { stored_x: 0x38, stored_y: 0x3C, world: 0x58, owner: 0xB8,
+            lock: 0x19298, lock_mask: 2, tolerance: 0.05, signatures: [
+            { rva: 0x1615cb0, bytes: [72, 139, 119, 32, 72, 133, 246, 116, 54, 85, 72, 137, 229, 65, 86, 83, 72, 137, 251, 76, 139, 118, 88, 76, 137, 247, 232, 65, 29, 19, 0, 72, 199, 67, 32, 0, 0, 0, 0, 242, 15, 16, 67, 56, 72, 139, 3, 72, 139, 64, 104, 72, 137, 223, 76, 137, 246, 91, 65, 94, 93, 255, 224, 195] },
+            { rva: 0x1617de0, bytes: [85, 72, 137, 229, 65, 87, 65, 86, 65, 85, 65, 84, 83, 72, 129, 236, 168, 0, 0, 0, 15, 41, 133, 48, 255, 255, 255, 72, 137, 117, 200, 72, 137, 251, 15, 19, 71, 56, 15, 87] },
+            { rva: 0x1747a10, bytes: [246, 135, 152, 146, 1, 0, 2, 15, 133, 20, 1, 0, 0, 85, 72, 137, 229, 65, 87, 65, 86, 65, 85, 65, 84, 83, 80, 72, 137, 243, 73, 137, 254, 76, 139, 190, 128, 0, 0, 0] },
+        ] },
         move_white: { ahead: 24, direction: 0x9C, rarity: 1, expiry_ms: 5000,
             state_name: '20EndlessMazePlayState', hero_name: '4Hero',
             hero_body_name: '8HeroBody',

@@ -1,3 +1,10 @@
+## Без выпуска — одноразовый физический teleport-white
+
+- Новая явная команда catacombs teleport-white: свежий ближайший common, штатный rebuild module+0x1615CB0 в Endless update onLeave; create вызывается самим rebuild, не повторно.
+- Валидация RTTI/physics transform/owner/stored position, точных runtime сигнатур трёх функций, recreate-слота и unlocked world. Меняются только сохранённые Body.xy; native получает один указатель Body. Без изменений наград/счётчиков.
+- Физический readback в last_move; collection_confirmed=false. Одна попытка записи на запуск модуля, no retry/rollback после входа в native. Ошибки и mutation_attempted видны в dump. Сбой игры всё ещё возможен, live-проверка предстоит.
+- 34 Node mock-теста, включая native mock и отказы при lock/owner/signature/vtable mismatch. Rust-сборка недоступна в среде. Требуется cargo build --release. README не менялся.
+
 ## Без выпуска — цель Body+0x68 и продолжение create
 
 - Читается фактический виртуальный target CandyBody vptr+0x68; окно create-кандидата расширено до 1536 байт/512 инструкций, общий кэш ограничен 40 целями.
