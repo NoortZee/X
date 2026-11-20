@@ -9,6 +9,8 @@ let events = [];
 let skulls = new Map();
 let lastSample = 0;
 let counters = {};
+let lastHeroSample = null;
+let lastHero = null;
 function emit(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -32,7 +34,7 @@ function resolveAll() {
     const mod = Process.findModuleByName(MEMORY_LAYOUT.module_name);
     if (!mod) throw new Error('game module not loaded');
     const resolved = {};
-    for (const [name, pattern] of Object.entries(C.signatures)) {
+    for (const [name, pattern] of Object.entries({ ...C.signatures, hero_control: MEMORY_LAYOUT.tas.signatures.FRAME_FUNC })) {
         const matches = new Map();
         for (const range of mod.enumerateRanges('r-x')) {
             for (const match of Memory.scanSync(range.base, range.size, pattern))
@@ -62,6 +64,18 @@ function snapshotState(state) {
         level: state.add(C.state.level).readPointer().toString(),
         mode: 'ReplayState candidate; Catacombs not independently confirmed' };
 }
+function heroIdentity(hero) {
+    const identity = { object: hero.toString() };
+    try {
+        const vptr = hero.add(C.rtti.object_vptr).readPointer();
+        identity.vptr = vptr.toString();
+        const typeinfo = vptr.add(C.rtti.typeinfo_from_vptr).readPointer();
+        identity.typeinfo = typeinfo.toString();
+        const name = typeinfo.add(C.rtti.name_from_typeinfo).readPointer();
+        identity.rtti_name = name.readCString(C.rtti.max_name_bytes);
+    } catch (error) { identity.rtti_error = String(error); }
+    return identity;
+}
 function guard(fn) {
     return function (...args) {
         if (!enabled) return;
@@ -72,10 +86,23 @@ function install() {
     if (enabled) return status();
     lastError = null;
     events = []; skulls = new Map(); counters = {}; lastSample = 0;
+    resolutions = {}; lastHeroSample = null; lastHero = null;
     try {
         const addresses = resolveAll(); // Validate every signature before attaching any hook.
         resolutions = Object.fromEntries(Object.entries(addresses).map(([k, v]) => [k, v.toString()]));
-        function attach(name, callbacks) { hooks.push(Interceptor.attach(addresses[name], callbacks)); }
+        function attach(name, callbacks) {
+            counters[name] = 0;
+            const enter = callbacks.onEnter;
+            hooks.push(Interceptor.attach(addresses[name], {
+                ...callbacks,
+                onEnter(args) {
+                    if (!enabled) return;
+                    // Count entry before attempting any candidate field reads.
+                    counters[name]++;
+                    if (enter) return enter.call(this, args);
+                },
+            }));
+        }
         enabled = true;
         attach('replay_update', { onEnter: guard(function (args) {
             counters.frames = (counters.frames || 0) + 1;
@@ -113,13 +140,20 @@ function install() {
             counters.requests = (counters.requests || 0) + 1;
             emit('collect_request', { observed: true });
         }) });
+        attach('hero_control', { onEnter: guard(function (args) {
+            const now = Date.now();
+            if (lastHeroSample !== null && now - lastHeroSample < C.limits.sample_ms) return;
+            lastHeroSample = now;
+            lastHero = heroIdentity(args[0]);
+            emit('hero_control', lastHero);
+        }) });
         emit('enabled', { diagnostic_only: true });
     } catch (error) { fail(error); throw error; }
     return status();
 }
 function status() {
     return { enabled, diagnostic_only: true, last_error: lastError,
-        resolutions, counters, events_retained: events.length, skulls_retained: skulls.size };
+        resolutions, counters, last_hero: lastHero, events_retained: events.length, skulls_retained: skulls.size };
 }
 rpc.exports = {
     install, status,

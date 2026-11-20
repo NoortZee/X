@@ -73,6 +73,8 @@ const MEMORY_LAYOUT = {
             collect_request: '55 48 89 E5 41 57 41 56 41 54 53 48 81 EC B0 04 00 00 41 89 D7 48 89 F3 49 89 FE 48 8D BD 30 FB FF FF E8 ?? ?? ?? ?? BF 20 00 00 00 E8 ?? ?? ?? ?? 49 89 C4 48 89 C7 E8 ?? ?? ?? ?? 80 8D 52 FB FF FF 02 C7 45 DC 0F 00 00 00 48 8B BD C0 FB FF FF 48 85 FF 74 06 48 8B 07 FF 50 08 80 8D 41 FB FF FF 20 4C 89 A5 C0 FB FF FF 41 80 4C 24 10 01 45 89 7C 24 18',
             death_skull_update: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 48 85 C0 74 18 C6 83 A9 01 00 00 00 48 89 DF BE 01 00',
         },
+        // Itanium ABI: object vptr is already the address point (past _ZTV header).
+        rtti: { object_vptr: 0, typeinfo_from_vptr: -8, name_from_typeinfo: 8, max_name_bytes: 128 },
         state: { skull_begin: 0x120, skull_end: 0x128, skull_objects: 0x138, level: 0x98 },
         descriptor: { data: 0x18, active: 0x98 },
         skull: { active: 0x1A9 },
