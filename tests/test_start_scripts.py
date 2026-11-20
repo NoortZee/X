@@ -59,6 +59,63 @@ class ScriptSyntaxTests(unittest.TestCase):
                 ast.parse(part.split('\nPY\n', 1)[0], filename=str(path))
 
 
+class PhantomRemoteTests(unittest.TestCase):
+    """Real local Git repositories, no fetches or network calls."""
+
+    def validate(self, urls, rewrite=False):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / 'source'
+            subprocess.run(['git', 'init', '-q', source], check=True)
+            for url in urls:
+                subprocess.run(['git', '-C', source, 'config', '--local', '--add',
+                                'remote.origin.url', url], check=True)
+            global_config = Path(directory) / 'gitconfig'
+            global_config.write_text('')
+            if rewrite:
+                subprocess.run(['git', 'config', '--file', global_config,
+                                'url.https://mirror.example/.insteadOf', 'https://github.com/'], check=True)
+            env = {**os.environ, 'SOURCE': str(source), 'GIT_CONFIG_GLOBAL': str(global_config),
+                   'GIT_CONFIG_NOSYSTEM': '1'}
+            script = (ROOT / 'start/install.sh').read_text()
+            function = script.split('validate_phantom_source() {', 1)[1].split('\n}\n', 1)[0]
+            command = 'fail() { echo "$*" >&2; exit 1; }; validate_phantom_source() {' + function + '\n}\nvalidate_phantom_source'
+            result = subprocess.run(['bash', '-c', command], env=env, capture_output=True, text=True)
+            stored = subprocess.run(['git', '-C', source, 'config', '--local', '--get-all',
+                                     'remote.origin.url'], capture_output=True, text=True).stdout.splitlines()
+            self.assertEqual(stored, urls)  # validation never rewrites the user's remote
+            if rewrite:
+                effective = subprocess.check_output(['git', '-C', source, 'remote', 'get-url', 'origin'],
+                                                     env=env, text=True)
+                self.assertIn('mirror.example', effective)
+            return result
+
+    def test_equivalent_github_urls(self):
+        for url in ('https://github.com/NoortZee/phantom_keymaper.git',
+                    'https://github.com/noortzee/phantom_keymaper',
+                    'https://github.com/NoortZee/phantom_keymaper.git/',
+                    'git@github.com:NoortZee/phantom_keymaper.git',
+                    'ssh://git@github.com/NoortZee/phantom_keymaper.git',
+                    'ssh://git@github.com:22/NoortZee/phantom_keymaper.git'):
+            with self.subTest(url=url):
+                result = self.validate([url])
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_instead_of_rewrite_does_not_trigger_false_rejection(self):
+        result = self.validate(['https://github.com/NoortZee/phantom_keymaper.git'], rewrite=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_other_repositories_and_multiple_urls_are_rejected(self):
+        for urls in (['https://github.com/other/phantom_keymaper.git'],
+                     ['https://github.com/NoortZee/phantom_keymaper-other.git'],
+                     ['https://github.com.evil.example/NoortZee/phantom_keymaper.git'],
+                     ['https://user:secret@example.com/NoortZee/phantom_keymaper.git'],
+                     ['https://github.com/NoortZee/phantom_keymaper.git'] * 2, []):
+            with self.subTest(urls=urls):
+                result = self.validate(urls)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('secret', result.stderr)
+
+
 @unittest.skipIf(os.geteuid() == 0, 'Installer intentionally refuses root')
 class InstallerDependencyTests(unittest.TestCase):
     """Execute the real dependency-selection prefix, with an isolated mock PATH."""
