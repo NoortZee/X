@@ -27,7 +27,7 @@ function fixture(matches = 1, attachFailure = false) {
     });
     vm.runInContext(fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), context);
-    return { rpc: context.rpc.exports, hooks, detached: () => detached, pointer: () => new P(100) };
+    return { context, rpc: context.rpc.exports, hooks, detached: () => detached, pointer: () => new P(100) };
 }
 test('opt-in hooks, idempotent start, report and complete cleanup', () => {
     const f = fixture();
@@ -161,7 +161,7 @@ test('control hook counts every call but bounds identity samples and tolerates R
 
 test('control identity uses the object address point without adding a vtable header', () => {
     const f = fixture(); f.rpc.install();
-    const name = { readCString(max) { assert.equal(max, 128); return '8HeroBody'; } };
+    const name = { add(offset) { return { readU8: () => Buffer.from('8HeroBody\0NEIGHBOUR')[offset] }; } };
     const typeinfo = { toString: () => '0x3000', add(offset) {
         assert.equal(offset, 8); return { readPointer: () => name };
     } };
@@ -177,4 +177,68 @@ test('control identity uses the object address point without adding a vtable hea
     assert.equal(identity.typeinfo, '0x3000');
     assert.equal(identity.rtti_name, '8HeroBody');
     assert.equal(identity.rtti_error, undefined);
+});
+
+
+test('RTTI stops at NUL and rejects unterminated bounded names', () => {
+    const f = fixture();
+    f.context.namePointer = { add(i) { return { readU8: () => Buffer.from('8HeroBody\0garbage')[i] }; } };
+    assert.equal(vm.runInContext('readBoundedName(namePointer)', f.context), '8HeroBody');
+    f.context.namePointer = { add() { return { readU8: () => 65 }; } };
+    assert.throws(() => vm.runInContext('readBoundedName(namePointer)', f.context), /exceeds limit/);
+});
+
+test('traces are module-relative, deduplicated and bounded separately from events', () => {
+    const f = fixture(); f.rpc.install();
+    let offset = 64;
+    const address = () => ({ toString: () => '0x' + offset.toString(16),
+        sub: () => ({ toString: () => '0x' + (offset - 16).toString(16) }) });
+    f.context.Process.findModuleByAddress = () => ({ name: 'libthieves.so', base: 16 });
+    f.context.Backtracer = { ACCURATE: 1, FUZZY: 2 };
+    let calls = 0;
+    f.context.Thread = { backtrace() { calls++; return Array(24).fill(address()); } };
+    vm.runInContext('captureTrace({}, null); captureTrace({}, null)', f.context);
+    assert.equal(calls, 1); // time-based sampling
+    vm.runInContext('lastTraceSample = null; captureTrace({}, null)', f.context);
+    assert.equal(f.rpc.report().traces[0].samples, 2);
+    assert.equal(f.rpc.report().traces[0].stack.length, 16);
+    assert.equal(f.rpc.report().traces[0].stack[0].rva, '0x30');
+    for (offset = 65; offset < 110; offset++)
+        vm.runInContext('lastTraceSample = null; captureTrace({}, null)', f.context);
+    assert.equal(f.rpc.report().traces.length, 32);
+    for (let i = 0; i < 1100; i++) f.hooks[4].onEnter([]);
+    assert.equal(f.rpc.report().traces.length, 32);
+});
+
+test('backtrace failure is isolated; fuzzy fallback is explicitly labelled', () => {
+    const f = fixture(); f.rpc.install();
+    f.context.Backtracer = { ACCURATE: 1, FUZZY: 2 };
+    f.context.Thread = { backtrace(ctx, method) {
+        if (method === 1) throw new Error('unwind failed');
+        return [];
+    } };
+    vm.runInContext('captureTrace({}, null)', f.context);
+    assert.equal(f.rpc.report().traces[0].method, 'fuzzy');
+    assert.match(f.rpc.report().traces[0].accurate_error, /unwind failed/);
+    assert.equal(f.rpc.status().enabled, true);
+});
+
+test('hero values use shared body offsets and isolate invalid physics reads', () => {
+    const f = fixture();
+    let invalid = false;
+    f.context.heroPointer = { add(offset) { return {
+        readS32: () => offset,
+        readPointer: () => ({ toString: () => '0x5000', add(field) {
+            return { readFloat: () => invalid ? NaN : field };
+        } }),
+    }; } };
+    const values = vm.runInContext('heroValues(heroPointer)', f.context);
+    assert.equal(values.physics.XF_PX, 0x0C);
+    assert.equal(values.physics.XF_PY, 0x10);
+    assert.equal(values.physics.VX, 0x40);
+    assert.equal(values.physics.VY, 0x44);
+    assert.equal(values.direction, 0x9C);
+    assert.equal(values.read_error, undefined);
+    invalid = true;
+    assert.match(vm.runInContext('heroValues(heroPointer).read_error', f.context), /non-finite/);
 });
