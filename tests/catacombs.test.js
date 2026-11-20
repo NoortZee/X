@@ -912,3 +912,26 @@ test('attach observer refuses code signature mismatch without attaching hook',()
     assert.equal(f.rpc.status().attach_observer.status,'unavailable');assert.equal(attached,0);
     assert.match(f.rpc.status().attach_observer.error,/signature mismatch/);
 });
+
+test('no-fall cleanup does not clear spawn diagnostics or invalidate live attach observer status',()=>{
+    const f=fixture();
+    vm.runInContext(`attachObservationStatus={status:'listening',observed:1};
+        attachObservations=[{time:123}];spawnInspection={status:'captured'};
+        earlySpawnArray={state:'test'};restoreNoFall('level inactive');`,f.c);
+    assert.equal(f.rpc.status().attach_observer.status,'listening');
+    assert.equal(f.rpc.report().spawn_probe.status,'captured');
+    assert.equal(vm.runInContext('attachObservations.length',f.c),1);
+    assert.equal(vm.runInContext('earlySpawnArray.state',f.c),'test');
+    f.rpc.install();assert.equal(f.rpc.report().spawn_probe,null);
+    assert.equal(vm.runInContext('attachObservations.length',f.c),0);
+});
+test('registered parent is read as raw structure and corroborated against live physics world',()=>{
+    const f=spawnArrayFixture();
+    f.identity(0x6000,0x8600,0x9600,0xA600,'20EndlessMazeCandyBody');
+    for(const [p,v] of [[0x3198,0x6000],[0x6010,0x7000],[0x6020,0x8000],[0x7008,0x9000],[0x8058,0x9000]])f.memory.set(p,v);
+    f.c.candyTest=f.pointer(0x3000);
+    let r=vm.runInContext('inspectCandyParent(candyTest)',f.c);
+    assert.equal(r.parent,'0x7000');assert.equal(r.world_matches,true);
+    f.memory.set(0x7008,0x9990);r=vm.runInContext('inspectCandyParent(candyTest)',f.c);
+    assert.equal(r.world_matches,false);assert.equal(f.writes.length,0);
+});

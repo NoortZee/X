@@ -1,3 +1,9 @@
+## Без выпуска — исправить сброс attach-observer и проверить raw parent
+
+- Runtime-лог показал8 записанных входов, но null observer/no body_after. Диагностический reset перенесён из restoreNoFall в install; счётчик observer защищён от null. Cleanup высоты больше не стирает spawn evidence.
+- Candidate raw parent читается из Body+0x10, physics world сопоставляется parent+8 с physics+0x58; в snapshot и observer после возврата. Никаких методов raw parent не вызывается.
+- 85 Node mock-тестов, syntax/diff-check. Spawn пока выключен, рабочие режимы и обычная скорость без изменений. Rust/README не менялись.
+
 ## Без выпуска — Body factory и наблюдение реального attach
 
 - spawn-probe снимает текущий Candy vptr+0x308 и код кандидата register0x1725210; существующие root/array snapshots сохранены.

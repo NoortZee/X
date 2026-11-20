@@ -77,6 +77,7 @@ const MEMORY_LAYOUT = {
         fixture_probe: { enabled: true, fixture_head: 0x70, next: 0x8, owner: 0x10,
             category: 0x34, mask: 0x36, group: 0x38, limit: 8, candies: 3, symbols: 4 },
         spawn_probe: { expiry_ms: 5000, instructions: 256, attach_slot: 0x300, body_factory_slot: 0x308, attach_bytes: 768,
+            body_parent: 0x10, parent_world: 0x8,
             observe_attach: true, attach_rva: 0x15E9700, observation_limit: 8,
             attach_prefix: [0x55, 0x48, 0x89, 0xE5, 0x41, 0x56, 0x53, 0x48, 0x83, 0xEC, 0x10, 0x49, 0x89, 0xF6, 0x48, 0x89, 0xFB, 0x48, 0x8B, 0x07],
             array_name: '6ZArrayI12KTGameObjectE', refcount: 0x8, array_high: 0x20,

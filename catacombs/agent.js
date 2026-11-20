@@ -389,8 +389,6 @@ function restoreHeroMasks(reason) {
     event('hero_mask_restore', { result: maskTest });
 }
 function restoreNoFall(reason) {
-    pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
-    attachObservationStatus = null; attachObservations = [];
     pendingAltitude = null;
     if (!fallBackup) return;
     try {
@@ -928,6 +926,7 @@ function inspectSpawnArray(state) {
                 if (!key) throw new Error('body factory code budget exhausted');
                 return { vptr_byte_offset: S.body_factory_slot, target: address(target), candidate_only: true, code: methodCode.get(key) };
             }),
+            registered_parent: safe(() => inspectCandyParent(object)),
             attach_method: safe(() => {
                 const target = object.readPointer().add(S.attach_slot).readPointer();
                 const key = captureMethodCode(target, S.attach_bytes, S.instructions);
@@ -946,6 +945,19 @@ function captureEarlySpawnArray(state) {
     const array = inspectSpawnArray(state);
     if (array.sample_candy) earlySpawnArray = { time: Date.now(), state: state.toString(), array,
         warning: 'Historical evidence only; never reuse these object pointers for native calls.' };
+}
+function inspectCandyParent(object) {
+    requireClass(object, C.candy.name);
+    const body = object.add(C.object.body).readPointer(); requireClass(body, C.candy_body_probe.body_name);
+    const parent = body.add(C.spawn_probe.body_parent).readPointer();
+    if (parent.isNull()) throw new Error('null registered Body parent');
+    const physics = body.add(C.hero_body.physics).readPointer();
+    if (physics.isNull()) throw new Error('null Candy physics');
+    const world = physics.add(C.teleport_white.world).readPointer();
+    const parentWorld = parent.add(C.spawn_probe.parent_world).readPointer();
+    return { parent: parent.toString(), parent_world: parentWorld.toString(), physics_world: world.toString(),
+        world_matches: !world.isNull() && world.toString() === parentWorld.toString(),
+        note: 'Raw owner structure, not assumed to have RTTI/vtable; no methods invoked.' };
 }
 function installAttachObserver(m) {
     if (!C.spawn_probe.observe_attach) { attachObservationStatus = { status: 'disabled' }; return; }
@@ -966,6 +978,7 @@ function installAttachObserver(m) {
                 const id = identity(args[0]);
                 if (!id.rtti || id.rtti.name !== C.candy.name) return;
                 const record = { time: Date.now(), object: id, parent_argument: safe(() => identity(args[1])),
+                    parent_world_candidate: safe(() => args[1].add(S.parent_world).readPointer().toString()),
                     callsite_return: safe(() => address(this.returnAddress)),
                     parent_first_method: safe(() => {
                         const method = args[1].readPointer().readPointer();
@@ -973,7 +986,8 @@ function installAttachObserver(m) {
                         return { target: address(method), code: key ? methodCode.get(key) : null, candidate_only: true };
                     }) };
                 // Reserve one bounded record at entry, including nested calls.
-                attachObservations.push(record); attachObservationStatus.observed = attachObservations.length;
+                attachObservations.push(record);
+                if (attachObservationStatus) attachObservationStatus.observed = attachObservations.length;
                 this.capture = { object: args[0], record };
             },
             onLeave() {
@@ -987,6 +1001,7 @@ function installAttachObserver(m) {
                         requireClass(body, C.candy_body_probe.body_name);
                         const physics = body.add(C.hero_body.physics).readPointer();
                         out.physics = physics.toString();
+                        out.registered_parent = inspectCandyParent(object);
                         if (!physics.isNull()) out.physics_world = physics.add(C.teleport_white.world).readPointer().toString();
                     }
                     return out;
@@ -1058,6 +1073,8 @@ function status() { return { enabled, error, calls, samples, skipped, resolution
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
+    attachObservationStatus = null; attachObservations = [];
     pendingAltitude = null;
     if (!fallBackup) fallStatus = null;
     if (!speedBackup) speedTest = null;
