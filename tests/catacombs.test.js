@@ -17,6 +17,7 @@ function fixture(matches = 1, production = false, underground = false, autoRise 
         readPointer() { return new P(this.value()); }
         readU8() { return this.value(); }
         readS32() { return this.value(); }
+        readU64() { return { toString: () => String(this.value()) }; }
         readU16() { return this.value(); }
         readS16() { const n = this.value(); return n > 32767 ? n - 65536 : n; }
         readFloat() { return this.value(); }
@@ -793,7 +794,7 @@ test('shipped profile arms automatic 30-cell rise and sufficient timeout',()=>{
     assert.ok(config.timeout_ms>config.up/100/config.velocity*1000);
 });
 
-test('spawn probe is opt-in, queued read-only capture of three ASLR-relative candidates',()=>{
+test('spawn probe is opt-in, queued read-only capture of four ASLR-relative candidates',()=>{
     const f=fixture();
     assert.throws(()=>f.rpc.spawnProbe(),/active Catacombs/);
     f.rpc.install();f.tick();assert.equal(f.rpc.report().spawn_probe,null);
@@ -804,7 +805,7 @@ test('spawn probe is opt-in, queued read-only capture of three ASLR-relative can
     assert.throws(()=>f.rpc.spawnProbe(),/already queued/);
     f.leave();const r=f.rpc.report().spawn_probe;
     assert.equal(r.status,'captured');assert.equal(r.read_only,true);assert.equal(r.spawn_enabled,false);
-    assert.equal(r.abi_verified,false);assert.equal(Object.keys(r.candidates).length,3);
+    assert.equal(r.abi_verified,false);assert.equal(Object.keys(r.candidates).length,4);
     assert.equal(r.candidates.factory_candidate.target.rva,'0x15eea70');
     assert.equal(r.candidates.wrapper_candidate.target.rva,'0x15fb8a0');
     assert.equal(r.candidates.array_push_candidate.target.rva,'0x1092110');
@@ -823,4 +824,53 @@ test('spawn probe cancels on stop and refuses stale or inactive state before cod
         if(kind==='inactive')f.memory.set(0x1138,2);
         f.leave();assert.equal(f.rpc.report().spawn_probe.status,'failed');assert.equal(f.writes.length,0);
     }
+});
+
+function spawnArrayFixture() {
+    const f=fixture();
+    f.identity(0x2000,0x8500,0x9500,0xA500,'6ZArrayI12KTGameObjectE');
+    for(const [p,v] of [[0x2020,0],[0x2028,1],[0x2030,32],[0x2038,0],[0x3008,2],[0x8400,0x260000]])f.memory.set(p,v);
+    f.c.spawnState=f.pointer(0x1000);
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
+    f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
+    return f;
+}
+test('spawn array probe separates capacity, high index and live count and resolves current Candy attach slot',()=>{
+    const f=spawnArrayFixture();
+    const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
+    assert.equal(r.capacity,2);assert.equal(r.highest_index,0);assert.equal(r.live_counter,1);
+    assert.equal(r.observed_live,1);assert.equal(r.live_counter_matches,true);assert.equal(r.growth,32);
+    assert.equal(r.free_slots_sample.join(','),'1');assert.equal(r.candy_count,1);
+    assert.equal(r.sample_candy.refcount,2);assert.equal(r.sample_candy.attach_method.vptr_byte_offset,0x300);
+    assert.equal(r.sample_candy.attach_method.target.address,'0x260000');
+    assert.equal(r.sample_candy.attach_method.code.window_bytes,768);assert.equal(f.writes.length,0);
+});
+test('spawn array probe accepts empty allocated array and makes no append-index guess',()=>{
+    const f=spawnArrayFixture();f.memory.set(0x2800,0);f.memory.set(0x2020,-1);f.memory.set(0x2028,0);
+    const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
+    assert.equal(r.highest_index,-1);assert.equal(r.observed_live,0);assert.equal(r.sample_candy,null);
+    assert.match(r.note,/No live Candy/);assert.equal(r.free_slots_sample.length,2);assert.equal(f.writes.length,0);
+});
+test('spawn metadata rejects unsafe u64, oversized capacity and wrong RTTI',()=>{
+    for(const [address,value] of [[0x2018,'18446744073709551615'],[0x2018,1025],[0x2000,0]]) {
+        const f=spawnArrayFixture();f.memory.set(address,value);
+        assert.throws(()=>vm.runInContext('inspectSpawnArray(spawnState)',f.c));assert.equal(f.writes.length,0);
+    }
+});
+test('queued probe includes init and live array snapshot but report never rereads object pointers',()=>{
+    const f=spawnArrayFixture();f.rpc.install();f.tick();f.rpc.spawnProbe();f.leave();
+    const r=f.rpc.report().spawn_probe;
+    assert.equal(r.candidates.init_candidate.target.rva,'0x15e90d0');
+    assert.equal(r.candidates.init_candidate.code.window_bytes,1536);
+    assert.equal(r.array.sample_candy.attach_method.target.rva,'0x160000');
+    f.memory.clear();assert.equal(f.rpc.report().spawn_probe,r);assert.equal(f.writes.length,0);
+});
+test('early live Candy evidence survives collection without reusing historical pointers',()=>{
+    const f=spawnArrayFixture();f.rpc.install();f.tick();
+    f.memory.set(0x2800,0);f.memory.set(0x2028,0);
+    f.rpc.spawnProbe();f.leave();const r=f.rpc.report().spawn_probe;
+    assert.equal(r.array.sample_candy,null);
+    assert.equal(r.early_array.array.sample_candy.address,'0x3000');
+    assert.match(r.early_array.warning,/Historical evidence/);
+    assert.equal(f.writes.length,0);
 });
