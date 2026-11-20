@@ -4,41 +4,16 @@
 
 let MODULE_BASE = null;
 let MODULE_SIZE = 0;
-const MODULE_NAME = 'libthieves.so';
-
-const RIVAL_PARSE_AOB =
-'55 48 89 E5 41 57 41 56 41 55 41 54 53 48 81 EC 88 00 00 00 ' +
-'49 89 F6 49 89 FF 48 8D 47 08 48 89 45 B0 48 8D';
-
-const RIVAL_PARSE_FALLBACK = 0xF680D0;
-
-// ------------------------------------------------------------
-// Offsets — единственное место, где их править при обновлении игры
-// ------------------------------------------------------------
-const RIVAL_FIELDS = [
-    // [offset, tag, type]
-    [0x88, 'gold',         's32'],
-[0x8c, 'field4',       's32'],   // не используется
-[0x90, 'player_level', 's32'],
-[0x94, 'field16',      's32'],   // не используется
-[0x98, 'fraction',     'f32'],
-[0x9c, 'b6',           'u8'],
-[0xa0, 'field21',      's32'],   // не используется
-[0xa4, 'field22',      's32'],   // не используется
-];
-const RIVAL_N_ITEMS_OFF   = 0x20;  // count repeated field 13
-const RIVAL_ITEMS_PTR_OFF = 0x28;  // ptr repeated field 13
-
-const ITEM_FIELDS = {
-    // +0x18 — "rating" в терминах UI (крупное число, семантически id камня)
-    rating: 0x18,
-    slot:   0x1c,
-    flag:   0x20,
-    cnt:    0x24,
-};
-const ITEM_SIZE       = 0x28;
-const ITEM_STRIDE     = 8;
-const ITEM_FIRST_PTR  = 8;
+const MODULE_NAME = MEMORY_LAYOUT.module_name;
+const RIVAL_PARSE_AOB = MEMORY_LAYOUT.stones.parser_aob;
+const RIVAL_PARSE_FALLBACK = MEMORY_LAYOUT.stones.parser_fallback;
+const RIVAL_FIELDS = MEMORY_LAYOUT.stones.rival_fields;
+const RIVAL_N_ITEMS_OFF = MEMORY_LAYOUT.stones.rival_n_items;
+const RIVAL_ITEMS_PTR_OFF = MEMORY_LAYOUT.stones.rival_items_ptr;
+const ITEM_FIELDS = MEMORY_LAYOUT.stones.item_fields;
+const ITEM_SIZE = MEMORY_LAYOUT.stones.item_size;
+const ITEM_STRIDE = MEMORY_LAYOUT.stones.item_stride;
+const ITEM_FIRST_PTR = MEMORY_LAYOUT.stones.item_first_ptr;
 
 // ------------------------------------------------------------
 function _init() {
@@ -177,8 +152,8 @@ function _checkRivalSanity(snap) {
             type: 'rival_data_invalid',
             msg: 'все первые ' + SANITY_CHECK_FIRST_N +
             ' rival_update выглядят как мусор',
-            hint: 'Скорее всего устарели offsets (RIVAL_FIELDS/ITEM_FIELDS в ' +
-            'rival_hook.js) или AOB парсера. Запусти `stones debug` и ' +
+            hint: 'Скорее всего устарели offsets (rival_fields/item_fields в ' +
+            'memory/offsets.js) или AOB парсера. Запусти `stones debug` и ' +
             'посмотри raw_hex первого соперника.',
         });
     }

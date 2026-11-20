@@ -1,5 +1,6 @@
 mod config;
 mod frida_agent;
+mod memory;
 mod orchestrator;
 mod phantom;
 mod replay;
@@ -192,7 +193,7 @@ fn do_record(
         anchor
     );
     if out.body_frames.is_empty() {
-        eprintln!("WARN main: RECORD got 0 body_frames — проверьте pump_installed offset (должен быть 0x1612a20)");
+        eprintln!("WARN main: RECORD got 0 body_frames — проверьте pump_installed и memory/offsets.js (tas.fallback.FRAME_FUNC)");
     }
 }
 

@@ -360,7 +360,7 @@ fn load_hook_source(path: &Path) -> Result<String, StonesError> {
         .replace('\r', "\n")
         .replace(['\u{2028}', '\u{2029}'], "\n");
     src.retain(|c| !BAD_CHARS.contains(&c));
-    Ok(src)
+    Ok(crate::memory::prepend_layout(path, &src)?)
 }
 
 // ------------------------------------------------------------
