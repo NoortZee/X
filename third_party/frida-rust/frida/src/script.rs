@@ -339,9 +339,24 @@ impl<'a> Script<'a> {
 impl Exports<'_> {
     /// Run exported functions from a Frida script.
     pub fn call(&mut self, function_name: &str, args: Option<Value>) -> Result<Option<Value>> {
+        self.call_cancellable(function_name, args, std::time::Duration::from_secs(30), || false)
+    }
+
+    /// Run an RPC with a bounded, cancellable wait. Late replies are discarded by ID.
+    pub fn call_cancellable(
+        &mut self,
+        function_name: &str,
+        args: Option<Value>,
+        timeout: std::time::Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Option<Value>> {
+        if cancelled() {
+            return Err(Error::RpcJsError { message: "RPC cancelled".into() });
+        }
+        let request_id = self.inc_id();
         let json_req: String = {
             let name = "frida:rpc";
-            let id = self.inc_id();
+            let id = request_id;
             let rpc_type = "call";
 
             let args: String = match args {
@@ -362,7 +377,28 @@ impl Exports<'_> {
 
         let borrowed_callback_handler = self.callback_handler.borrow();
         let (_, rx) = &borrowed_callback_handler.channel;
-        let (rpc_result, _) = rx.recv().unwrap();
+        let deadline = std::time::Instant::now() + timeout;
+        let rpc_result = loop {
+            if cancelled() {
+                return Err(Error::RpcJsError { message: "RPC cancelled".into() });
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Error::RpcJsError { message: format!("RPC {function_name} timed out") });
+            }
+            match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(50))) {
+                Ok((Message::Send(reply), _)) => {
+                    if reply.payload.get(1).and_then(Value::as_u64) == Some(request_id as u64) {
+                        break Message::Send(reply);
+                    }
+                }
+                Ok(_) => return Err(Error::RpcUnexpectedMessage),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Error::RpcUnexpectedMessage);
+                }
+            }
+        };
 
         match rpc_result {
             Message::Send(r) => {
