@@ -521,6 +521,23 @@ function writableFloat(p) {
         Number(range.base.add(range.size).sub(p).toString()) < 4)
         throw new Error('position field not writable');
 }
+function float32Spacing(value) {
+    if (!Number.isFinite(value)) throw new Error('non-finite coordinate');
+    const n = Math.abs(value);
+    return n === 0 ? Math.pow(2, -149) : Math.pow(2, Math.max(-149, Math.floor(Math.log2(n)) - 23));
+}
+function physicsPositionCheck(target, readback) {
+    const scale = C.candy_body_probe.scale;
+    const tolerance = {}, error = {};
+    for (const axis of ['x', 'y']) {
+        if (!Number.isFinite(target[axis]) || !Number.isFinite(readback[axis])) throw new Error('non-finite physics readback');
+        // Object float -> physics float -> object units: allow two physics ULPs + one object ULP.
+        tolerance[axis] = C.teleport_white.tolerance +
+            2 * float32Spacing(target[axis] / scale) * scale + float32Spacing(target[axis]);
+        error[axis] = Math.abs(readback[axis] - target[axis]);
+    }
+    return { matches: error.x <= tolerance.x && error.y <= tolerance.y, error, tolerance };
+}
 function teleportCandy(selected, target, result) {
     const T = C.teleport_white;
     const body = selected.add(C.object.body).readPointer();
@@ -574,7 +591,8 @@ function teleportCandy(selected, target, result) {
     if (after.isNull()) throw new Error('rebuild returned with null physics body; stop experiment');
     result.physics_readback = { x: numberAt(after, MEMORY_LAYOUT.tas.body.XF_PX) * C.candy_body_probe.scale,
         y: numberAt(after, MEMORY_LAYOUT.tas.body.XF_PY) * C.candy_body_probe.scale };
-    if (Math.hypot(result.physics_readback.x - target.x, result.physics_readback.y - target.y) > T.tolerance)
+    result.position_check = physicsPositionCheck(target, result.physics_readback);
+    if (!result.position_check.matches)
         throw new Error('rebuilt physics position differs from target; do not retry');
 }
 function performMove(state) {
