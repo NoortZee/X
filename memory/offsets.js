@@ -76,7 +76,11 @@ const MEMORY_LAYOUT = {
         mask_test: { enabled: true, value: 4, category: 2, group: 0, allowed_masks: [65533, 1, 4] },
         fixture_probe: { enabled: true, fixture_head: 0x70, next: 0x8, owner: 0x10,
             category: 0x34, mask: 0x36, group: 0x38, limit: 8, candies: 3, symbols: 4 },
-        spawn_probe: { expiry_ms: 5000, instructions: 256, candidates: {
+        spawn_probe: { expiry_ms: 5000, instructions: 256, attach_slot: 0x300, attach_bytes: 768,
+            array_name: '6ZArrayI12KTGameObjectE', refcount: 0x8, array_high: 0x20,
+            array_live: 0x28, array_growth: 0x30, array_policy: 0x38, free_samples: 16,
+            candidates: {
+            init_candidate: { rva: 0x15E90D0, bytes: 1536 },
             factory_candidate: { rva: 0x15EEA70, bytes: 768 },
             wrapper_candidate: { rva: 0x15FB8A0, bytes: 384 },
             array_push_candidate: { rva: 0x1092110, bytes: 768 } } },

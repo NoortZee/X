@@ -1,3 +1,10 @@
+## Без выпуска — init/attach и метаданные массива для spawn-проверки
+
+- spawn-probe дополнен 0x15E90D0 и фактическим Candy vptr+0x300; код читается ограниченно, не вызывается.
+- Проверенный RTTI массива, безопасные u64 capacity/live/growth, signed highest index, policy, observed live/free slots и Candy refcount. Никаких append-index догадок или array/refcount записей.
+- Первый доступный live Candy snapshot на state сохраняется в sample до исчезновения предметов, выдаётся как исторический early_array только в spawn-probe. Из RPC старые указатели не разыменовываются.
+- 80 Node mock-тестов, syntax/diff-check. Реальный spawn всё ещё выключен; скорости/награды/работающие режимы не менялись. Rust/README без изменений.
+
 ## Без выпуска — обычная скорость и read-only spawn-probe
 
 - Множитель движения возвращён с 5 на 1 (~2.2); start/stop сохраняют прежнюю валидацию/восстановление. Остальные работающие режимы не менялись.

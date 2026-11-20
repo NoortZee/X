@@ -17,6 +17,7 @@ let speedTest = null, speedBackup = null;
 let fallStatus = null, fallBackup = null;
 let pendingAltitude = null;
 let pendingSpawnProbe = null, spawnInspection = null;
+let earlySpawnArray = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -387,7 +388,7 @@ function restoreHeroMasks(reason) {
     event('hero_mask_restore', { result: maskTest });
 }
 function restoreNoFall(reason) {
-    pendingSpawnProbe = null; spawnInspection = null;
+    pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
     pendingAltitude = null;
     if (!fallBackup) return;
     try {
@@ -575,6 +576,7 @@ function sample(state) {
     if (!C.diagnostics) {
         if (lastTime !== null && Date.now() - lastTime < C.limits.sample_ms) { skipped++; return; }
         lastTime = Date.now(); samples++;
+        safe(() => captureEarlySpawnArray(state));
         safe(() => captureFixtureReport(state));
         latest = { time: lastTime, state: { address: state.toString() },
             phase_raw: safe(() => state.add(C.state.phase).readS32()),
@@ -585,6 +587,7 @@ function sample(state) {
     const key = state.toString();
     if (lastTime !== null && now - lastTime < C.limits.sample_ms) { skipped++; return; }
     lastTime = now;
+    safe(() => captureEarlySpawnArray(state));
     safe(() => captureFixtureReport(state));
     captureLifecycleCandidates();
     const snap = { time: now, state: identity(state),
@@ -883,6 +886,59 @@ function autoTeleport(state) {
         error = String(e); event('auto_teleport_error', { error });
     }
 }
+function safeU64(pointer) {
+    const value = Number(pointer.readU64().toString());
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error('uint64 outside safe integer range');
+    return value;
+}
+function inspectSpawnArray(state) {
+    const S = C.spawn_probe;
+    const array = state.add(C.state.objects).readPointer(); requireClass(array, S.array_name);
+    const result = { array: address(array), candidate_layout: true,
+        semantics: 'allocated slots and indexed assignment; not an append count' };
+    result.capacity = safeU64(array.add(C.array.slots));
+    result.highest_index = safe(() => array.add(S.array_high).readS32());
+    result.live_counter = safe(() => safeU64(array.add(S.array_live)));
+    result.growth = safe(() => safeU64(array.add(S.array_growth)));
+    result.policy = safe(() => array.add(S.array_policy).readU8());
+    if (result.capacity > C.limits.slots) throw new Error('spawn array capacity exceeds scan limit');
+    const data = array.add(C.array.data).readPointer();
+    if (result.capacity && data.isNull()) throw new Error('null spawn array data');
+    result.data = data.toString(); result.observed_live = 0; result.free_slots_sample = [];
+    result.candy_count = 0; result.sample_candy = null;
+    for (let i = 0; i < result.capacity; i++) {
+        const object = data.add(i * Process.pointerSize).readPointer();
+        if (object.isNull()) {
+            if (result.free_slots_sample.length < S.free_samples) result.free_slots_sample.push(i);
+            continue;
+        }
+        result.observed_live++;
+        const id = identity(object);
+        if (!id.rtti || id.rtti.name !== C.candy.name) continue;
+        result.candy_count++;
+        if (result.sample_candy) continue;
+        result.sample_candy = { slot: i, ...id, position: position(object),
+            rarity: safe(() => object.add(C.candy.rarity).readS32()),
+            refcount: safe(() => object.add(S.refcount).readS32()), body: link(object, C.object.body),
+            attach_method: safe(() => {
+                const target = object.readPointer().add(S.attach_slot).readPointer();
+                const key = captureMethodCode(target, S.attach_bytes, S.instructions);
+                if (!key) throw new Error('attach code capture budget exhausted');
+                return { vptr_byte_offset: S.attach_slot, target: address(target), candidate_only: true, code: methodCode.get(key) };
+            }) };
+    }
+    result.live_counter_matches = typeof result.live_counter === 'number' ? result.live_counter === result.observed_live : null;
+    result.note = result.sample_candy ? 'No attach or array mutation performed; refcount ownership still needs analysis.' :
+        'No live Candy at probe time; rerun in a new level while objects are present.';
+    return result;
+}
+function captureEarlySpawnArray(state) {
+    if (state.add(C.state.phase).readS32() !== 1) return;
+    if (earlySpawnArray && earlySpawnArray.state === state.toString()) return;
+    const array = inspectSpawnArray(state);
+    if (array.sample_candy) earlySpawnArray = { time: Date.now(), state: state.toString(), array,
+        warning: 'Historical evidence only; never reuse these object pointers for native calls.' };
+}
 function requestSpawnProbe() {
     if (!enabled || !latest || latest.phase_raw !== 1) throw new Error('start module and enter active Catacombs first');
     if (Date.now() - latest.time > C.spawn_probe.expiry_ms) throw new Error('state snapshot stale');
@@ -913,6 +969,8 @@ function performSpawnProbe(state) {
                 return { target: address(target), candidate_only: true, code: methodCode.get(key) };
             });
         }
+        spawnInspection.array = safe(() => inspectSpawnArray(state));
+        spawnInspection.early_array = earlySpawnArray && earlySpawnArray.state === state.toString() ? earlySpawnArray : null;
         spawnInspection.status = 'captured'; // Code records may individually contain read/decode errors.
     } catch (e) { spawnInspection.status = 'failed'; spawnInspection.error = String(e); }
     event('spawn_probe_result', { status: spawnInspection.status, error: spawnInspection.error });
