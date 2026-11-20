@@ -75,3 +75,30 @@ test('runtime failure leaves callbacks inert until explicitly restarted', () => 
     assert.equal(f.rpc.report().events.length, before);
     assert.equal(f.rpc.install().enabled, true);
 });
+
+test('replay_update signature matches supplied file and runtime bytes, including rel32 wildcards', () => {
+    const context = vm.createContext({});
+    vm.runInContext(fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8'), context);
+    const pattern = vm.runInContext('MEMORY_LAYOUT.catacombs.signatures.replay_update', context)
+        .split(/\s+/);
+    // User-supplied runtime dump at module_base + 0x13EF310; also matches file .text.
+    const dump = (
+        '55 48 89 e5 41 57 41 56 41 55 41 54 53 48 83 ec 18 ' +
+        '48 89 fb e8 97 9f 00 00 48 8b bb 60 01 00 00 ' +
+        '48 8b 07 ff 90 e8 00 00 00 4c 8b bb 38 01 00 00 ' +
+        '41 8b 4f 20 85 c9 0f 88 80 00 00 00 49 c7 c4 ff ' +
+        'ff ff ff eb 3b 66 66 2e 0f 1f 84 00 00 00 00 00 ' +
+        'e8 ab 75 b3 00 48 89 c7 4c 89 f6 e8 b0 75 b3 00');
+    const bytes = Buffer.from(dump.replace(/\s+/g, ''), 'hex');
+    function matches(bytes) {
+        return bytes.length >= pattern.length && pattern.every((token, i) =>
+            token === '??' || parseInt(token, 16) === bytes[i]);
+    }
+    assert.equal(matches(bytes), true);
+    const relocatedCall = Buffer.from(bytes);
+    relocatedCall.fill(0xAA, 21, 25);
+    assert.equal(matches(relocatedCall), true);
+    const oldWrongInstruction = Buffer.from(bytes);
+    oldWrongInstruction[27] = 0x83;
+    assert.equal(matches(oldWrongInstruction), false);
+});

@@ -67,7 +67,7 @@ const MEMORY_LAYOUT = {
     catacombs: {
         // Candidate profile supplied by static analysis, not runtime verified.
         signatures: {
-            replay_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB E8 ?? ?? ?? ?? 48 8B 83 60 01 00 00',
+            replay_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB E8 ?? ?? ?? ?? 48 8B BB 60 01 00 00',
             skull_spawn: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 F3 0F 11 45 D4 48 89 FB E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B B3 B8 00 00 00 48 89 C7 F3 0F 10 45 D4',
             skull_commit: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 41 89 F6 48 89 FB 48 8B 87 08 01 00 00 48 85 C0 75 1B',
             collect_request: '55 48 89 E5 41 57 41 56 41 54 53 48 81 EC B0 04 00 00 41 89 D7 48 89 F3 49 89 FE 48 8D BD 30 FB FF FF E8 ?? ?? ?? ?? BF 20 00 00 00',
