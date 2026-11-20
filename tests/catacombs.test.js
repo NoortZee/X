@@ -32,7 +32,7 @@ function fixture(matches = 1, production = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -98,7 +98,7 @@ test('report never dereferences a retained pointer', () => {
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 10);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 12);
     assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
@@ -454,8 +454,8 @@ test('auto handles multiple Candy objects across updates, not one session-only t
     assert.throws(()=>f.rpc.teleportWhite(),/automatic teleport enabled/);
 });
 
-function wallFixture(count = 1, mismatch = false) {
-    const f = fixture();
+function wallFixture(count = 1, mismatch = false, production = false) {
+    const f = fixture(1, production);
     const mod=f.c.Process.findModuleByName();
     mod.enumerateRanges=()=>[{base:f.pointer(0x200000),size:0x100000}];
     f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x200000),size:0x100000,protection:'rw-'});
@@ -615,4 +615,38 @@ test('mask partial failure attempts restoration without retrying application',()
     f.leave();assert.equal(f.rpc.status().hero_mask_test.status,'restored');
     assert.equal(f.memory.get(0x21036),65533);assert.equal(f.memory.get(0x21136),65533);
     const count=f.writes.length;f.leave();assert.equal(f.writes.length,count);
+});
+
+test('speed multiplier changes only unique config speed by x5 and restores original',()=>{
+    const f=wallFixture(1,false,true);
+    vm.runInContext('applySpeed(wallTestState)',f.c);
+    const r=f.rpc.status().speed_test;
+    assert.equal(r.status,'applied');assert.equal(r.multiplier,5);
+    assert.ok(Math.abs(f.memory.get(0x250008)-11)<0.0001);
+    assert.equal(f.memory.get(0x250000),26.67499923706);
+    assert.equal(f.writes.length,1);
+    vm.runInContext('applySpeed(wallTestState)',f.c);assert.equal(f.writes.length,1);
+    f.rpc.stop();assert.equal(f.memory.get(0x250008),2.20000004768);
+    assert.equal(f.rpc.status().speed_test.status,'restored');
+});
+test('speed config search refuses missing, ambiguous or bad required neighbours',()=>{
+    for(const [count,mismatch] of [[0,false],[2,false],[1,true]]) {
+        const f=wallFixture(count,mismatch,true);vm.runInContext('applySpeed(wallTestState)',f.c);
+        assert.equal(f.rpc.status().speed_test.status,'unavailable');assert.equal(f.writes.length,0);
+    }
+});
+test('speed restores on inactive phase and rearms next level, not during pause',()=>{
+    const f=wallFixture(1,false,true);f.memory.set(0x1088,1);
+    vm.runInContext('applySpeed(wallTestState)',f.c);assert.equal(f.writes.length,0);
+    f.memory.set(0x1088,0);vm.runInContext('applySpeed(wallTestState)',f.c);
+    f.memory.set(0x1138,2);vm.runInContext('applySpeed(wallTestState)',f.c);
+    assert.equal(f.rpc.status().speed_test.status,'restored');
+    assert.equal(f.memory.get(0x250008),2.20000004768);
+    f.memory.set(0x1138,1);vm.runInContext('applySpeed(wallTestState)',f.c);
+    assert.equal(f.rpc.status().speed_test.status,'applied');
+});
+test('speed restore does not overwrite external modifications',()=>{
+    const f=wallFixture(1,false,true);vm.runInContext('applySpeed(wallTestState)',f.c);
+    f.memory.set(0x250008,7);f.rpc.stop();
+    assert.equal(f.memory.get(0x250008),7);assert.equal(f.rpc.status().speed_test.status,'restore_failed');
 });
