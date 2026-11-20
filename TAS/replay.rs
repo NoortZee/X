@@ -190,9 +190,31 @@ fn contains_loop(ops: &[Op]) -> bool {
     ops.iter().any(|op| matches!(op, Op::Loop(_, _)))
 }
 
+// The editable frame script ends at its closing delimiter, never at JSON EOF.
+// Legacy delimiter-free scripts are supported, but must stop before a JSON body.
+fn frame_script_text(text: &str) -> &str {
+    let mut start = 0;
+    let mut offset = 0;
+    let mut opened = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim().trim_start_matches('\u{feff}');
+        if trimmed == "\"\"\"" {
+            if opened {
+                return &text[start..offset];
+            }
+            opened = true;
+            start = offset + line.len();
+        } else if trimmed.starts_with('{') && parse_frame_value(trimmed).is_none() {
+            return &text[start..offset];
+        }
+        offset += line.len();
+    }
+    &text[start..]
+}
+
 fn parse_header_map(text: &str) -> HashMap<String, String> {
     let mut header = HashMap::new();
-    for raw in text.lines() {
+    for raw in frame_script_text(text).lines() {
         let s = strip_line_comment(raw);
         if s.is_empty() || s.starts_with("\"\"\"") {
             continue;
@@ -209,7 +231,7 @@ fn recover_from_header_frames(text: &str) -> Option<Replay> {
     let mut root: Vec<Op> = Vec::new();
     let mut active_loops: Vec<(usize, Vec<Op>)> = Vec::new();
 
-    for raw in text.lines() {
+    for raw in frame_script_text(text).lines() {
         let s = strip_line_comment(raw);
         if s.is_empty() {
             continue;
@@ -344,7 +366,7 @@ fn extract_json_body(text: &str) -> Option<Replay> {
     while let Some(rel) = text[search_from..].find('{') {
         let start = search_from + rel;
         let slice = text[start..].trim();
-        let head = &slice[..slice.len().min(64)];
+        let head: String = slice.chars().take(64).collect();
         if head.contains("\"version\"") {
             if let Ok(r) = serde_json::from_str::<Replay>(slice) {
                 return Some(r);
@@ -625,4 +647,64 @@ loop 2 {
         assert_eq!(jumps, vec![11, 16, 21, 31, 36, 41]);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn saved_replay_roundtrip_never_reads_json_numbers_as_jumps() {
+        let path = std::env::temp_dir().join(format!(
+            "kot_tas_roundtrip_{}_{}.json", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut events = vec![ReplayEvent {
+            frame: 1, name: "first_hero_update".into(), snap: empty_obj(), extra: BTreeMap::new(),
+        }];
+        for i in 0..13 {
+            events.push(ReplayEvent {
+                frame: 24 + i * 30, name: "jump".into(), snap: empty_obj(), extra: BTreeMap::new(),
+            });
+        }
+        let original = Replay {
+            version: 3, anchor_frame: Some(1), anchor_kind: Some("first_hero_update".into()),
+            events, body_frames: vec![serde_json::json!({"frame": 1, "px": 2.5})],
+            timeline_ns: vec![serde_json::json!([5, 1_130_000_000i64])], ..Default::default()
+        };
+        save_replay_atomic(&path, &original, 60.0, 1).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        let recovered = recover_from_header_frames(&text).unwrap();
+        assert_eq!(recovered.recovered_jumps, 13);
+        let loaded = load_replay(&path);
+        assert!(!loaded.recovered);
+        assert_eq!(loaded.events, original.events);
+        assert_eq!(loaded.body_frames, original.body_frames);
+        assert_eq!(loaded.timeline_ns, original.timeline_ns);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn json_only_is_not_a_frame_script() {
+        let text = "{\n  \"version\": 3,\n  \"timeline_ns\": [[1, 999999999]],\n  \"events\": []\n}";
+        assert!(frame_script_text(text).is_empty());
+        assert!(parse_header_map(text).is_empty());
+        assert!(recover_from_header_frames(text).is_none());
+    }
+
+    #[test]
+    fn legacy_and_unclosed_scripts_stop_at_json_body() {
+        let header = "jumps: 2\nanchor: first_hero_update@1\ndelta: true\n+20\n+30\n";
+        let body = "{\n\"version\": 3,\n\"timeline_ns\": [\n999999999\n]\n}\n";
+        for prefix in ["", "\"\"\"\n"] {
+            let text = format!("{prefix}{header}{body}");
+            let replay = recover_from_header_frames(&text).unwrap();
+            let frames: Vec<_> = replay.events.iter().filter(|e| e.name == "jump").map(|e| e.frame).collect();
+            assert_eq!(frames, vec![21, 51]);
+        }
+    }
+
+    #[test]
+    fn delimiter_boundary_preserves_nested_loops_and_frame_objects() {
+        let text = "\u{feff}\"\"\"\r\nanchor: first_hero_update@1\r\ndelta: true\r\nloop 2 {\r\n{\"frame\": 5}\r\n}\r\n  \"\"\"  \r\n{\n\"mode\": \"comment\",\n\"timeline_ns\": [\n999999999\n]\n}";
+        let replay = recover_from_header_frames(text).unwrap();
+        assert_eq!(replay.recovered_jumps, 2);
+        assert!(!parse_header_map(text).contains_key("mode"));
+    }
+
 }
