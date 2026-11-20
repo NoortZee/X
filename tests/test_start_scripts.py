@@ -41,9 +41,18 @@ elif name == 'adb':
     if 'su -c id' in command: print('uid=0(root)')
     if '--version' in command: print(os.environ.get('SERVER_VERSION', '17.16.4'))
 elif name == 'python':
+    print('health check: ' + args[-1])
     sys.stdin.read()
     if os.environ.get('FAIL_HEALTH'): sys.exit(1)
 elif name == 'kot-tas':
+    if os.environ.get('RESTRICT_LOGS'):
+        sessions = pathlib.Path(os.environ['XDG_DATA_HOME']) / 'kot-tas/sessions'
+        for session in sessions.glob('session.*'):
+            for name in ('watch.log', 'health.log'):
+                path = session / name
+                path.touch(exist_ok=True)
+                path.chmod(0o400)
+            session.chmod(0o500)
     time.sleep(float(os.environ.get('APP_SLEEP', '0.08')))
     sys.exit(int(os.environ.get('APP_EXIT', '0')))
 '''.replace('PYTHON', sys.executable, 1)
@@ -254,6 +263,24 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_cleanup()
         self.assertTrue(any(c[0] == 'kot-tas' for c in self.commands()))
+
+    def test_restricted_log_permissions_do_not_stop_healthy_tas(self):
+        # Reproduce an unwritable watch.log/directory after TAS has already started.
+        sessions = self.root / 'data/kot-tas/sessions'
+        try:
+            result = self.run_launcher(RESTRICT_LOGS='1', APP_SLEEP='1.2')
+        finally:
+            if sessions.exists():
+                for session in sessions.iterdir():
+                    session.chmod(0o700)
+                    for path in session.iterdir():
+                        path.chmod(0o600)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('Stopping TAS', result.stderr)
+        self.assertNotIn('Permission denied', result.stderr)
+        self.assert_cleanup()
+        log = next(sessions.glob('session.*/health.log')).read_text()
+        self.assertGreaterEqual(log.count('health check: monitor'), 2)
 
     def test_separate_server_windows_and_persistent_logs(self):
         result = self.run_launcher()
