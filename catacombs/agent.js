@@ -6,6 +6,7 @@ let calls = 0, samples = 0, skipped = 0, lastTime = null, latest = null;
 let history = [], events = [], previous = new Map(), previousState = null;
 let resolution = null;
 let methodCode = new Map();
+let lifecycleCode = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0;
 function event(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
@@ -120,6 +121,11 @@ function candyPhysicsProbe(object) {
         out.fields = {};
         for (const k of ['XF_PX', 'XF_PY', 'VX', 'VY', 'SW_A', 'AV', 'GRAVITY'])
             out.fields[k] = numberAt(physics, B[k]);
+        out.extra_candidates = {};
+        for (const [key, offset] of Object.entries(C.physics_extra))
+            out.extra_candidates[key] = safe(() => key === 'world_candidate'
+                ? { address: physics.add(offset).readPointer().toString() }
+                : numberAt(physics, offset));
         out.object_position = position(object);
         out.position_matches = Math.abs(out.fields.XF_PX * C.candy_body_probe.scale - out.object_position.x) < C.candy_body_probe.tolerance &&
             Math.abs(out.fields.XF_PY * C.candy_body_probe.scale - out.object_position.y) < C.candy_body_probe.tolerance;
@@ -141,6 +147,37 @@ function bodyCallProbe(body) {
             calls.push({ callsite: ins.address, target: address(target), code_key: captureMethodCode(target) });
         }
         return { candidate_only: true, handler: key, calls };
+    });
+}
+function captureLifecycleCandidates() {
+    if (lifecycleCode !== null) return;
+    lifecycleCode = safe(() => {
+        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+        if (!m) throw new Error('game module not loaded');
+        const records = {};
+        // Capture all three roots first so optional callees cannot exhaust their budget.
+        for (const [role, rva] of Object.entries(C.lifecycle_probe.candidates)) {
+            if (!Number.isSafeInteger(rva) || rva < 0 || rva >= m.size) {
+                records[role] = { error: 'candidate RVA outside game module' }; continue;
+            }
+            const target = m.base.add(rva);
+            records[role] = { candidate_only: true, target: address(target),
+                code_key: captureMethodCode(target), calls: [] };
+        }
+        let budget = C.lifecycle_probe.direct_calls;
+        for (const record of Object.values(records)) {
+            const code = methodCode.get(record.code_key);
+            for (const ins of (code && code.instructions) || []) {
+                if (budget <= 0) break;
+                if (ins.mnemonic !== 'call' || !/^0x[0-9a-f]+$/i.test(ins.operands)) continue;
+                const delta = Number(ins.operands) - Number(m.base.toString());
+                if (!Number.isSafeInteger(delta) || delta < 0 || delta >= m.size) continue;
+                const target = m.base.add(delta);
+                record.calls.push({ callsite: ins.address, target: address(target), code_key: captureMethodCode(target) });
+                budget--;
+            }
+        }
+        return records;
     });
 }
 function candySnapshot(p, id) {
@@ -211,6 +248,7 @@ function sample(state) {
     const key = state.toString();
     if (lastTime !== null && now - lastTime < C.limits.sample_ms) { skipped++; return; }
     lastTime = now;
+    captureLifecycleCandidates();
     const snap = { time: now, state: identity(state),
         phase_raw: safe(() => state.add(C.state.phase).readS32()),
         paused_raw: safe(() => state.add(C.state.paused).readU8()),
@@ -323,7 +361,7 @@ function status() { return { enabled, error, calls, samples, skipped, resolution
 function install() {
     if (enabled) return status();
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
-    history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map();
+    history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
     pendingMove = null; lastMove = null; movesExecuted = 0;
     try {
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
@@ -354,5 +392,5 @@ rpc.exports = {
         metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
-        method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
+        lifecycle_candidates: lifecycleCode, method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
 };

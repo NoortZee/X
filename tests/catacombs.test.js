@@ -269,3 +269,31 @@ test('Body call probe follows only bounded direct calls, never indirect calls', 
     assert.equal(result.calls[0].target.address, '0x210000');
     assert.equal(f.writes.length, 0);
 });
+
+test('lifecycle candidates are ASLR-relative, cached, and never invoked', () => {
+    const f = fixture();
+    assert.equal(f.rpc.report().lifecycle_candidates, null);
+    f.rpc.install(); f.tick();
+    const roots = f.rpc.report().lifecycle_candidates;
+    assert.equal(roots.position_wrapper_candidate.target.rva, '0x1618980');
+    assert.equal(roots.destroy_candidate.target.address, '0x1715cb0');
+    assert.equal(roots.create_candidate.target.rva, '0x1617de0');
+    assert.ok(f.rpc.report().method_code[roots.create_candidate.code_key].error);
+    f.memory.clear();
+    assert.equal(f.rpc.report().lifecycle_candidates, roots);
+    assert.equal(f.writes.length, 0);
+});
+test('physics sweep candidates do not replace the validated transform coordinates', () => {
+    const f = fixture();
+    f.identity(0x6000, 0x8300, 0x9300, 0xA300, '20EndlessMazeCandyBody');
+    for (const [p,v] of [[0x3198,0x6000],[0x6020,0x7000],[0x7000,0],
+        [0x700C,0.12],[0x7010,0.06],[0x7040,0],[0x7044,0],[0x7038,0],
+        [0x7048,0],[0x70A8,1],[0x7028,123],[0x702C,456],[0x7058,0xA000]]) f.memory.set(p,v);
+    f.c.Process.findRangeByAddress = () => ({base:f.pointer(0),size:0x4000000,protection:'rw-'});
+    f.rpc.install(); f.tick();
+    const physics = f.rpc.report().latest.object_graph.candies[0].physics_candidate;
+    assert.equal(physics.position_matches, true);
+    assert.equal(physics.extra_candidates.sweep_x_candidate,123);
+    assert.equal(physics.extra_candidates.world_candidate.address,'0xa000');
+    assert.equal(f.writes.length,0);
+});
