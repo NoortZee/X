@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Ubuntu/Debian + existing, initialized Waydroid. Run as the desktop user, not root.
+# CachyOS/Arch or Ubuntu/Debian + existing, initialized Waydroid. Run as the desktop user, not root.
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/kot-tas"
@@ -9,21 +9,43 @@ trap 'printf "Installation failed at line %s. TAS was not started.\n" "$LINENO" 
 if [[ "${1:-}" == --help ]]; then
     echo 'Usage: start/install.sh'
     echo 'Installs build dependencies, Rust, Android SDK, modified Phantom server and modified Frida.'
-    echo 'Requires Ubuntu/Debian, sudo, initialized Waydroid, internet and ~5 GB disk space.'
+    echo 'Requires CachyOS/Arch or Ubuntu/Debian, sudo, initialized Waydroid, internet and ~5 GB disk space.'
     printf 'Artifacts: %s; existing config.yaml is preserved.\n' "$DATA"
     exit 0
 fi
 [[ $# == 0 ]] || fail 'Unknown arguments; use --help.'
 [[ $EUID != 0 ]] || fail 'Run without sudo: the script requests sudo only when needed.'
 [[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || fail 'TAS currently supports Linux / Android x86_64 only.'
-command -v apt-get >/dev/null || fail 'Automatic dependency installation requires Ubuntu/Debian (apt-get).'
+if command -v pacman >/dev/null; then
+    PACKAGE_MANAGER=pacman
+elif command -v apt-get >/dev/null; then
+    PACKAGE_MANAGER=apt-get
+else
+    fail 'Supported distributions: CachyOS/Arch (pacman), Ubuntu/Debian (apt-get).'
+fi
 command -v sudo >/dev/null || fail 'Install sudo first.'
 command -v waydroid >/dev/null || fail 'Install and initialize Waydroid first (distribution-specific setup).'
 sudo -v
-sudo apt-get update
-sudo apt-get install -y adb build-essential pkg-config libclang-dev clang libssl-dev \
-    git curl ca-certificates unzip xz-utils python3 python3-venv python3-yaml \
-    openjdk-17-jdk-headless util-linux procps shellcheck
+case "$PACKAGE_MANAGER" in
+    pacman)
+        echo 'Installing CachyOS/Arch dependencies (full system upgrade: pacman -Syu).'
+        # Never use -Sy without -u: partial upgrades are unsupported on Arch-based systems.
+        sudo pacman -Syu --needed --noconfirm android-tools base-devel pkgconf clang llvm openssl \
+            git curl ca-certificates unzip xz python python-pip python-yaml \
+            jdk17-openjdk util-linux procps-ng shellcheck
+        export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+        ;;
+    apt-get)
+        sudo apt-get update
+        sudo apt-get install -y adb build-essential pkg-config libclang-dev clang libssl-dev \
+            git curl ca-certificates unzip xz-utils python3 python3-venv python3-yaml \
+            openjdk-17-jdk-headless util-linux procps shellcheck
+        export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+        ;;
+esac
+# Use the installed JDK for SDK tools and javac without changing the system Java default.
+export PATH="$JAVA_HOME/bin:$PATH"
+[[ -x "$JAVA_HOME/bin/java" && -x "$JAVA_HOME/bin/javac" ]] || fail "JDK 17 is missing in $JAVA_HOME."
 mkdir -p "$DATA/bin" "$DATA/src" "$DATA/downloads"
 # Serializes installation against another installer or running TAS session.
 exec 9>"$DATA/session.lock"

@@ -59,6 +59,79 @@ class ScriptSyntaxTests(unittest.TestCase):
                 ast.parse(part.split('\nPY\n', 1)[0], filename=str(path))
 
 
+@unittest.skipIf(os.geteuid() == 0, 'Installer intentionally refuses root')
+class InstallerDependencyTests(unittest.TestCase):
+    """Execute the real dependency-selection prefix, with an isolated mock PATH."""
+
+    def run_dependencies(self, managers, fail_install=False):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            log = root / 'commands.jsonl'
+            mock = "#!" + sys.executable + "\n" + r'''
+import json, os, pathlib, sys
+name = pathlib.Path(sys.argv[0]).name
+if name == 'uname':
+    print('Linux' if sys.argv[1] == '-s' else 'x86_64')
+elif name == 'sudo':
+    with open(os.environ['MOCK_LOG'], 'a') as f:
+        f.write(json.dumps(sys.argv[1:]) + '\n')
+    if os.environ.get('FAIL_INSTALL') and sys.argv[1] != '-v':
+        sys.exit(42)
+'''
+            for name in ('uname', 'sudo', 'waydroid', *managers):
+                path = bin_dir / name
+                path.write_text(mock)
+                path.chmod(0o755)
+            (bin_dir / 'dirname').symlink_to(shutil.which('dirname'))
+            script = root / 'install.sh'
+            prefix = (ROOT / 'start/install.sh').read_text().split('# Use the installed JDK', 1)[0]
+            script.write_text(prefix + 'printf "JAVA_HOME=%s\\n" "$JAVA_HOME"\n')
+            result = subprocess.run([shutil.which('bash'), script], capture_output=True, text=True,
+                                    env={**os.environ, 'PATH': str(bin_dir), 'HOME': str(root),
+                                         'MOCK_LOG': str(log), 'FAIL_INSTALL': '1' if fail_install else ''})
+            commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            return result, commands
+
+    def test_cachyos_pacman_dependencies(self):
+        result, commands = self.run_dependencies(('pacman',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        install = commands[-1]
+        self.assertEqual(install[:4], ['pacman', '-Syu', '--needed', '--noconfirm'])
+        for package in ('android-tools', 'base-devel', 'pkgconf', 'clang', 'llvm', 'openssl',
+                        'python', 'python-pip', 'python-yaml', 'jdk17-openjdk', 'procps-ng'):
+            self.assertIn(package, install)
+        self.assertNotIn('python3-venv', install)
+        self.assertIn('JAVA_HOME=/usr/lib/jvm/java-17-openjdk', result.stdout)
+
+    def test_debian_apt_dependencies_preserved(self):
+        result, commands = self.run_dependencies(('apt-get',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(commands[1], ['apt-get', 'update'])
+        self.assertEqual(commands[2][:3], ['apt-get', 'install', '-y'])
+        self.assertIn('python3-venv', commands[2])
+        self.assertIn('openjdk-17-jdk-headless', commands[2])
+        self.assertIn('JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64', result.stdout)
+
+    def test_pacman_preferred_if_both_commands_exist(self):
+        result, commands = self.run_dependencies(('pacman', 'apt-get'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(c[0] == 'apt-get' for c in commands))
+
+    def test_unsupported_manager_fails_without_sudo(self):
+        result, commands = self.run_dependencies(())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Supported distributions', result.stderr)
+        self.assertEqual(commands, [])
+
+    def test_package_failure_stops_installation(self):
+        result, commands = self.run_dependencies(('pacman',), fail_install=True)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(len(commands), 2)
+        self.assertNotIn('JAVA_HOME=', result.stdout)
+
+
 @unittest.skipIf(os.geteuid() == 0, 'Launcher intentionally refuses root')
 class LauncherTests(unittest.TestCase):
     def setUp(self):
