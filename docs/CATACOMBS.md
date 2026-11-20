@@ -326,3 +326,22 @@ Readback теперь проверяется отдельно по X/Y с доп
 В sample_candy.registered_parent теперь читаются Body+0x10, parent+8 и physics+0x58, сравниваются world_matches; все чтения кандидатные/guarded, без вызова методов raw parent. В observer также сохраняется parent_world_candidate и registered_parent после возврата. Старые поля RTTI/parent-first-method сохранены как candidate/ошибки, но не считаются правильным способом вызвать raw parent.
 
 Нужен свежий старт модуля до нового уровня, затем spawn-probe/dump. Rust пересобирать не нужно. Spawn и бесконечный цикл по-прежнему не включены. Рабочие режимы не изменялись; обычная скорость сохраняется.
+
+## Первый native spawn: одна команда spawn-gold
+
+В report-1795217265640192434 observer=listening/8, body_after присутствует и raw parent+8 совпадает с physics+0x58. Это подтверждает зарегистрированный world-путь у наблюдавшихся Candy, но не готовый безопасный бесконечный цикл.
+
+Добавлена `catacombs spawn-gold`, **требуется cargo build --release** и перезапуск TAS. По RPC только ставится state-bound запрос со сроком5с; одна native-попытка на install, без автоматического retry. На следующем update onLeave после свежих Hero/state/active/unpaused/owner-chain/lock checks разрешается raw parent из текущего HeroBody+0x10 и проверяется его +8 против Hero physics world. Старые parent из диагностических отчётов не используются. Если generic Hero owner не подтверждён на текущем теле — отказ до вызовов.
+
+Проверяются точные первые64байта factory0x15EEA70, attach0x15E9700, bodyfactory0x15EEED0, array-set0x1092110, register0x1725210 по runtime-дампу. Выбирается свободный null-слот в уже выделенном ZArray (RTTI/безопасная u64 capacity≤1024); без роста и без замены существующего предмета. Вызовы:
+1. factory(4), ABI pointer(int), затем RTTI/rarity/null Body и фактические vtable+0x300/+0x308;
+2. attach(Candy*, fresh parent*, Vector{target.x,target.y}), Frida aggregate ['float','float'] по x86_64 ABI; это первый live-тест именно такого вызова, mock не доказывает ABI;
+3. проверка Body-parent/world и physics-position с ULP-допуском;
+4. воспроизведение подтверждённого тривиального object setter двумя float (RVA/8-byte setter checks), как после attach в штатной wrapper;
+5. повторная проверка свежего массива/свободного слота и array-set(array, Candy, **индекс**), затем membership readback.
+
+Цель — перед текущим героем (X±24, тот же Y), не старое место предыдущего подбора. Автоперенос существующих Candy включён и может обработать новый объект в следующих update, но **не создаёт следующий предмет**. Непрерывный цикл не реализован. Счётчики наград/редкость существующих Candy не пишутся; вручную refcount не повышается/не понижается, factory autorelease/array retention не обходятся.
+
+Status/dump: spawn_gold_pending, spawn_gold_attempted, last_spawn_gold с object/slot/parent/physics_readback/position_check/registered/success/error/native_started. success означает создание/подключение/регистрацию по проверкам, **не зачисленную награду** (collection_confirmed=false). Предположения ID/подключения сцены/autorelease/aggregate ABI всё ещё требуют live-проверки. Возможны краш, утечка/осиротевшее тело или визуальный объект без награды. Если ошибка после native_started=true, не угадываем destructor/rollback и не повторяем spawn: **перезапустите игру**, сохраните лог. Stop отменяет только pending и восстанавливает прочие настройки, не удаляет созданный объект и не откатывает награду. RPC timeout/Ctrl+C не гарантируют отмену уже исполняемого вызова.
+
+Порядок: stop старого модуля, обновление/сборка/перезапуск TAS, start перед новым уровнем, запомните HUD, выполните spawn-gold **один раз**, дайте несколько update, status/dump. Сообщите отдельно +1 золотой по HUD/нет зачёта/краш и наличие обычных подборов. Не включайте повтор через stop/start ради массового сбора до анализа первого результата. Обычная скорость ×1, no-fall/подъём/mask=4/Candy auto сохранены; перед финишем return-height как прежде. README не менялся.

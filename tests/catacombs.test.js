@@ -99,7 +99,7 @@ test('report never dereferences a retained pointer', () => {
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 16);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 18);
     assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
@@ -934,4 +934,59 @@ test('registered parent is read as raw structure and corroborated against live p
     assert.equal(r.parent,'0x7000');assert.equal(r.world_matches,true);
     f.memory.set(0x7008,0x9990);r=vm.runInContext('inspectCandyParent(candyTest)',f.c);
     assert.equal(r.world_matches,false);assert.equal(f.writes.length,0);
+});
+
+function goldFixture() {
+    const f=maskFixture();const calls=[];
+    f.identity(0x2000,0x8500,0x9500,0xA500,'6ZArrayI12KTGameObjectE');
+    f.memory.set(0x6010,0x30000);f.memory.set(0x30008,0xF000);
+    const G=vm.runInContext('C.spawn_gold',f.c);
+    for(const sig of G.signatures)sig.bytes.forEach((b,i)=>f.memory.set(0x100000+sig.rva+i,b));
+    const setterBytes=vm.runInContext('C.move_white.setter_bytes',f.c);
+    setterBytes.forEach((b,i)=>f.memory.set(0x100000+G.object_setter+i,b));
+    f.c.NativeFunction=function(address,ret,args) {
+        if(address.n===0x100000+G.factory)return rarity=>{
+            calls.push('factory');assert.equal(rarity,4);assert.equal(ret,'pointer');
+            f.identity(0x40000,0x41000,0x42000,0x43000,'16EndlessMazeCandy');
+            for(const [p,v] of [[0x401F0,4],[0x40198,0],[0x41300,0x100000+G.attach],
+                [0x41308,0x100000+G.body_factory],[0x41238,0x100000+G.object_setter]])f.memory.set(p,v);
+            return f.pointer(0x40000);
+        };
+        if(address.n===0x100000+G.attach)return (object,parent,vector)=>{
+            calls.push('attach');assert.equal(object.n,0x40000);assert.equal(parent.n,0x30000);
+            assert.equal(JSON.stringify(args),JSON.stringify(['pointer','pointer',['float','float']]));
+            f.identity(0x50000,0x51000,0x52000,0x53000,'20EndlessMazeCandyBody');
+            for(const [p,v] of [[0x40198,0x50000],[0x50010,0x30000],[0x50020,0x60000],
+                [0x60058,0xF000],[0x6000C,Math.fround(vector[0]/100)],[0x60010,Math.fround(vector[1]/100)]])f.memory.set(p,v);
+        };
+        if(address.n===0x100000+G.array_set)return (array,object,index)=>{
+            calls.push('assign');assert.equal(array.n,0x2000);assert.equal(index,1);
+            f.memory.set(0x2800+index*8,object.n);
+        };
+        throw Error('unexpected native '+address);
+    };
+    f.force();f.tick();return {...f,calls};
+}
+test('one gold spawn is queued and registers full native object in a verified free index',()=>{
+    const f=goldFixture();f.rpc.spawnGold();assert.equal(f.calls.length,0);f.leave();
+    const r=f.rpc.status().last_spawn_gold;
+    assert.equal(r.success,true,JSON.stringify(r));assert.equal(r.registered,true);assert.equal(r.collection_confirmed,false);
+    assert.equal(f.calls.join(','),'factory,attach,assign');assert.equal(f.memory.get(0x2808),0x40000);
+    assert.equal(f.memory.get(0x40034),524);assert.equal(f.memory.get(0x40038),600);
+    assert.throws(()=>f.rpc.spawnGold(),/one spawn attempt/);
+});
+test('gold spawn refuses world/parent mismatch, full array or altered signatures before any native call',()=>{
+    for(const mutate of [f=>f.memory.set(0x30008,0),f=>f.memory.set(0x2808,0x3000),
+        f=>f.memory.set(0x100000+0x15EEA70,0x90)]) {
+        const f=goldFixture();mutate(f);f.rpc.spawnGold();f.leave();
+        assert.equal(f.rpc.status().last_spawn_gold.success,false);assert.equal(f.calls.length,0);
+        assert.equal(f.rpc.status().spawn_gold_attempted,false);
+    }
+});
+test('gold native failure is latched with no retry or guessed destructor; stop cancels queued request',()=>{
+    const f=goldFixture();f.c.NativeFunction=function(){return ()=>{throw Error('native fault');};};
+    f.rpc.spawnGold();f.leave();const r=f.rpc.status().last_spawn_gold;
+    assert.equal(r.native_started,true);assert.equal(r.success,false);assert.match(r.warning,/orphan/);
+    assert.throws(()=>f.rpc.spawnGold(),/one spawn attempt/);
+    const stopped=goldFixture();stopped.rpc.spawnGold();stopped.rpc.stop();assert.equal(stopped.rpc.status().spawn_gold_pending,null);
 });

@@ -1,3 +1,10 @@
+## Без выпуска — одноразовый spawn-gold после runtime parent-подтверждения
+
+- Новая явная команда spawn-gold: factory4 → attach с fresh зарегистрированным Hero parent/world → verified object position → indexed array-set в свободный выделенный слот. Без growth/replacement/ручных refcount/наград.
+- State/phase/RTTI/world-lock/owner/vtable и5 runtime-prefix guards, проверка Body/world/physics/membership, одна native-попытка на install. Unknown aggregate Vector ABI проверяется впервые в live; mock не доказывает его.
+- Подробный last_spawn_gold, collection_confirmed=false, no retry/destructor guessing после native failure; возможен orphan/crash, нужен рестарт игры после такой ошибки. Цикл золотых пока не реализован. Обычная скорость/работающие режимы сохранены.
+- 88 Node mock-тестов, syntax/diff-check прошли; Rust toolchain отсутствует, сборка здесь не проверена. Для команды требуется cargo build --release. README не менялся.
+
 ## Без выпуска — исправить сброс attach-observer и проверить raw parent
 
 - Runtime-лог показал8 записанных входов, но null observer/no body_after. Диагностический reset перенесён из restoreNoFall в install; счётчик observer защищён от null. Cleanup высоты больше не стирает spawn evidence.
