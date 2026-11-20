@@ -18,6 +18,7 @@ let fallStatus = null, fallBackup = null;
 let pendingAltitude = null;
 let pendingSpawnProbe = null, spawnInspection = null;
 let earlySpawnArray = null;
+let attachObserver = null, attachObservationStatus = null, attachObservations = [];
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -389,6 +390,7 @@ function restoreHeroMasks(reason) {
 }
 function restoreNoFall(reason) {
     pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
+    attachObservationStatus = null; attachObservations = [];
     pendingAltitude = null;
     if (!fallBackup) return;
     try {
@@ -920,6 +922,12 @@ function inspectSpawnArray(state) {
         result.sample_candy = { slot: i, ...id, position: position(object),
             rarity: safe(() => object.add(C.candy.rarity).readS32()),
             refcount: safe(() => object.add(S.refcount).readS32()), body: link(object, C.object.body),
+            body_factory_method: safe(() => {
+                const target = object.readPointer().add(S.body_factory_slot).readPointer();
+                const key = captureMethodCode(target, S.attach_bytes, S.instructions);
+                if (!key) throw new Error('body factory code budget exhausted');
+                return { vptr_byte_offset: S.body_factory_slot, target: address(target), candidate_only: true, code: methodCode.get(key) };
+            }),
             attach_method: safe(() => {
                 const target = object.readPointer().add(S.attach_slot).readPointer();
                 const key = captureMethodCode(target, S.attach_bytes, S.instructions);
@@ -938,6 +946,56 @@ function captureEarlySpawnArray(state) {
     const array = inspectSpawnArray(state);
     if (array.sample_candy) earlySpawnArray = { time: Date.now(), state: state.toString(), array,
         warning: 'Historical evidence only; never reuse these object pointers for native calls.' };
+}
+function installAttachObserver(m) {
+    if (!C.spawn_probe.observe_attach) { attachObservationStatus = { status: 'disabled' }; return; }
+    attachObservationStatus = { status: 'validating', observed: 0 };
+    try {
+        const S = C.spawn_probe, target = m.base.add(S.attach_rva);
+        if (S.attach_rva < 0 || S.attach_rva + S.attach_prefix.length > m.size) throw new Error('attach observer outside module');
+        const range = Process.findRangeByAddress(target);
+        if (!range || !range.protection.includes('r') || !range.protection.includes('x') ||
+            Number(range.base.add(range.size).sub(target).toString()) < S.attach_prefix.length)
+            throw new Error('attach observer not readable executable');
+        const bytes = new Uint8Array(target.readByteArray(S.attach_prefix.length));
+        if (!S.attach_prefix.every((byte, i) => bytes[i] === byte)) throw new Error('attach observer signature mismatch');
+        attachObserver = Interceptor.attach(target, {
+            onEnter(args) {
+                this.capture = null;
+                if (!enabled || attachObservations.length >= S.observation_limit) return;
+                const id = identity(args[0]);
+                if (!id.rtti || id.rtti.name !== C.candy.name) return;
+                const record = { time: Date.now(), object: id, parent_argument: safe(() => identity(args[1])),
+                    callsite_return: safe(() => address(this.returnAddress)),
+                    parent_first_method: safe(() => {
+                        const method = args[1].readPointer().readPointer();
+                        const key = captureMethodCode(method, S.attach_bytes, S.instructions);
+                        return { target: address(method), code: key ? methodCode.get(key) : null, candidate_only: true };
+                    }) };
+                // Reserve one bounded record at entry, including nested calls.
+                attachObservations.push(record); attachObservationStatus.observed = attachObservations.length;
+                this.capture = { object: args[0], record };
+            },
+            onLeave() {
+                if (!this.capture) return;
+                const { object, record } = this.capture;
+                record.body_after = safe(() => {
+                    requireClass(object, C.candy.name);
+                    const body = object.add(C.object.body).readPointer();
+                    const out = { ...identity(body) };
+                    if (!body.isNull()) {
+                        requireClass(body, C.candy_body_probe.body_name);
+                        const physics = body.add(C.hero_body.physics).readPointer();
+                        out.physics = physics.toString();
+                        if (!physics.isNull()) out.physics_world = physics.add(C.teleport_white.world).readPointer().toString();
+                    }
+                    return out;
+                });
+                this.capture = null;
+            }
+        });
+        attachObservationStatus.status = 'listening';
+    } catch (e) { attachObservationStatus.status = 'unavailable'; attachObservationStatus.error = String(e); }
 }
 function requestSpawnProbe() {
     if (!enabled || !latest || latest.phase_raw !== 1) throw new Error('start module and enter active Catacombs first');
@@ -970,6 +1028,8 @@ function performSpawnProbe(state) {
             });
         }
         spawnInspection.array = safe(() => inspectSpawnArray(state));
+        spawnInspection.attach_observer = attachObservationStatus;
+        spawnInspection.attach_observations = attachObservations.slice();
         spawnInspection.early_array = earlySpawnArray && earlySpawnArray.state === state.toString() ? earlySpawnArray : null;
         spawnInspection.status = 'captured'; // Code records may individually contain read/decode errors.
     } catch (e) { spawnInspection.status = 'failed'; spawnInspection.error = String(e); }
@@ -993,8 +1053,8 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
@@ -1032,6 +1092,7 @@ function install() {
             if (pendingMove) performMove(this.updateState);
             else autoTeleport(this.updateState);
         } });
+        installAttachObserver(m);
         enabled = true; event('enabled', { diagnostic_only: true });
     } catch (e) { stop(); error = String(e); throw e; }
     return status();
