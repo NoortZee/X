@@ -6,3 +6,7 @@ config.yaml
 
 # runtime-артефакты
 logs/
+
+# local tooling caches and Python test bytecode
+/.cache/
+/tests/__pycache__/
