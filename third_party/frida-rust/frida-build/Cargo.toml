@@ -1,0 +1,22 @@
+[package]
+name = "frida-build"
+version = "0.17.2"
+edition = "2024"
+authors = [
+    "Keegan Saunders <keegan@undefinedbehaviour.org>",
+    "Shmarya Rubenstein <github@shmarya.net>",
+]
+license = "wxWindows"
+repository = "https://github.com/frida/frida-rust"
+description = "Rust bindings for Frida"
+
+[features]
+auto-download = []
+
+[dependencies]
+reqwest = { version = "0.13", default-features = false, features = [
+    "blocking",
+    "rustls",
+] }
+tar = "0.4.44"
+xz = "0.1.0"

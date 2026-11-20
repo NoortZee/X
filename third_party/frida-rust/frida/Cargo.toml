@@ -1,0 +1,29 @@
+[package]
+name = "frida"
+version = "0.17.2"
+edition = "2024"
+authors = [
+    "Keegan Saunders <keegan@undefinedbehaviour.org>",
+    "Shmarya Rubenstein <github@shmarya.net>",
+]
+license = "wxWindows"
+repository = "https://github.com/frida/frida-rust"
+description = "Rust bindings for Frida"
+
+[features]
+auto-download = ["frida-sys/auto-download"]
+
+[dependencies]
+frida-sys = { path = "../frida-sys", version = "0.17.2" }
+thiserror = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.140"
+
+[dev-dependencies]
+lazy_static = "1"
+
+[badges]
+maintenance = { status = "experimental" }
+
+[package.metadata.docs.rs]
+features = []

@@ -1,0 +1,21 @@
+[package]
+name = "frida-sys"
+version = "0.17.2"
+edition = "2024"
+authors = [
+    "Keegan Saunders <keegan@undefinedbehaviour.org>",
+    "Shmarya Rubenstein <github@shmarya.net>",
+]
+license = "wxWindows"
+repository = "https://github.com/frida/frida-rust"
+description = "Rust bindings for Frida"
+
+[features]
+auto-download = ["frida-build"]
+
+[build-dependencies]
+bindgen = "0.72.1"
+frida-build = { path = "../frida-build", optional = true, version = "0.17.2" }
+
+[badges]
+maintenance = { status = "experimental" }
