@@ -518,3 +518,21 @@ test('actual update exit keeps wall failure at phase 2',()=>{
     assert.equal(f.rpc.status().wall_pass.active,false);
     assert.ok(f.rpc.report().wall_events.length>0);
 });
+test('live 2.84.2 collectable-offset mismatch is observational, not a wall write veto',()=>{
+    const f=wallFixture();f.memory.set(0x250108,0.19099999964237213);
+    vm.runInContext('enableWalls(wallTestState)',f.c);
+    const r=f.rpc.status().wall_pass;
+    assert.equal(r.status,'applied');assert.equal(r.matches,1);
+    assert.equal(r.readback,-3.00000691414);
+    const observation=r.candidates[0].neighbours.find(n=>n.offset===0x108);
+    assert.equal(observation.required,false);assert.equal(observation.actual,0.19099999964237213);
+    assert.equal(f.memory.get(0x250108),0.19099999964237213);
+    f.rpc.stop();assert.equal(f.memory.get(0x250000),26.67499923706);
+});
+test('each of four required Lua neighbours still vetoes writes independently',()=>{
+    for(const off of [0x8,0x20,0x64,0x68]) {
+        const f=wallFixture();f.memory.set(0x250000+off,999);
+        vm.runInContext('enableWalls(wallTestState)',f.c);
+        assert.equal(f.rpc.status().wall_pass.status,'unavailable');assert.equal(f.writes.length,0);
+    }
+});
