@@ -1024,6 +1024,70 @@ function detachAttachObserverForSpawn() {
         reason: 'restore original code before strict native spawn signature checks' };
     return true;
 }
+// Bounded read-only evidence. Never dereference a historical object after slot removal/reuse.
+let goldDiagnostics = { natural: [], spawned: [], note: 'Membership/removal is not proof of reward; compare HUD.' };
+function goldObjectEvidence(object) {
+    requireClass(object, C.candy.name);
+    return { address: object.toString(), position: position(object),
+        id: safe(() => object.add(0x184).readS32()),
+        refcount: safe(() => object.add(C.spawn_probe.refcount).readS32()),
+        rarity: safe(() => object.add(C.candy.rarity).readS32()),
+        flags: safe(() => [0x99,C.object.flag_a,C.object.flag_b].map(o => ({ offset:o, value:object.add(o).readU8() }))),
+        raw_object_hex: safe(() => Array.from(new Uint8Array(object.readByteArray(0x1F8))).map(b=>b.toString(16).padStart(2,'0')).join(' ')),
+        image: link(object,C.object.image), body: link(object,C.object.body),
+        body_id: safe(() => object.add(C.object.body).readPointer().add(0x18).readS32()),
+        raw_body_hex: safe(() => { const b=object.add(C.object.body).readPointer(); if(b.isNull()) return null; return Array.from(new Uint8Array(b.readByteArray(0x80))).map(v=>v.toString(16).padStart(2,'0')).join(' '); }),
+        parent: safe(() => inspectCandyParent(object)), physics: safe(() => candyPhysicsProbe(object)) };
+}
+function goldArrayContext(state) {
+    requireClass(state,C.move_white.state_name);
+    const array=state.add(C.state.objects).readPointer(); requireClass(array,C.spawn_probe.array_name);
+    const capacity=safeU64(array.add(C.array.slots));
+    if(capacity>C.limits.slots) throw new Error('diagnostic array budget exceeded');
+    return { array, capacity, data:array.add(C.array.data).readPointer() };
+}
+function captureNaturalGold(state) {
+    if(goldDiagnostics.natural.length>=4 || state.add(C.state.phase).readS32()!==1) return;
+    const a=goldArrayContext(state);
+    const found=[];
+    for(let i=0;i<a.capacity;i++) {
+        const o=a.data.add(i*Process.pointerSize).readPointer();
+        if(o.isNull() || goldDiagnostics.spawned.some(t=>t.state===state.toString() && t.object===o.toString())) continue;
+        const id=identity(o);
+        if(!id.rtti || id.rtti.name!==C.candy.name) continue;
+        if(goldDiagnostics.natural.some(n=>n.state===state.toString() && n.object.address===o.toString())) continue;
+        const rarity=o.add(C.candy.rarity).readS32();
+        if(found.length>=4 && rarity!==4) continue;
+        const evidence=goldObjectEvidence(o);
+        found.push({ time:Date.now(),state:state.toString(),slot:i,object:evidence });
+        if(found.length>=8) break;
+    }
+    // Prefer gold, retain other rarities as comparison if none is present yet.
+    found.sort((a,b)=>(b.object.rarity===4)-(a.object.rarity===4));
+    goldDiagnostics.natural.push(...found.slice(0,4-goldDiagnostics.natural.length));
+}
+function followGold(state) {
+    const now=Date.now();
+    for(const track of goldDiagnostics.spawned) {
+        if(track.done || now<track.next) continue;
+        if(track.state!==state.toString() || state.add(C.state.phase).readS32()!==1) {
+            track.done=true;track.end='state/phase changed; old pointers not read';continue;
+        }
+        const a=goldArrayContext(state);
+        const current=track.slot<a.capacity ? a.data.add(track.slot*Process.pointerSize).readPointer() : ptr(0);
+        const entry={time:now,elapsed_ms:now-track.time,slot_pointer:current.toString()};
+        if(current.toString()!==track.object) {
+            entry.membership='removed_or_slot_reused';track.done=true;
+        } else {
+            const id=identity(current);
+            if(!id.rtti || id.rtti.name!==C.candy.name || current.add(C.object.body).readPointer().toString()!==track.body) {
+                entry.membership='identity_or_body_changed';track.done=true;
+            } else { entry.membership='present';entry.evidence=goldObjectEvidence(current); }
+        }
+        track.timeline.push(entry);track.next=now+1000;
+        if(track.timeline.length>=11) {track.done=true;track.end='10s observation budget reached';}
+    }
+}
 function stopGoldCycle(reason = 'user') {
     if (goldCycle) { goldCycle.active = false; goldCycle.reason = reason; }
     if (pendingGold && pendingGold.cycle) pendingGold = null;
@@ -1104,6 +1168,7 @@ function performGold(state) {
         result.target = target; result.parent = parent.toString(); result.slot = slot;
         goldAttempted = true; mutationAttempted = true; result.native_started = true;
         const object = factory(G.rarity); result.object = object.toString();
+        result.factory_evidence = safe(() => goldObjectEvidence(object));
         if (object.isNull()) throw new Error('factory returned null');
         requireClass(object,C.candy.name);
         if (object.add(C.candy.rarity).readS32() !== G.rarity) throw new Error('factory rarity mismatch');
@@ -1116,6 +1181,7 @@ function performGold(state) {
         const setterBytes = new Uint8Array(setter.readByteArray(C.move_white.setter_bytes.length));
         if (!C.move_white.setter_bytes.every((b,i)=>setterBytes[i]===b)) throw new Error('object position setter changed');
         attach(object,parent,[target.x,target.y]);
+        result.attach_evidence = safe(() => goldObjectEvidence(object));
         result.parent_check = inspectCandyParent(object);
         if (!result.parent_check.world_matches || result.parent_check.parent !== parent.toString()) throw new Error('new Body parent/world mismatch');
         const body = object.add(C.object.body).readPointer(), physics = body.add(C.hero_body.physics).readPointer();
@@ -1133,6 +1199,11 @@ function performGold(state) {
         const registered = array.add(C.array.data).readPointer().add(slot*Process.pointerSize).readPointer();
         if (registered.toString() !== object.toString()) throw new Error('array registration readback failed');
         result.registered = true; result.success = true;
+        result.registered_evidence = safe(() => goldObjectEvidence(object));
+        if(goldDiagnostics.spawned.length<10) goldDiagnostics.spawned.push({
+            state:state.toString(),time:Date.now(),object:object.toString(),slot,
+            body:body.toString(),next:Date.now(),done:false,timeline:[],
+            stages:{factory:result.factory_evidence,attach:result.attach_evidence,registered:result.registered_evidence} });
         result.note = 'One new rarity4 object registered; check HUD. No manual refcount release or reward mutation.';
     } catch (e) {
         result.error = String(e);
@@ -1204,11 +1275,12 @@ function requestMove(mode = 'visual') {
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 function stop() { stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
     pendingGold = null; goldResult = null; goldAttempted = false; goldCycle = null;
+    goldDiagnostics = { natural: [], spawned: [], note: 'Read-only bounded snapshots; removal is not proof of reward.' };
     pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
     attachObservationStatus = null; attachObservations = [];
     pendingAltitude = null;
@@ -1242,6 +1314,8 @@ function install() {
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             preventFall(this.updateState);
+            try { captureNaturalGold(this.updateState); followGold(this.updateState); }
+            catch(e) { goldDiagnostics.last_error={time:Date.now(),error:String(e)}; }
             tickGoldCycle(this.updateState);
             if (pendingGold) performGold(this.updateState);
             else if (pendingMove) performMove(this.updateState);

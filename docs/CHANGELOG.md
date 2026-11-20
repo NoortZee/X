@@ -376,3 +376,9 @@
 - По запросу пользователя до10 spawn с интервалом2с, отдельный spawn-gold-stop, статус счётчиков. Без автостарта; одна серия на install, stop/смена уровня/первая ошибка/лимит прекращают её. Pause без catch-up.
 - Существующий factory/attach/array-set путь не изменён: визуальное появление/зачисление ещё не подтверждено. Автосбор сохранён. Это не бесконечный фарм и не исправление регистрации сцены.
 - Новые команды требуют Rust rebuild; toolchain здесь отсутствует. Node mock tests и syntax/diff checks; README без изменений.
+
+## Сравнительная read-only диагностика native gold
+
+- gold_diagnostics в status/dump: штатные Candy, три стадии factory/attach/registered, ID/bodyID/image/flags/refcount/raw object/body/physics/world.
+- До10с bounded follow-up по текущему слоту с остановкой при removal/reuse/body/state/phase change; удаление не трактуется как credit. До4 natural/10 spawned/11 samples; отдельно от events. Ошибки чтения сохраняются.
+- Никаких новых native-вызовов/пишущих полей, автоматического spawn или изменений рабочего core. Для нового dump rebuild не нужен.96 Node mock-тестов, syntax/diff checks; live evidence ещё требуется. README не менялся.
