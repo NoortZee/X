@@ -9,8 +9,8 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 if [[ "${1:-}" == --help ]]; then
     echo 'Usage: start/start.sh [config.yaml]'
     echo 'TAS_ADB_DEVICE defaults to 192.168.240.112:5555.'
-    echo 'Requires Konsole, start/install.sh, running Waydroid session and an open game.'
-    echo 'Opens separate Frida and Phantom windows; TAS stays in this terminal.'
+    echo 'Requires start/install.sh, running Waydroid session and an open game.'
+    echo 'Runs Frida and Phantom in the background; only TAS uses this terminal.'
     echo 'WARNING: restarts the global ADB server and existing sysmon/Phantom servers in Waydroid.'
     echo 'On exit stops owned Android servers, removes owned forwards and stops ADB.'
     exit 0
@@ -18,7 +18,7 @@ fi
 [[ $# -le 1 ]] || fail 'Too many arguments; use --help.'
 [[ $EUID != 0 ]] || fail 'Run without sudo.'
 [[ "$DEVICE" =~ ^[0-9.]+:[0-9]+$ ]] || fail 'TAS_ADB_DEVICE must be an IPv4 address:port.'
-for cmd in adb sudo waydroid python3 timeout flock realpath konsole setsid tee; do
+for cmd in adb sudo waydroid python3 timeout flock realpath setsid; do
     command -v "$cmd" >/dev/null || fail "Missing $cmd; run start/install.sh."
 done
 CONFIG="$(realpath -e -- "${1:-$ROOT/config.yaml}")"
@@ -32,7 +32,7 @@ RUN="$(mktemp -d "$DATA/sessions/session.XXXXXXXX")"
 REMOTE="/data/local/tmp/kot-tas-$UID-$$"
 TAS_PID=''
 WATCH_PID=''
-TERMINAL_PIDS=()
+SERVER_PIDS=()
 ADB_OWNED=0
 REMOTE_OWNED=0
 FORWARDS=()
@@ -44,13 +44,16 @@ cleanup() {
     trap - EXIT
     trap '' INT TERM HUP
     set +e
-    [[ -z "$WATCH_PID" ]] || { kill "$WATCH_PID" 2>/dev/null; wait "$WATCH_PID" 2>/dev/null; }
+    [[ -z "$WATCH_PID" ]] || kill "$WATCH_PID" 2>/dev/null
     if [[ -n "$TAS_PID" ]] && kill -0 "$TAS_PID" 2>/dev/null; then
         kill -TERM "$TAS_PID" 2>/dev/null
         for _ in {1..30}; do kill -0 "$TAS_PID" 2>/dev/null || break; sleep 0.1; done
         kill -KILL "$TAS_PID" 2>/dev/null
         wait "$TAS_PID" 2>/dev/null
     fi
+    # Never wait for another child inside a signal/EXIT trap while the original
+    # wait(TAS) target is alive: Bash can defer that wait until TAS exits.
+    [[ -z "$WATCH_PID" ]] || wait "$WATCH_PID" 2>/dev/null
     if (( REMOTE_OWNED )); then
         # Waydroid transport still works if ADB itself failed. Check identity before killing a PID.
         if ! android_root sh -c "
@@ -77,11 +80,11 @@ cleanup() {
             (( code != 0 )) || code=1
         fi
     fi
-    # Each Konsole owns a private process group (including its foreground bridge and tee).
-    for pid in "${TERMINAL_PIDS[@]}"; do
+    # Stop each private host-side process group after terminating its Android server.
+    for pid in "${SERVER_PIDS[@]}"; do
         kill -TERM -- "-$pid" 2>/dev/null
     done
-    for pid in "${TERMINAL_PIDS[@]}"; do
+    for pid in "${SERVER_PIDS[@]}"; do
         for _ in {1..20}; do kill -0 -- "-$pid" 2>/dev/null || break; sleep 0.1; done
         kill -KILL -- "-$pid" 2>/dev/null
         wait "$pid" 2>/dev/null
@@ -152,24 +155,29 @@ ACTUAL="$(adb_device shell '/data/local/tmp/sysmon --version' | tr -d '\r')"
 [[ "$ACTUAL" == "$EXPECTED" ]] || fail "Frida version mismatch: server=$ACTUAL client=$EXPECTED"
 adb_device shell "mkdir $REMOTE"
 REMOTE_OWNED=1
-# Keep the Waydroid shell connected to each foreground server in its own Konsole.
-# A new terminal may ask for sudo independently (per-TTY sudo timestamps).
-start_server_console() {
-    local name="$1" title="$2" command="$3" remote_command runner="$RUN/$1.sh"
+# Background host bridges retain foreground Android servers, without detached nohup.
+start_server() {
+    local name="$1" command="$2" remote_command runner="$RUN/$1.sh" server_log_fd
     printf -v remote_command 'echo $$ > %s/%s.pid; exec %s' "$REMOTE" "$name" "$command"
     {
-        printf '#!/usr/bin/env bash\nset -uo pipefail\n'
-        printf '%q ' sudo waydroid shell -- sh -c "$remote_command"
-        printf '2>&1 | tee %q\n' "$RUN/$name.log"
-        # shellcheck disable=SC2016 # Expanded by the generated server runner, not here.
-        printf 'status=${PIPESTATUS[0]}\nprintf "%%s\\n" "$status" > %q\nexit "$status"\n' "$RUN/$name.exit"
+        printf '#!/usr/bin/env bash\nset -u\n'
+        printf '%q ' sudo -n waydroid shell -- sh -c "$remote_command"
+        # Expanded by the generated runner, not by this shell.
+        # shellcheck disable=SC2016
+        printf '\nstatus=$?\nprintf "%%s\\n" "$status" > %q\nexit "$status"\n' "$RUN/$name.exit"
     } > "$runner"
     chmod 700 "$runner"
-    setsid konsole --separate --nofork -p "tabtitle=$title" -e bash "$runner" &
-    TERMINAL_PIDS+=("$!")
+    exec {server_log_fd}>>"$RUN/$name.log" || fail "Cannot open $name log in $RUN."
+    # Job control assigns a private process group, but keeps the controlling TTY
+    # so sudo -n can use the sudo -v timestamp from this terminal (setsid cannot).
+    set -m
+    bash "$runner" </dev/null >&"$server_log_fd" 2>&1 &
+    SERVER_PIDS+=("$!")
+    set +m
+    exec {server_log_fd}>&-
 }
-start_server_console sysmon 'TAS — Frida server' '/data/local/tmp/sysmon -l unix:/data/local/tmp/sysmon.sock'
-start_server_console phantom 'TAS — Phantom server' 'env CLASSPATH=/data/local/tmp/phantom-server.jar /system/bin/app_process /system/bin com.phantom.server.PhantomServer --host 0.0.0.0 --port 27183'
+start_server sysmon '/data/local/tmp/sysmon -l unix:/data/local/tmp/sysmon.sock'
+start_server phantom 'env CLASSPATH=/data/local/tmp/phantom-server.jar /system/bin/app_process /system/bin com.phantom.server.PhantomServer --host 0.0.0.0 --port 27183'
 
 # --no-rebind never steals a forward established by someone else.
 adb_device forward --no-rebind "tcp:$FRIDA_PORT" localabstract:/data/local/tmp/sysmon.sock
@@ -200,8 +208,8 @@ for _ in {1..60}; do
             fail "$name exited before becoming ready (see $RUN/$name.log)."
         fi
     done
-    for pid in "${TERMINAL_PIDS[@]}"; do
-        kill -0 "$pid" 2>/dev/null || fail "Server console closed before readiness; see $RUN."
+    for pid in "${SERVER_PIDS[@]}"; do
+        kill -0 "$pid" 2>/dev/null || fail "Server bridge exited before readiness; see $RUN."
     done
     if check_servers; then ready=1; break; fi
     sleep 1
@@ -227,14 +235,14 @@ PARENT_PID=$$
     while sleep 5; do
         for name in sysmon phantom; do
             if [[ -f "$RUN/$name.exit" ]]; then
-                echo "ERROR: $name console/server exited. Stopping TAS. Logs: $RUN" >&2
+                echo "ERROR: $name server/bridge exited. Stopping TAS. Logs: $RUN" >&2
                 kill -TERM "$PARENT_PID"
                 exit 1
             fi
         done
-        for pid in "${TERMINAL_PIDS[@]}"; do
+        for pid in "${SERVER_PIDS[@]}"; do
             if ! kill -0 "$pid" 2>/dev/null; then
-                echo "ERROR: server console closed. Stopping TAS. Logs: $RUN" >&2
+                echo "ERROR: server bridge exited. Stopping TAS. Logs: $RUN" >&2
                 kill -TERM "$PARENT_PID"
                 exit 1
             fi
