@@ -1056,3 +1056,22 @@ test('cycle stops on native error, explicit cancellation, state/phase change and
         assert.equal(f.rpc.status().spawn_cycle.registered,0,mode);
     }
 });
+
+test('gold diagnostic stages survive report and follow membership without reading removed object',()=>{
+    const f=goldFixture();f.rpc.spawnGold();f.leave();f.leave();
+    let d=f.rpc.report().gold_diagnostics;
+    assert.equal(d.spawned.length,1);assert.equal(d.spawned[0].stages.factory.rarity,4);
+    assert.equal(d.spawned[0].stages.registered.body.address,'0x50000');
+    assert.equal(d.spawned[0].timeline[0].membership,'present');
+    f.memory.set(0x2808,0); // Historical address is no longer a valid member.
+    vm.runInContext('goldDiagnostics.spawned[0].next=0',f.c);f.leave();
+    d=f.rpc.report().gold_diagnostics;
+    assert.equal(d.spawned[0].done,true);
+    assert.equal(d.spawned[0].timeline.at(-1).membership,'removed_or_slot_reused');
+    assert.equal(d.spawned[0].timeline.at(-1).evidence,undefined);
+});
+test('gold diagnostic stops following historical objects on phase transition',()=>{
+    const f=goldFixture();f.rpc.spawnGold();f.leave();f.memory.set(0x1138,2);f.leave();
+    const t=f.rpc.report().gold_diagnostics.spawned[0];
+    assert.equal(t.done,true);assert.match(t.end,/old pointers not read/);
+});
