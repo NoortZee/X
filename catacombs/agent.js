@@ -19,6 +19,9 @@ let lastPlayStates = {};
 let lastEndlessSample = null;
 let lastEndless = null;
 let updateChanges = [];
+let collectibleEvents = [];
+let collectibleClasses = new Map();
+let collectibleTotals = {};
 function emit(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -137,6 +140,28 @@ function heroValues(hero) {
         }
     } catch (error) { values.read_error = String(error); }
     return values;
+}
+function collectibleEvent(kind, data) {
+    const observation = { time: Date.now(), kind, ...data,
+        nearby_endless: lastEndless ? { time: lastEndless.time,
+            object: lastEndless.identity.object, values: lastEndless.values } : null,
+        correlation_is_not_ownership: true };
+    collectibleTotals[kind] = (collectibleTotals[kind] || 0) + 1;
+    collectibleEvents.push(observation);
+    if (collectibleEvents.length > C.collectible_diagnostics.events) collectibleEvents.shift();
+    emit(kind, observation);
+}
+function observeFactoryReturn(result, caller) {
+    if (result.isNull()) {
+        collectibleEvent('crumb_factory_null', { caller });
+        return;
+    }
+    const identity = heroIdentity(result);
+    const key = identity.rtti_name || 'unresolved';
+    if (collectibleClasses.has(key)) collectibleClasses.set(key, collectibleClasses.get(key) + 1);
+    else if (collectibleClasses.size < C.collectible_diagnostics.classes) collectibleClasses.set(key, 1);
+    collectibleEvent('crumb_factory_return', { identity, caller,
+        interpretation: 'returned object; factory/class semantics require validation' });
 }
 function codeDiagnostics() {
     const output = {};
@@ -284,6 +309,7 @@ function install() {
     lastTraceSample = null; traces = new Map();
     playSamples = {}; lastPlayStates = {};
     lastEndlessSample = null; lastEndless = null; updateChanges = [];
+    collectibleEvents = []; collectibleClasses = new Map(); collectibleTotals = {};
     const gameModule = Process.findModuleByName(MEMORY_LAYOUT.module_name);
     metadata = { captured_at: Date.now(), process_id: Process.id, arch: Process.arch,
         pointer_size: Process.pointerSize, profile_game_version: MEMORY_LAYOUT.game_version,
@@ -372,16 +398,36 @@ function install() {
                     this.endlessState, this.returnAddress);
             } catch (error) { emit('update_probe_error', { error: String(error) }); }
         }) });
+        attach('crumb_spawn_candidate', {
+            onEnter: guard(function (args) {
+                // This is only a candidate spawner owner, not assumed to be a collectible.
+                this.crumbSpawnOwner = args[0].toString();
+                this.crumbCaller = this.returnAddress ? describeAddress(this.returnAddress) : null;
+                collectibleEvent('crumb_spawn_enter', { owner: this.crumbSpawnOwner, caller: this.crumbCaller });
+            }),
+            onLeave: guard(function () {
+                collectibleEvent('crumb_spawn_leave', { owner: this.crumbSpawnOwner, caller: this.crumbCaller });
+            }),
+        });
+        attach('crumb_factory_candidate', {
+            onEnter: guard(function () {
+                // Do not treat args[0] as this: supplied code appears factory-like.
+                this.crumbCaller = this.returnAddress ? describeAddress(this.returnAddress) : null;
+            }),
+            onLeave: guard(function (result) { observeFactoryReturn(result, this.crumbCaller); }),
+        });
         emit('enabled', { diagnostic_only: true });
     } catch (error) { fail(error); throw error; }
     return status();
 }
 function status() {
     return { enabled, diagnostic_only: true, metadata, traces_retained: traces.size, last_error: lastError,
-        resolutions, counters, last_hero: lastHero, last_play_states: lastPlayStates, last_endless: lastEndless, events_retained: events.length, skulls_retained: skulls.size };
+        resolutions, counters, collectible_totals: collectibleTotals,
+        collectible_classes: Object.fromEntries(collectibleClasses),
+        collectible_events_retained: collectibleEvents.length, last_hero: lastHero, last_play_states: lastPlayStates, last_endless: lastEndless, events_retained: events.length, skulls_retained: skulls.size };
 }
 rpc.exports = {
     install, status,
     stop() { stop(); return status(); },
-    report() { return { ...status(), traces: Array.from(traces.values()), code_diagnostics: codeDiagnostics(), update_changes: updateChanges.slice(), events: events.slice() }; },
+    report() { return { ...status(), traces: Array.from(traces.values()), code_diagnostics: codeDiagnostics(), collectible_events: collectibleEvents.slice(), update_changes: updateChanges.slice(), events: events.slice() }; },
 };
