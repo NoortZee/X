@@ -4,6 +4,10 @@ version = "0.2.0"
 edition = "2021"
 description = "King of Thieves TAS + rival stones scanner (Rust + Frida + Phantom)"
 
+[[bin]]
+name = "kot-tas"
+path = "TAS/main.rs"
+
 [dependencies]
 ctrlc = "3.4"
 frida = { path = "third_party/frida-rust/frida", features = ["auto-download"] }
