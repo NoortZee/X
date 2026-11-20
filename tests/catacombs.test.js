@@ -486,3 +486,35 @@ test('wall restoration does not overwrite external edits',()=>{
     f.memory.set(0x250000,123);f.rpc.stop();
     assert.equal(f.memory.get(0x250000),123);assert.equal(f.rpc.status().wall_pass.status,'restore_failed');
 });
+test('wall result survives inactive level and auto-event eviction, retries next observed level',()=>{
+    const f=wallFixture(0);
+    vm.runInContext('enableWalls(wallTestState)',f.c);
+    const first=f.rpc.status().wall_pass;
+    assert.equal(first.status,'unavailable');assert.equal(first.ranges,1);
+    assert.equal(first.scanned_bytes,0x100000);assert.equal(first.raw_matches,0);
+    f.memory.set(0x1138,2);
+    vm.runInContext(`
+        // Enable auto scheduling just for this direct phase-reset check.
+        restoreWalls('level inactive'); if (wallState) wallState.active = false;
+        for (let i=0;i<1100;i++) event('auto_teleport_result',{success:true});
+    `,f.c);
+    assert.equal(f.rpc.status().wall_pass.status,'unavailable');
+    assert.ok(f.rpc.status().wall_events.some(e=>e.kind==='wall_pass_unavailable'));
+    vm.runInContext('enableWalls(wallTestState)',f.c);
+    assert.notEqual(f.rpc.status().wall_pass,first);
+});
+test('wall candidate report includes actual neighbouring values on mismatch without writes',()=>{
+    const f=wallFixture(1,true);vm.runInContext('enableWalls(wallTestState)',f.c);
+    const r=f.rpc.status().wall_pass;
+    assert.equal(r.raw_matches,1);assert.equal(r.matches,0);
+    assert.equal(r.candidates[0].neighbours[0].actual,999);
+    assert.equal(f.writes.length,0);
+});
+test('actual update exit keeps wall failure at phase 2',()=>{
+    const f=autoFixture(); f.leave(); f.c.testTime=1300; f.leave();
+    assert.equal(f.rpc.status().wall_pass.status,'unavailable');
+    f.memory.set(0x1138,2); f.leave();
+    assert.equal(f.rpc.status().wall_pass.status,'unavailable');
+    assert.equal(f.rpc.status().wall_pass.active,false);
+    assert.ok(f.rpc.report().wall_events.length>0);
+});
