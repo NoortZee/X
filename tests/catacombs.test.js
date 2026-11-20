@@ -92,10 +92,10 @@ test('report never dereferences a retained pointer', () => {
     const f = fixture(); f.rpc.install(); f.tick(); f.memory.clear();
     assert.equal(f.rpc.report().latest.object_graph.candies.length, 1);
 });
-test('no native calls, replacements, code patches or non-position writes', () => {
+test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
-    assert.doesNotMatch(s, /NativeFunction|Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 4);
+    assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 8);
     assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
@@ -344,4 +344,52 @@ test('create root requests extended bounded window', () => {
     const code = report.method_code[report.lifecycle_candidates.create_candidate.code_key];
     assert.equal(code.requested_bytes, 1536);
     assert.equal(code.requested_instructions, 512);
+});
+
+function teleportFixture() {
+    const f = movementFixture();
+    f.identity(0x16000, 0xB000, 0xC000, 0xD000, '20EndlessMazeCandyBody');
+    for (const [p,v] of [[0x3198,0x16000],[0x16020,0xE000],[0xE000,0],[0xE00C,0.12],
+        [0xE010,0.06],[0xE040,0],[0xE044,0],[0xE038,0],[0xE048,0],[0xE0A8,1],
+        [0xE0B8,0x16000],[0xE058,0xF000],[0xF000+0x19298,0],[0xB068,0x100000+0x1617DE0],
+        [0x16038,12],[0x1603C,6]]) f.memory.set(p,v);
+    const sigs = vm.runInContext('MEMORY_LAYOUT.catacombs.teleport_white.signatures',f.c);
+    for (const sig of sigs) sig.bytes.forEach((b,i)=>f.memory.set(0x100000+sig.rva+i,b));
+    let nativeCalls=0;
+    f.c.NativeFunction = function (target, ret, args) {
+        assert.equal(target.toString(),'0x1715cb0');
+        assert.equal(ret,'void'); assert.equal(args.join(','),'pointer');
+        return body => {
+            nativeCalls++;
+            assert.equal(body.toString(),'0x16000');
+            f.memory.set(0xE00C,f.memory.get(0x16038)/100);
+            f.memory.set(0xE010,f.memory.get(0x1603C)/100);
+        };
+    };
+    return {...f, nativeCalls:()=>nativeCalls};
+}
+test('teleport is queued, calls rebuild once with Body*, verifies physics not collection',()=>{
+    const f=teleportFixture(); f.rpc.teleportWhite(); assert.equal(f.nativeCalls(),0); f.leave();
+    const s=f.rpc.status(); assert.equal(s.last_move.success,true, JSON.stringify(s.last_move));
+    assert.equal(s.last_move.collection_confirmed,false); assert.equal(s.last_move.physics_readback.x,524);
+    assert.equal(f.nativeCalls(),1); assert.equal(f.memory.get(0x3034),12);
+    assert.equal(f.memory.get(0x16038),524); assert.equal(f.memory.get(0x1603C),600);
+    assert.equal(f.rpc.report().diagnostic_only,false);
+    assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
+    f.leave(); assert.equal(f.nativeCalls(),1);
+});
+test('teleport refuses locked world, owner mismatch, changed code, wrong recreate target before writes',()=>{
+    for (const [p,v] of [[0xF000+0x19298,2],[0xE0B8,0],[0x1715CB0,0x90],[0xB068,0x200000]]) {
+        const f=teleportFixture(); f.memory.set(p,v); f.rpc.teleportWhite(); f.leave();
+        assert.equal(f.rpc.status().last_move.success,false); assert.ok(f.rpc.status().last_move.error);
+        assert.equal(f.nativeCalls(),0); assert.equal(f.writes.length,0);
+    }
+});
+test('native failure is uncertain: no rollback or retry and report no longer read-only',()=>{
+    const f=teleportFixture(); f.c.NativeFunction=function(){return ()=>{throw Error('native failed');};};
+    f.rpc.teleportWhite();f.leave();const r=f.rpc.status().last_move;
+    assert.equal(r.success,false);assert.equal(r.native_started,true);
+    assert.match(r.warning,/uncertain/);assert.equal(r.rollback,undefined);
+    assert.equal(f.rpc.report().diagnostic_only,false);
+    assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
 });
