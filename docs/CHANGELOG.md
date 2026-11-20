@@ -1,3 +1,9 @@
+## Без выпуска — снять attach-observer перед spawn signature checks
+
+- Runtime spawn-gold отказал до native из-за нашего же Interceptor-патча пролога attach0x15E9700. Перед native spawn проверками снимается только собственный observer с Interceptor.flush(), затем повторно проверяются все исходные64байта и остальные сигнатуры.
+- Защиты не ослаблены: чужое/оставшееся изменение кода по-прежнему блокирует factory. Статус observer=detached_for_spawn, evidence сохраняется; основной update/автосбор не меняются.
+- 90 Node mock-тестов, включая имитацию патча/flush и отказ при реально изменённых байтах после detach, syntax/diff-check прошли. Native live-спавн всё ещё требует проверки. Rust/README не менялись, rebuild не нужен при spawn-gold версии.
+
 ## Без выпуска — одноразовый spawn-gold после runtime parent-подтверждения
 
 - Новая явная команда spawn-gold: factory4 → attach с fresh зарегистрированным Hero parent/world → verified object position → indexed array-set в свободный выделенный слот. Без growth/replacement/ручных refcount/наград.
