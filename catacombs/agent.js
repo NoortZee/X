@@ -9,6 +9,7 @@ let methodCode = new Map();
 let lifecycleCode = null;
 let autoRun = null;
 let autoSeen = new Set();
+let wallState = null, wallPatch = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
@@ -425,12 +426,69 @@ function performMove(state) {
     } catch (e) { result.error = String(e); }
     finally { lastMove = result; event('move_white_result', result); }
 }
+function wallBlockMatches(pointer) {
+    return C.wall_pass.neighbours.every(([offset, value]) =>
+        Math.abs(numberAt(pointer, offset) - value) <= C.wall_pass.tolerance);
+}
+function restoreWalls(reason) {
+    if (!wallPatch) return;
+    try {
+        const { pointer, original } = wallPatch;
+        writableFloat(pointer);
+        if (!wallBlockMatches(pointer) || Math.abs(pointer.readFloat() - C.wall_pass.patched) > C.wall_pass.tolerance)
+            throw new Error('wall parameter changed externally; refusing stale restore');
+        pointer.writeFloat(original);
+        wallPatch = null;
+        wallState = { ...wallState, status: 'restored', reason };
+        event('wall_pass_restored', { reason });
+    } catch (e) {
+        wallState = { ...wallState, status: 'restore_failed', error: String(e) };
+        event('wall_pass_restore_failed', { error: String(e) });
+    }
+}
+function enableWalls(state) {
+    if (!C.wall_pass.enabled || (wallState && wallState.state === state.toString())) return;
+    if (wallPatch) { restoreWalls('state changed'); if (wallPatch) return; }
+    wallState = { state: state.toString(), status: 'searching', scope: 'game module writable data only' };
+    try {
+        const module = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+        if (!module) throw new Error('game module missing');
+        const candidates = new Map(); let scanned = 0, matches = 0;
+        for (const range of module.enumerateRanges('rw-')) {
+            scanned += range.size;
+            if (scanned > C.wall_pass.max_scan_bytes) throw new Error('wall scan byte budget exceeded');
+            for (const match of Memory.scanSync(range.base, range.size, C.wall_pass.pattern)) {
+                if (++matches > C.wall_pass.max_matches) throw new Error('wall scan match budget exceeded');
+                const pointer = match.address;
+                if (Number(pointer.sub(module.base).toString()) < 0 ||
+                    Number(pointer.add(C.wall_pass.neighbours[C.wall_pass.neighbours.length - 1][0] + 4).sub(module.base).toString()) > module.size) continue;
+                if (safe(() => Math.abs(pointer.readFloat() - C.wall_pass.original) <= C.wall_pass.tolerance && wallBlockMatches(pointer)) === true)
+                    candidates.set(pointer.toString(), pointer);
+            }
+        }
+        wallState.matches = candidates.size;
+        if (candidates.size !== 1) throw new Error('wall parameter block not unique/found: ' + candidates.size);
+        const pointer = candidates.values().next().value;
+        writableFloat(pointer);
+        const original = pointer.readFloat();
+        wallPatch = { pointer, original }; // Retain rollback information even if readback fails.
+        mutationAttempted = true;
+        pointer.writeFloat(C.wall_pass.patched);
+        if (Math.abs(pointer.readFloat() - C.wall_pass.patched) > C.wall_pass.tolerance) throw new Error('wall parameter readback mismatch');
+        wallState.status = 'applied'; wallState.parameter = address(pointer);
+        event('wall_pass_applied', { parameter: wallState.parameter });
+    } catch (e) {
+        wallState.status = 'unavailable'; wallState.error = String(e);
+        if (wallPatch) restoreWalls('apply failed');
+        event('wall_pass_unavailable', { error: String(e) });
+    }
+}
 function autoTeleport(state) {
     if (!C.auto_teleport.enabled) return;
     try {
         requireClass(state, C.move_white.state_name);
         const phase = state.add(C.state.phase).readS32();
-        if (phase !== 1) { autoRun = null; autoSeen.clear(); return; }
+        if (phase !== 1) { restoreWalls('level inactive'); wallState = wallPatch ? wallState : null; autoRun = null; autoSeen.clear(); return; }
         const now = Date.now();
         if (!autoRun || autoRun.state !== state.toString()) {
             autoSeen.clear();
@@ -439,6 +497,7 @@ function autoTeleport(state) {
             event('auto_level_armed', { due: autoRun.due });
         }
         if (autoRun.halted || now < autoRun.next || state.add(C.state.paused).readU8() !== 0) return;
+        enableWalls(state);
         const world = state.add(C.state.world).readPointer();
         const hero = world.add(C.world.hero).readPointer(); requireClass(hero, C.move_white.hero_name);
         const heroBody = hero.add(C.object.body).readPointer(); requireClass(heroBody, C.move_white.hero_body_name);
@@ -489,12 +548,13 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, wall_pass: wallState, auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
     autoRun = null; autoSeen.clear();
+    if (!wallPatch) wallState = null;
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
     pendingMove = null; lastMove = null; movesExecuted = 0; mutationAttempted = false; teleportUsed = false;
