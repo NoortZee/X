@@ -98,6 +98,11 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
+# Open diagnostics as the desktop user before starting privileged bridges or TAS.
+# Reuse descriptors: reopening log paths on each tick can fail after permission changes.
+exec {HEALTH_LOG_FD}>>"$RUN/health.log" || fail "Cannot open health log in $RUN."
+exec {WATCH_LOG_FD}>>"$RUN/watch.log" || fail "Cannot open watcher log in $RUN."
+
 # Parse YAML as data, never source/eval it. Runtime endpoints follow the selected config.
 python3 - "$CONFIG" >"$RUN/settings" <<'PY'
 import re, sys, yaml
@@ -175,7 +180,7 @@ adb forward --list
 
 # Require real protocol replies, not merely accepting TCP connections behind adb forward.
 check_servers() {
-    timeout --kill-after=2 5 "$DATA/venv/bin/python" - "$FRIDA_PORT" "$PHANTOM_PORT" "$PACKAGE" "${1:-startup}" >"$RUN/health.log" 2>&1 <<'PY'
+    timeout --kill-after=2 5 "$DATA/venv/bin/python" - "$FRIDA_PORT" "$PHANTOM_PORT" "$PACKAGE" "${1:-startup}" >&"$HEALTH_LOG_FD" 2>&1 <<'PY'
 import frida, socket, sys
 # Closing an extra Phantom client invokes cancelAll: never probe during live TAS input.
 if sys.argv[4] == 'startup':
@@ -231,10 +236,18 @@ PARENT_PID=$$
                 exit 1
             fi
         done
-        if ! timeout --kill-after=2 5 sudo -n -v || ! check_servers monitor || ! android_root sh -c "
+        failure=''
+        if ! timeout --kill-after=2 5 sudo -n -v >&"$WATCH_LOG_FD" 2>&1; then
+            failure='sudo credential renewal failed'
+        elif ! check_servers monitor; then
+            failure='Frida/game health check failed'
+        elif ! android_root sh -c "
             read a < $REMOTE/sysmon.pid && read b < $REMOTE/phantom.pid && kill -0 \$a && kill -0 \$b
-        " >"$RUN/watch.log" 2>&1; then
-            echo 'ERROR: game, sudo or an Android server was lost/unresponsive. Stopping TAS.' >&2
+        " >&"$WATCH_LOG_FD" 2>&1; then
+            failure='Android server PID check failed'
+        fi
+        if [[ -n "$failure" ]]; then
+            echo "ERROR: $failure. Stopping TAS. Logs: $RUN" >&2
             kill -TERM "$PARENT_PID"
             exit 1
         fi
