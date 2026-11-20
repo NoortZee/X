@@ -40,7 +40,7 @@ function fixture(matches = 1) {
     memory.set(0x3034, 12); memory.set(0x3038, 6); memory.set(0x31F0, 4);
     memory.set(0x31A8, 1); memory.set(0x31A9, 1); memory.set(0x3198, 0); memory.set(0x31A0, 0);
     memory.set(0x1040, 0); memory.set(0x1088, 0); memory.set(0x1138, 1);
-    return { c, memory, rpc: c.rpc.exports, tick() { callback.onEnter([new P(0x1000)]); },
+    return { c, memory, pointer: n => new P(n), rpc: c.rpc.exports, tick() { callback.onEnter([new P(0x1000)]); },
         force() { vm.runInContext('lastTime = null', c); }, detached: () => detached };
 }
 test('opt-in unique resolution, graph and Candy class/rarity evidence', () => {
@@ -113,4 +113,48 @@ test('declared array size is reported when scan is truncated', () => {
     assert.equal(graph.scanned_slots, 1024);
     assert.equal(graph.truncated, true);
     assert.equal(graph.complete, false);
+});
+
+
+test('position candidates use byte offsets from vptr without invoking methods', () => {
+    const f = fixture();
+    f.memory.set(0x8100 + 0x238, 0x200000);
+    f.memory.set(0x8100 + 0x268, 0x200100);
+    f.rpc.install(); f.tick();
+    const candy = f.rpc.report().latest.object_graph.candies[0];
+    assert.equal(candy.position_method_candidates.position_set_candidate.target.address, '0x200000');
+    assert.equal(candy.position_method_candidates.position_get_candidate.vptr_byte_offset, 0x268);
+    assert.equal(candy.position_method_candidates.position_get_candidate.role_is_candidate, true);
+    assert.ok(f.rpc.report().method_code['0x200000'].error);
+    assert.equal(f.rpc.status().enabled, true);
+});
+
+test('method code is bounded, deduplicated, and report uses cached bytes only', () => {
+    const f = fixture();
+    let reads = 0, decoded = 0;
+    f.c.codeTarget = f.pointer(0x200000);
+    f.c.codeTarget.readByteArray = length => { reads++; assert.equal(length, 384); return new ArrayBuffer(length); };
+    f.c.Process.findRangeByAddress = () => ({ base: f.pointer(0x100000), size: 0x3000000, protection: 'r-x' });
+    f.c.Instruction = { parse: () => { decoded++; return { size: 4, mnemonic: 'nop', opStr: '' }; } };
+    vm.runInContext('captureMethodCode(codeTarget); captureMethodCode(codeTarget)', f.c);
+    const record = f.rpc.report().method_code['0x200000'];
+    assert.equal(reads, 1);
+    assert.equal(decoded, 96);
+    assert.equal(record.instructions.length, 96);
+    assert.equal(record.complete_function, false);
+    assert.equal(record.function_boundary_verified, false);
+    f.memory.clear(); f.rpc.report();
+    assert.equal(reads, 1);
+});
+
+test('code probe refuses non-executable memory and caps distinct target records', () => {
+    const f = fixture();
+    f.c.Process.findRangeByAddress = () => ({ protection: 'rw-' });
+    for (let i = 0; i < 30; i++) {
+        f.c.codeTarget = f.pointer(0x200000 + i * 16);
+        vm.runInContext('captureMethodCode(codeTarget)', f.c);
+    }
+    const records = Object.values(f.rpc.report().method_code);
+    assert.equal(records.length, 24);
+    assert.match(records[0].error, /not in readable executable/);
 });
