@@ -1,3 +1,9 @@
+## Без выпуска — начальный спуск примерно на клетку вниз
+
+- no_fall underground: фиксированная цель стартовый Hero.y+64, gravity=0 и VY=+2 до цели, затем VY=0. Без записи позиций и без накопления смещения каждый кадр.
+- Ограничение спуска 2с wall-clock, без повторов при timeout; descent/start_y/target_y/current_y в компактном статусе. Stop/выход фазы обнуляет принудительный VY перед восстановлением gravityScale.
+- Не обещает неуязвимость/следование рельефу; speed/masks/Candy auto сохранены. 66 Node mock-тестов, syntax/diff-check прошли. Rust/README не менялись, live-спуск требует проверки.
+
 ## Без выпуска — подавление падения при noclip
 
 - no_fall по умолчанию: при применённом mask=4, активной фазе и unlocked dynamic Hero body отключается gravityScale и обнуляется VY в update onEnter/onLeave, без координатных записей. ×5 и Candy auto не менялись.

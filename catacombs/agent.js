@@ -394,6 +394,8 @@ function restoreNoFall(reason) {
         writableFloat(gravity);
         if (gravity.readFloat() !== 0 && gravity.readFloat() !== fallBackup.gravity)
             throw new Error('gravity changed externally; restore refused');
+        const vy = context.physics.add(MEMORY_LAYOUT.tas.body.VY);
+        writableFloat(vy); vy.writeFloat(0);
         gravity.writeFloat(fallBackup.gravity);
         fallBackup = null; fallStatus = { ...fallStatus, status: 'restored', reason };
     } catch (e) { fallStatus = { ...fallStatus, status: 'restore_failed', error: String(e), reason }; }
@@ -416,11 +418,28 @@ function preventFall(state) {
             if (g < 0 || g > 10) throw new Error('unexpected gravity scale');
             fallBackup = { state, physics: context.physics.toString(), hero: context.hero.toString(), gravity: g };
             fallStatus = { status: 'active', original_gravity: g, physics: context.physics.toString(),
-                note: 'gravity and vertical velocity suppressed; no position writes' };
+                note: 'bounded initial descent, then no-fall; no position writes' };
+            if (C.no_fall.underground) {
+                const y = numberAt(context.hero, C.object.y);
+                fallBackup.targetY = y + C.no_fall.down;
+                fallBackup.descentStarted = Date.now();
+                fallStatus.start_y = y; fallStatus.target_y = fallBackup.targetY;
+                fallStatus.descent = 'descending';
+            }
         }
         mutationAttempted = true;
         if (g !== 0) gravity.writeFloat(0);
-        if (velocity !== 0) vy.writeFloat(0);
+        let desiredVY = 0;
+        if (fallStatus.descent === 'descending') {
+            const y = numberAt(context.hero, C.object.y);
+            fallStatus.current_y = y;
+            if (y >= fallBackup.targetY) fallStatus.descent = 'complete';
+            else if (Date.now() - fallBackup.descentStarted > C.no_fall.descent_timeout_ms) {
+                fallStatus.descent = 'timed_out';
+                fallStatus.descent_warning = 'descent stopped before target; no automatic retry';
+            } else desiredVY = C.no_fall.descent_vy;
+        }
+        if (velocity !== desiredVY) vy.writeFloat(desiredVY);
         fallStatus.status = 'active'; delete fallStatus.error;
         fallStatus.gravity = gravity.readFloat(); fallStatus.vy = vy.readFloat();
     } catch (e) { fallStatus = { ...fallStatus, status: 'deferred_or_failed', error: String(e) }; }
