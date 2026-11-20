@@ -10,8 +10,13 @@ let lifecycleCode = null;
 let autoRun = null;
 let autoSeen = new Set();
 let wallState = null, wallPatch = null;
+let wallEvents = [];
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
+    if (kind.startsWith('wall_pass_')) {
+        wallEvents.push({ time: Date.now(), kind, ...data });
+        if (wallEvents.length > 12) wallEvents.shift();
+    }
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > (C.diagnostics ? C.limits.events : C.auto_teleport.events)) events.shift();
 }
@@ -447,21 +452,26 @@ function restoreWalls(reason) {
     }
 }
 function enableWalls(state) {
-    if (!C.wall_pass.enabled || (wallState && wallState.state === state.toString())) return;
+    if (!C.wall_pass.enabled || (wallState && wallState.active !== false && wallState.state === state.toString())) return;
     if (wallPatch) { restoreWalls('state changed'); if (wallPatch) return; }
-    wallState = { state: state.toString(), status: 'searching', scope: 'game module writable data only' };
+    wallState = { state: state.toString(), status: 'searching', active: true, scanned_bytes: 0, ranges: 0, raw_matches: 0, matches: 0, candidates: [], scope: 'game module writable data only' };
     try {
         const module = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         if (!module) throw new Error('game module missing');
         const candidates = new Map(); let scanned = 0, matches = 0;
         for (const range of module.enumerateRanges('rw-')) {
-            scanned += range.size;
+            scanned += range.size; wallState.scanned_bytes = scanned; wallState.ranges++;
             if (scanned > C.wall_pass.max_scan_bytes) throw new Error('wall scan byte budget exceeded');
             for (const match of Memory.scanSync(range.base, range.size, C.wall_pass.pattern)) {
-                if (++matches > C.wall_pass.max_matches) throw new Error('wall scan match budget exceeded');
+                wallState.raw_matches = ++matches;
+                if (matches > C.wall_pass.max_matches) throw new Error('wall scan match budget exceeded');
                 const pointer = match.address;
                 if (Number(pointer.sub(module.base).toString()) < 0 ||
                     Number(pointer.add(C.wall_pass.neighbours[C.wall_pass.neighbours.length - 1][0] + 4).sub(module.base).toString()) > module.size) continue;
+                if (wallState.candidates.length < 6) wallState.candidates.push({
+                    parameter: address(pointer), value: safe(() => pointer.readFloat()),
+                    neighbours: C.wall_pass.neighbours.map(([offset, expected]) => ({ offset, expected,
+                        actual: safe(() => numberAt(pointer, offset)) })) });
                 if (safe(() => Math.abs(pointer.readFloat() - C.wall_pass.original) <= C.wall_pass.tolerance && wallBlockMatches(pointer)) === true)
                     candidates.set(pointer.toString(), pointer);
             }
@@ -488,7 +498,7 @@ function autoTeleport(state) {
     try {
         requireClass(state, C.move_white.state_name);
         const phase = state.add(C.state.phase).readS32();
-        if (phase !== 1) { restoreWalls('level inactive'); wallState = wallPatch ? wallState : null; autoRun = null; autoSeen.clear(); return; }
+        if (phase !== 1) { restoreWalls('level inactive'); if (wallState) wallState.active = false; autoRun = null; autoSeen.clear(); return; }
         const now = Date.now();
         if (!autoRun || autoRun.state !== state.toString()) {
             autoSeen.clear();
@@ -549,12 +559,12 @@ function requestMove(mode = 'visual') {
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 function stop() { restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, wall_pass: wallState, auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { enabled, error, calls, samples, skipped, resolution, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
     autoRun = null; autoSeen.clear();
-    if (!wallPatch) wallState = null;
+    if (!wallPatch) { wallState = null; wallEvents = []; }
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
     pendingMove = null; lastMove = null; movesExecuted = 0; mutationAttempted = false; teleportUsed = false;
