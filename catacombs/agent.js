@@ -15,6 +15,7 @@ let fixtureReport = null, filterSymbols = null;
 let maskTest = null, maskBackup = null;
 let speedTest = null, speedBackup = null;
 let fallStatus = null, fallBackup = null;
+let pendingAltitude = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -385,6 +386,7 @@ function restoreHeroMasks(reason) {
     event('hero_mask_restore', { result: maskTest });
 }
 function restoreNoFall(reason) {
+    pendingAltitude = null;
     if (!fallBackup) return;
     try {
         const context = heroMaskContext(fallBackup.state);
@@ -429,6 +431,24 @@ function preventFall(state) {
         }
         mutationAttempted = true;
         if (g !== 0) gravity.writeFloat(0);
+        if (pendingAltitude) {
+            const request = pendingAltitude; pendingAltitude = null;
+            if (request.state !== state.toString() || Date.now() - request.time > C.altitude_test.expiry_ms) {
+                fallStatus.altitude_error = 'altitude request stale/state changed';
+            } else {
+                const y = numberAt(context.hero, C.object.y);
+                if (request.mode === 'above' && fallBackup.originY === undefined) fallBackup.originY = y;
+                if (fallBackup.originY === undefined) fallStatus.altitude_error = 'use above before return-height';
+                else {
+                    fallBackup.flight = { target: request.mode === 'above' ? fallBackup.originY - C.altitude_test.up : fallBackup.originY,
+                        started: Date.now(), mode: request.mode };
+                    fallStatus.altitude = { mode: request.mode, status: 'moving', origin_y: fallBackup.originY,
+                        target_y: fallBackup.flight.target };
+                    delete fallStatus.altitude_error;
+                    fallStatus.descent = 'cancelled_by_manual_altitude';
+                }
+            }
+        }
         let desiredVY = 0;
         if (fallStatus.descent === 'descending') {
             const y = numberAt(context.hero, C.object.y);
@@ -438,6 +458,17 @@ function preventFall(state) {
                 fallStatus.descent = 'timed_out';
                 fallStatus.descent_warning = 'descent stopped before target; no automatic retry';
             } else desiredVY = C.no_fall.descent_vy;
+        }
+        if (fallBackup.flight) {
+            const flight = fallBackup.flight;
+            const y = numberAt(context.hero, C.object.y), delta = flight.target - y;
+            fallStatus.altitude.current_y = y;
+            if (Math.abs(delta) <= C.altitude_test.tolerance) {
+                fallStatus.altitude.status = 'reached'; fallBackup.flight = null;
+            } else if (Date.now() - flight.started > C.altitude_test.timeout_ms) {
+                fallStatus.altitude.status = 'timed_out'; fallBackup.flight = null;
+            } else desiredVY = Math.sign(delta) * Math.min(C.altitude_test.velocity,
+                Math.max(0.2, Math.abs(delta) / C.candy_body_probe.scale * 10));
         }
         if (velocity !== desiredVY) vy.writeFloat(desiredVY);
         fallStatus.status = 'active'; delete fallStatus.error;
@@ -841,6 +872,14 @@ function autoTeleport(state) {
         error = String(e); event('auto_teleport_error', { error });
     }
 }
+function requestAltitude(mode) {
+    if (!enabled || !latest || !C.no_fall.enabled) throw new Error('start module and enter active Catacombs first');
+    if (latest.phase_raw !== 1 || Date.now() - latest.time > C.altitude_test.expiry_ms)
+        throw new Error('active state snapshot missing/stale');
+    if (mode === 'return' && (!fallBackup || fallBackup.originY === undefined)) throw new Error('use above before return-height');
+    pendingAltitude = { mode, state: latest.state.address, time: Date.now() };
+    return { queued: true, mode, warning: 'Manual vertical velocity test; check no_fall.altitude, return before finish.' };
+}
 function requestMove(mode = 'visual') {
     if (C.auto_teleport.enabled) throw new Error('automatic teleport enabled; manual moves disabled');
     if (mode === 'teleport' && teleportUsed) throw new Error('teleport already attempted; inspect dump before restarting module');
@@ -852,10 +891,11 @@ function requestMove(mode = 'visual') {
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 function stop() { restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { enabled, error, calls, samples, skipped, resolution, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    pendingAltitude = null;
     if (!fallBackup) fallStatus = null;
     if (!speedBackup) speedTest = null;
     if (!maskBackup) maskTest = null;
@@ -893,7 +933,7 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,

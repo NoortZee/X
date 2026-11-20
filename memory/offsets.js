@@ -71,6 +71,7 @@ const MEMORY_LAYOUT = {
             neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12, false]] },
         speed_test: { enabled: true, offset: 0x8, multiplier: 5, baseline: 2.20000004768 },
         // Initial underground descent disabled: finish regression reported; keep prior no-fall mode.
+        altitude_test: { up: 768, velocity: 8, timeout_ms: 3000, expiry_ms: 5000, tolerance: 4 },
         no_fall: { enabled: true, underground: false, down: 64, descent_vy: 2, descent_timeout_ms: 2000 },
         mask_test: { enabled: true, value: 4, category: 2, group: 0, allowed_masks: [65533, 1, 4] },
         fixture_probe: { enabled: true, fixture_head: 0x70, next: 0x8, owner: 0x10,
