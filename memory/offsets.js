@@ -24,6 +24,9 @@ const MEMORY_LAYOUT = {
         hero: {
             VTABLE: 0x00,
             BODY_PTR: 0x20,
+            DIRECTION: 0x9C,
+            WALL_LEFT: 0x88,
+            WALL_RIGHT: 0x8C,
             STATE_A0: 0xA0,
             COOLDOWN_B0: 0xB0,
             GROUND_80: 0x80,
@@ -80,6 +83,7 @@ const MEMORY_LAYOUT = {
         skull: { active: 0x1A9 },
         result: { pointer: 0x290, count: 0x20 },
         profile: { userinfo: 0x18, count: 0x148, cap: 0x4B0 },
+        trace: { frames: 16, unique: 32, sample_ms: 2000 },
         limits: { descriptors: 512, events: 1000, skulls: 512, count: 100000, sample_ms: 1000 },
     },
     platform: {

@@ -11,6 +11,9 @@ let lastSample = 0;
 let counters = {};
 let lastHeroSample = null;
 let lastHero = null;
+let lastTraceSample = null;
+let traces = new Map();
+let metadata = null;
 function emit(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -64,6 +67,72 @@ function snapshotState(state) {
         level: state.add(C.state.level).readPointer().toString(),
         mode: 'ReplayState candidate; Catacombs not independently confirmed' };
 }
+function readBoundedName(pointer) {
+    let name = '';
+    for (let i = 0; i < C.rtti.max_name_bytes; i++) {
+        const byte = pointer.add(i).readU8();
+        if (byte === 0) return name;
+        if (byte < 32 || byte > 126) throw new Error('non-ASCII RTTI name');
+        name += String.fromCharCode(byte);
+    }
+    throw new Error('RTTI name exceeds limit');
+}
+function describeAddress(address) {
+    const result = { address: address.toString() };
+    try {
+        const module = Process.findModuleByAddress(address);
+        if (module) {
+            result.module = module.name;
+            result.rva = address.sub(module.base).toString();
+        }
+    } catch (error) { result.error = String(error); }
+    return result;
+}
+function captureTrace(context, returnAddress) {
+    const now = Date.now();
+    if (lastTraceSample !== null && now - lastTraceSample < C.trace.sample_ms) return;
+    lastTraceSample = now;
+    let frames;
+    let method = 'accurate';
+    let accurateError = null;
+    try { frames = Thread.backtrace(context, Backtracer.ACCURATE); }
+    catch (error) { frames = []; accurateError = String(error); }
+    if (frames.length === 0) {
+        method = 'fuzzy'; // May contain false positives; never used as automatic hook targets.
+        try { frames = Thread.backtrace(context, Backtracer.FUZZY); }
+        catch (error) { emit('trace_error', { error: String(error), accurate_error: accurateError }); return; }
+    }
+    const stack = frames.slice(0, C.trace.frames).map(describeAddress);
+    const caller = returnAddress ? describeAddress(returnAddress) : null;
+    const key = JSON.stringify({ method, caller, stack });
+    const old = traces.get(key);
+    if (old) { old.samples++; old.last_seen = now; return; }
+    if (traces.size >= C.trace.unique) return;
+    const trace = { id: traces.size + 1, method, caller, stack,
+        samples: 1, first_seen: now, last_seen: now, accurate_error: accurateError };
+    traces.set(key, trace);
+    emit('hero_trace', trace);
+}
+function heroValues(hero) {
+    const values = {};
+    const H = MEMORY_LAYOUT.tas.hero;
+    const B = MEMORY_LAYOUT.tas.body;
+    try {
+        values.direction = hero.add(H.DIRECTION).readS32();
+        values.state = hero.add(H.STATE_A0).readS32();
+        values.ground = [hero.add(H.GROUND_80).readS32(), hero.add(H.GROUND_84).readS32()];
+        values.walls = [hero.add(H.WALL_LEFT).readS32(), hero.add(H.WALL_RIGHT).readS32()];
+        const body = hero.add(H.BODY_PTR).readPointer();
+        values.body = body.toString();
+        values.physics = {};
+        for (const field of ['XF_PX', 'XF_PY', 'VX', 'VY', 'SW_A', 'AV', 'GRAVITY']) {
+            const value = body.add(B[field]).readFloat();
+            if (!Number.isFinite(value)) throw new Error('non-finite body field: ' + field);
+            values.physics[field] = value;
+        }
+    } catch (error) { values.read_error = String(error); }
+    return values;
+}
 function heroIdentity(hero) {
     const identity = { object: hero.toString() };
     try {
@@ -72,7 +141,7 @@ function heroIdentity(hero) {
         const typeinfo = vptr.add(C.rtti.typeinfo_from_vptr).readPointer();
         identity.typeinfo = typeinfo.toString();
         const name = typeinfo.add(C.rtti.name_from_typeinfo).readPointer();
-        identity.rtti_name = name.readCString(C.rtti.max_name_bytes);
+        identity.rtti_name = readBoundedName(name);
     } catch (error) { identity.rtti_error = String(error); }
     return identity;
 }
@@ -87,6 +156,12 @@ function install() {
     lastError = null;
     events = []; skulls = new Map(); counters = {}; lastSample = 0;
     resolutions = {}; lastHeroSample = null; lastHero = null;
+    lastTraceSample = null; traces = new Map();
+    const gameModule = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    metadata = { captured_at: Date.now(), process_id: Process.id, arch: Process.arch,
+        pointer_size: Process.pointerSize, profile_game_version: MEMORY_LAYOUT.game_version,
+        profile_version_is_not_runtime_detection: true,
+        module: gameModule ? { name: gameModule.name, base: String(gameModule.base), size: gameModule.size } : null };
     try {
         const addresses = resolveAll(); // Validate every signature before attaching any hook.
         resolutions = Object.fromEntries(Object.entries(addresses).map(([k, v]) => [k, v.toString()]));
@@ -144,7 +219,8 @@ function install() {
             const now = Date.now();
             if (lastHeroSample !== null && now - lastHeroSample < C.limits.sample_ms) return;
             lastHeroSample = now;
-            lastHero = heroIdentity(args[0]);
+            lastHero = { ...heroIdentity(args[0]), values: heroValues(args[0]) };
+            captureTrace(this.context, this.returnAddress);
             emit('hero_control', lastHero);
         }) });
         emit('enabled', { diagnostic_only: true });
@@ -152,11 +228,11 @@ function install() {
     return status();
 }
 function status() {
-    return { enabled, diagnostic_only: true, last_error: lastError,
+    return { enabled, diagnostic_only: true, metadata, traces_retained: traces.size, last_error: lastError,
         resolutions, counters, last_hero: lastHero, events_retained: events.length, skulls_retained: skulls.size };
 }
 rpc.exports = {
     install, status,
     stop() { stop(); return status(); },
-    report() { return { ...status(), events: events.slice() }; },
+    report() { return { ...status(), traces: Array.from(traces.values()), events: events.slice() }; },
 };
