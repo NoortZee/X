@@ -102,3 +102,36 @@ test('replay_update signature matches supplied file and runtime bytes, including
     oldWrongInstruction[27] = 0x83;
     assert.equal(matches(oldWrongInstruction), false);
 });
+
+test('collect_request uses the distinguishing 117-byte prefix from the supplied runtime dump', () => {
+    const context = vm.createContext({});
+    vm.runInContext(fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8'), context);
+    const pattern = vm.runInContext('MEMORY_LAYOUT.catacombs.signatures.collect_request', context)
+        .split(/\s+/);
+    const bytes = Buffer.from((
+        '55 48 89 e5 41 57 41 56 41 54 53 48 81 ec b0 04 ' +
+        '00 00 41 89 d7 48 89 f3 49 89 fe 48 8d bd 30 fb ' +
+        'ff ff e8 e9 58 0c 00 bf 20 00 00 00 e8 df 7f 0d ' +
+        '01 49 89 c4 48 89 c7 e8 24 ef 09 00 80 8d 52 fb ' +
+        'ff ff 02 c7 45 dc 0f 00 00 00 48 8b bd c0 fb ff ' +
+        'ff 48 85 ff 74 06 48 8b 07 ff 50 08 80 8d 41 fb ' +
+        'ff ff 20 4c 89 a5 c0 fb ff ff 41 80 4c 24 10 01 ' +
+        '45 89 7c 24 18 48 8d b5 30 fb ff ff 4c 89 f7 48 ' +
+        '89 da 31 c9 e8 27 93 ff ff 48 8d bd 30 fb ff ff ' +
+        'e8 5b 59 0c 00 48 81 c4 b0 04 00 00 5b 41 5c 41 ' +
+        '5e 41 5f 5d c3').replace(/\s+/g, ''), 'hex');
+    function matches(buffer) {
+        return buffer.length >= pattern.length && pattern.every((token, i) =>
+            token === '??' || parseInt(token, 16) === buffer[i]);
+    }
+    assert.equal(pattern.length, 117);
+    assert.equal(matches(bytes), true);
+    const relocated = Buffer.from(bytes);
+    for (const offset of [35, 45, 56]) relocated.fill(0xAA, offset, offset + 4);
+    assert.equal(matches(relocated), true);
+    // Same old 44-byte prefix, different request-specific trailing instruction.
+    const otherBuilder = Buffer.from(bytes);
+    otherBuilder[116] = 0x1C;
+    assert.equal(matches(otherBuilder), false);
+    assert.equal(matches(bytes.subarray(0, 44)), false);
+});

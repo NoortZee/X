@@ -70,7 +70,7 @@ const MEMORY_LAYOUT = {
             replay_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB E8 ?? ?? ?? ?? 48 8B BB 60 01 00 00',
             skull_spawn: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 F3 0F 11 45 D4 48 89 FB E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B B3 B8 00 00 00 48 89 C7 F3 0F 10 45 D4',
             skull_commit: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 41 89 F6 48 89 FB 48 8B 87 08 01 00 00 48 85 C0 75 1B',
-            collect_request: '55 48 89 E5 41 57 41 56 41 54 53 48 81 EC B0 04 00 00 41 89 D7 48 89 F3 49 89 FE 48 8D BD 30 FB FF FF E8 ?? ?? ?? ?? BF 20 00 00 00',
+            collect_request: '55 48 89 E5 41 57 41 56 41 54 53 48 81 EC B0 04 00 00 41 89 D7 48 89 F3 49 89 FE 48 8D BD 30 FB FF FF E8 ?? ?? ?? ?? BF 20 00 00 00 E8 ?? ?? ?? ?? 49 89 C4 48 89 C7 E8 ?? ?? ?? ?? 80 8D 52 FB FF FF 02 C7 45 DC 0F 00 00 00 48 8B BD C0 FB FF FF 48 85 FF 74 06 48 8B 07 FF 50 08 80 8D 41 FB FF FF 20 4C 89 A5 C0 FB FF FF 41 80 4C 24 10 01 45 89 7C 24 18',
             death_skull_update: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 48 85 C0 74 18 C6 83 A9 01 00 00 00 48 89 DF BE 01 00',
         },
         state: { skull_begin: 0x120, skull_end: 0x128, skull_objects: 0x138, level: 0x98 },
