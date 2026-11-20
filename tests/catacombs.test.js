@@ -34,10 +34,10 @@ test('opt-in hooks, idempotent start, report and complete cleanup', () => {
     assert.equal(f.hooks.length, 0);
     assert.equal(f.rpc.install().enabled, true);
     f.rpc.install();
-    assert.equal(f.hooks.length, 9);
+    assert.equal(f.hooks.length, 11);
     assert.equal(f.rpc.report().events.length, 1);
     f.rpc.stop(); f.rpc.stop();
-    assert.equal(f.detached(), 9);
+    assert.equal(f.detached(), 11);
 });
 for (const matches of [0, 2]) test('reject nonunique signatures: ' + matches, () => {
     const f = fixture(matches);
@@ -55,7 +55,7 @@ test('invalid runtime field disables the entire module and records reason', () =
     f.hooks[2].onEnter([f.pointer()]);
     assert.equal(f.rpc.status().enabled, false);
     assert.match(f.rpc.status().last_error, /invalid skull active/);
-    assert.equal(f.detached(), 9);
+    assert.equal(f.detached(), 11);
 });
 test('read-only implementation never writes memory or invokes game functions', () => {
     const source = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
@@ -375,7 +375,7 @@ test('code diagnostics bounds decoding and never installs candidate hooks', () =
         assert.equal(entry.instructions.length, 192);
         assert.equal(entry.error, undefined);
     }
-    assert.equal(f.hooks.length, 9);
+    assert.equal(f.hooks.length, 11);
 });
 
 test('code diagnostics rejects non-executable ranges without disabling module', () => {
@@ -397,4 +397,52 @@ test('before/after update changes are retained separately and never called exact
     assert.match(change.scope, /exact writer not identified/);
     for (let i = 0; i < 1100; i++) f.hooks[4].onEnter([]);
     assert.equal(f.rpc.report().update_changes.length, 1);
+});
+
+
+test('candidate factory reads returned object, not its input argument; null is counted', () => {
+    const f = fixture(); f.rpc.install();
+    const invocation = {};
+    f.hooks[10].onEnter.call(invocation, []);
+    f.hooks[10].onLeave.call(invocation, { isNull: () => true });
+    assert.equal(f.rpc.report().collectible_totals.crumb_factory_null, 1);
+    const returned = { isNull: () => false, toString: () => '0x1234', add() { throw new Error('RTTI unavailable'); } };
+    f.hooks[10].onLeave.call(invocation, returned);
+    const event = f.rpc.report().collectible_events[1];
+    assert.equal(event.identity.object, '0x1234');
+    assert.match(event.identity.rtti_error, /RTTI unavailable/);
+    assert.equal(event.correlation_is_not_ownership, true);
+    assert.equal(f.rpc.status().enabled, true);
+});
+
+test('candidate observations have an independent bounded buffer and totals', () => {
+    const f = fixture(); f.rpc.install();
+    for (let i = 0; i < 600; i++) f.hooks[10].onLeave({ isNull: () => true });
+    for (let i = 0; i < 1100; i++) f.hooks[4].onEnter([]);
+    const report = f.rpc.report();
+    assert.equal(report.collectible_events.length, 512);
+    assert.equal(report.collectible_totals.crumb_factory_null, 600);
+});
+
+test('candidate spawner records entry/exit without reading undocumented owner fields', () => {
+    const f = fixture(); f.rpc.install();
+    const invocation = {};
+    f.hooks[9].onEnter.call(invocation, [{ toString: () => '0x5555' }]);
+    f.hooks[9].onLeave.call(invocation);
+    assert.equal(f.rpc.report().collectible_events[0].owner, '0x5555');
+    assert.equal(f.rpc.report().collectible_events[1].kind, 'crumb_spawn_leave');
+});
+
+
+test('collectible candidate signatures match supplied instructions with wildcard calls', () => {
+    const f = fixture();
+    const fixtures = {'crumb_spawn_candidate': '554889e54157415641554154534883ec284889fbe88723260083b8a4080000000f8e85010000', 'crumb_factory_candidate': '554889e553504889fbe8e2c693004885c07416e828000000488b0b4889df4889c6ff91b0000000'};
+    for (const [name, hex] of Object.entries(fixtures)) {
+        const bytes = Buffer.from(hex, 'hex');
+        const pattern = vm.runInContext('C.signatures.' + name, f.context).split(/\s+/);
+        assert.ok(bytes.length >= pattern.length);
+        assert.ok(pattern.every((token, i) => token === '??' || parseInt(token, 16) === bytes[i]), name);
+        pattern.forEach((token, i) => { if (token === '??') bytes[i] ^= 0xFF; });
+        assert.ok(pattern.every((token, i) => token === '??' || parseInt(token, 16) === bytes[i]), name);
+    }
 });

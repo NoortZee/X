@@ -70,6 +70,8 @@ const MEMORY_LAYOUT = {
     catacombs: {
         // Candidate profile supplied by static analysis, not runtime verified.
         signatures: {
+            crumb_spawn_candidate: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 28 48 89 FB E8 ?? ?? ?? ?? 83 B8 A4 08 00 00 00 0F 8E',
+            crumb_factory_candidate: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 48 85 C0 74 16 E8 ?? ?? ?? ?? 48 8B 0B 48 89 DF 48 89 C6 FF 91 B0 00 00 00',
             endless_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB F3 0F 11 45 D4 E8 ?? ?? ?? ?? 48 8B 7B 50 48 85 FF 74 0B 48 8B 07 F3 0F 10 45 D4 FF 50 78',
             play_update: '55 48 89 E5 41 56 53 48 83 EC 10 80 BF C0 00 00 00 00 74 11 48 8B 07 48 83 C4 10 5B 41 5E 5D FF A0 C0 00 00 00 80 BF C1 00 00 00 00 74 11 48 8B 07 48 83 C4 10 5B 41 5E 5D FF A0 B8 00 00 00',
             play_update_heroes: '55 48 89 E5 41 56 53 48 89 FB 4C 8B B7 98 00 00 00 4D 85 F6 74 1A 48 8D 05 ?? ?? ?? ?? F3 0F 10 00 E8 ?? ?? ?? ?? 4C 89 F7 89 C6 E8 ?? ?? ?? ?? 4C 8B B3 A0 00 00 00',
@@ -86,6 +88,7 @@ const MEMORY_LAYOUT = {
             candidates: { state1: 0x14D77E0, state2_or_4: 0x14D79D0,
                 helper_a: 0x14D76D0, helper_b: 0x14D7B30,
                 helper_c: 0x14D7D60, helper_d: 0x14D6D00 } },
+        collectible_diagnostics: { events: 512, classes: 32 },
         endless: { state: 0x138, index_min: 0x178, index_max: 0x17C,
             timer: 0x190, index_current: 0xF0, index_next: 0xF4, recalculate: 0xF9,
             container: 0x60, related: 0x188,
