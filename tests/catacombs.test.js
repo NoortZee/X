@@ -229,3 +229,43 @@ test('failed second coordinate write attempts immediate rollback and reports fai
     assert.equal(f.memory.get(0x3034), 12);
     assert.equal(f.memory.get(0x3038), 6);
 });
+
+test('Candy physics candidate is read-only and compares independent physical position', () => {
+    const f = fixture();
+    f.identity(0x6000, 0x8300, 0x9300, 0xA300, '20EndlessMazeCandyBody');
+    for (const [p, v] of [[0x3198, 0x6000], [0x6020, 0x7000], [0x7000, 0],
+        [0x700C, 0.12], [0x7010, 0.06], [0x7040, 0], [0x7044, 0],
+        [0x7038, 0], [0x7048, 0], [0x70A8, 0]]) f.memory.set(p, v);
+    f.c.Process.findRangeByAddress = () => ({ base: f.pointer(0), size: 0x4000000, protection: 'rw-' });
+    f.rpc.install(); f.tick();
+    let candidate = f.rpc.report().latest.object_graph.candies[0].physics_candidate;
+    assert.equal(candidate.position_matches, true);
+    assert.equal(candidate.candidate_only, true);
+    f.memory.set(0x3034, 100); f.force(); f.tick();
+    candidate = f.rpc.report().latest.object_graph.candies[0].physics_candidate;
+    assert.equal(candidate.position_matches, false);
+    assert.equal(candidate.fields.XF_PX, 0.12);
+    assert.equal(f.writes.length, 0);
+});
+test('Candy physics candidate refuses wrong class and inaccessible memory', () => {
+    const f = fixture(); f.memory.set(0x3198, 0x6000);
+    f.identity(0x6000, 0x8300, 0x9300, 0xA300, '8HeroBody');
+    f.rpc.install(); f.tick();
+    assert.match(f.rpc.report().latest.object_graph.candies[0].physics_candidate.error, /unexpected class/);
+    assert.equal(f.writes.length, 0);
+});
+test('Body call probe follows only bounded direct calls, never indirect calls', () => {
+    const f = fixture();
+    f.memory.set(0x6000, 0x8300); f.memory.set(0x8318, 0x200000);
+    f.c.bodyPointer = f.pointer(0x6000);
+    vm.runInContext(`
+        methodCode.set('0x200000', { instructions: [
+            { mnemonic: 'call', operands: 'rax' },
+            ...Array.from({length: 12}, (_, i) => ({mnemonic: 'call', operands: '0x' + (0x210000 + i).toString(16), address: {address: '0x200010'}}))
+        ] });
+    `, f.c);
+    const result = vm.runInContext('bodyCallProbe(bodyPointer)', f.c);
+    assert.equal(result.calls.length, 8);
+    assert.equal(result.calls[0].target.address, '0x210000');
+    assert.equal(f.writes.length, 0);
+});
