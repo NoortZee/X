@@ -6,7 +6,7 @@ description = "King of Thieves TAS + rival stones scanner (Rust + Frida + Phanto
 
 [dependencies]
 ctrlc = "3.4"
-frida = { git = "https://github.com/frida/frida-rust", rev = "7f9c5eaa17c017fbf721d353b7529d5c16e10eab", features = ["auto-download"] }
+frida = { git = "https://github.com/frida/frida-rust", branch = "main", features = ["auto-download"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
