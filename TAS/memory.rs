@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn both_agents_load_the_same_runtime_layout() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for agent in ["TAS/agent.js", "stones/rival_hook.js"] {
+        for agent in ["TAS/agent.js", "stones/rival_hook.js", "catacombs/agent.js"] {
             let source = prepend_layout(&root.join(agent), "// test agent").unwrap();
             assert!(source.contains("const MEMORY_LAYOUT ="));
             assert!(source.contains("Process.arch !== MEMORY_LAYOUT.arch"));
