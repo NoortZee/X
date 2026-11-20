@@ -65,10 +65,12 @@ const MEMORY_LAYOUT = {
         item_first_ptr: 8,
     },
     catacombs: {
-        wall_pass: { enabled: true, pattern: '66 66 d5 41', original: 26.67499923706,
+        wall_pass: { enabled: false, pattern: '66 66 d5 41', original: 26.67499923706,
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
             // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.
             neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12, false]] },
+        fixture_probe: { enabled: true, fixture_head: 0x70, next: 0x8, owner: 0x10,
+            category: 0x34, mask: 0x36, group: 0x38, limit: 8, candies: 3, symbols: 4 },
         diagnostics: false,
         auto_teleport: { enabled: true, delay_ms: 300, interval_ms: 20, rarities: [1, 2, 3, 4], events: 80 },
         profile: '2.84.2 live candidates; not automatic game version detection',

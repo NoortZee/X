@@ -17,6 +17,8 @@ function fixture(matches = 1, production = false) {
         readPointer() { return new P(this.value()); }
         readU8() { return this.value(); }
         readS32() { return this.value(); }
+        readU16() { return this.value(); }
+        readS16() { const n = this.value(); return n > 32767 ? n - 65536 : n; }
         readFloat() { return this.value(); }
         writeFloat(n) { writes.push([this.n, n]); memory.set(this.n, n); }
         readByteArray(length) { return Uint8Array.from({ length }, (_, i) => memory.get(this.n + i) || 0).buffer; }
@@ -29,7 +31,7 @@ function fixture(matches = 1, production = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -510,13 +512,12 @@ test('wall candidate report includes actual neighbouring values on mismatch with
     assert.equal(r.candidates[0].neighbours[0].actual,999);
     assert.equal(f.writes.length,0);
 });
-test('actual update exit keeps wall failure at phase 2',()=>{
+test('production no longer applies legacy wall parameter',()=>{
     const f=autoFixture(); f.leave(); f.c.testTime=1300; f.leave();
-    assert.equal(f.rpc.status().wall_pass.status,'unavailable');
+    assert.equal(f.rpc.status().wall_pass,null);
     f.memory.set(0x1138,2); f.leave();
-    assert.equal(f.rpc.status().wall_pass.status,'unavailable');
-    assert.equal(f.rpc.status().wall_pass.active,false);
-    assert.ok(f.rpc.report().wall_events.length>0);
+    assert.equal(f.rpc.status().wall_pass,null);
+    assert.equal(f.rpc.report().wall_events.length,0);
 });
 test('live 2.84.2 collectable-offset mismatch is observational, not a wall write veto',()=>{
     const f=wallFixture();f.memory.set(0x250108,0.19099999964237213);
@@ -535,4 +536,46 @@ test('each of four required Lua neighbours still vetoes writes independently',()
         vm.runInContext('enableWalls(wallTestState)',f.c);
         assert.equal(f.rpc.status().wall_pass.status,'unavailable');assert.equal(f.writes.length,0);
     }
+});
+
+test('fixture probe reads bounded chain, unsigned masks and signed group without writes',()=>{
+    const f=fixture(); f.c.physicsTest=f.pointer(0x10000);
+    for (const [p,v] of [[0x10070,0x11000],[0x11010,0x10000],[0x11034,2],
+        [0x11036,65535],[0x11038,65535],[0x11008,0]]) f.memory.set(p,v);
+    const r=vm.runInContext('fixtureChain(physicsTest)',f.c);
+    assert.equal(r.complete,true);assert.equal(r.fixtures[0].category,2);
+    assert.equal(r.fixtures[0].mask,65535);assert.equal(r.fixtures[0].group,-1);
+    assert.equal(f.writes.length,0);
+    f.memory.set(0x11008,0x11000);
+    assert.match(vm.runInContext('fixtureChain(physicsTest)',f.c).error,/cycle/);
+    f.memory.set(0x11010,0x999);
+    assert.match(vm.runInContext('fixtureChain(physicsTest)',f.c).error,/owner mismatch/);
+});
+test('fixture probe caps chain traversal at eight fixtures',()=>{
+    const f=fixture();f.c.physicsTest=f.pointer(0x10000);f.memory.set(0x10070,0x11000);
+    for(let i=0;i<9;i++) {
+        const address=0x11000+i*0x100;
+        for(const [off,v] of [[0x10,0x10000],[0x34,2],[0x36,65535],[0x38,0],[8,address+0x100]])f.memory.set(address+off,v);
+    }
+    const r=vm.runInContext('fixtureChain(physicsTest)',f.c);
+    assert.equal(r.fixtures.length,8);assert.equal(r.truncated,true);assert.equal(r.complete,false);
+});
+test('filter export discovery is cached, reports no ABI guarantee and does not call native',()=>{
+    const f=fixture();let enumerations=0;
+    f.c.Process.findModuleByName().enumerateExports=()=>{
+        enumerations++;return [{type:'function',name:'_ZN9b2Fixture8RefilterEv',address:f.pointer(0x240000)}];
+    };
+    vm.runInContext('probeFilterSymbols(); probeFilterSymbols()',f.c);
+    assert.equal(enumerations,1);
+    const found=vm.runInContext('filterSymbols',f.c);
+    assert.equal(found.candidates.length,1);assert.equal(found.candidates[0].candidate_only,true);
+    assert.equal(f.writes.length,0);
+});
+test('compact dump retains most recent active fixture observation after level exit',()=>{
+    const f=autoFixture();f.force();f.tick();
+    assert.equal(f.rpc.report().fixture_probe.read_only,true);
+    const time=f.rpc.report().fixture_probe.time;
+    f.memory.set(0x1138,2);f.c.testTime+=1000;f.force();f.tick();
+    assert.equal(f.rpc.report().fixture_probe.time,time);
+    assert.ok(JSON.stringify(f.rpc.report()).length<20000);
 });

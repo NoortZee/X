@@ -11,6 +11,7 @@ let autoRun = null;
 let autoSeen = new Set();
 let wallState = null, wallPatch = null;
 let wallEvents = [];
+let fixtureReport = null, filterSymbols = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -257,10 +258,78 @@ function scanObjects(state) {
     result.complete = !result.truncated && !result.objects.some(o => o.error || (o.rtti && o.rtti.error));
     return result;
 }
+function fixtureChain(body) {
+    const F = C.fixture_probe;
+    const report = { physics: body.toString(), candidate_offsets: true, fixtures: [], complete: false };
+    try {
+        if (body.isNull()) throw new Error('null physics body');
+        let current = body.add(F.fixture_head).readPointer();
+        const seen = new Set();
+        while (!current.isNull() && report.fixtures.length < F.limit) {
+            if (seen.has(current.toString())) throw new Error('fixture cycle');
+            seen.add(current.toString());
+            const owner = current.add(F.owner).readPointer();
+            const entry = { address: current.toString(), owner: owner.toString(), owner_matches: owner.toString() === body.toString() };
+            report.fixtures.push(entry);
+            if (!entry.owner_matches) throw new Error('fixture owner mismatch; candidate offsets unverified');
+            entry.category = current.add(F.category).readU16();
+            entry.mask = current.add(F.mask).readU16();
+            entry.group = current.add(F.group).readS16();
+            current = current.add(F.next).readPointer();
+        }
+        report.complete = current.isNull();
+        report.truncated = !report.complete;
+    } catch (e) { report.error = String(e); }
+    return report;
+}
+function probeFilterSymbols() {
+    if (filterSymbols !== null) return;
+    filterSymbols = safe(() => {
+        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+        const found = [];
+        // Exports only: no whole-module byte-pattern guessing and no native calls.
+        for (const symbol of m.enumerateExports()) {
+            if (symbol.type !== 'function' || !/(SetFilterData|Refilter)/.test(symbol.name)) continue;
+            const key = captureMethodCode(symbol.address, 128, 32);
+            found.push({ name: symbol.name, target: address(symbol.address), code: methodCode.get(key), candidate_only: true });
+            if (found.length >= C.fixture_probe.symbols) break;
+        }
+        return { scope: 'exported symbols only', candidates: found,
+            note: 'No export match does not mean the function is absent; no ABI verified.' };
+    });
+}
+function captureFixtureReport(state) {
+    if (!C.fixture_probe.enabled || state.add(C.state.phase).readS32() !== 1) return;
+    probeFilterSymbols();
+    fixtureReport = { time: Date.now(), state: state.toString(), read_only: true,
+        filter_functions: filterSymbols, hero: safe(() => {
+            const world = state.add(C.state.world).readPointer();
+            const hero = world.add(C.world.hero).readPointer(); requireClass(hero, C.move_white.hero_name);
+            const body = hero.add(C.object.body).readPointer(); requireClass(body, C.move_white.hero_body_name);
+            const physics = body.add(C.hero_body.physics).readPointer();
+            return { address: hero.toString(), body: body.toString(), chain: fixtureChain(physics) };
+        }), candies: safe(() => {
+            const array = state.add(C.state.objects).readPointer();
+            const count = array.add(C.array.slots).readS32();
+            if (count < 0 || count > C.limits.slots) throw new Error('fixture probe array invalid/too large');
+            const data = array.add(C.array.data).readPointer(), result = [];
+            for (let i = 0; i < count && result.length < C.fixture_probe.candies; i++) {
+                const object = data.add(i * Process.pointerSize).readPointer();
+                if (object.isNull()) continue;
+                const id = identity(object);
+                if (!id.rtti || id.rtti.name !== C.candy.name) continue;
+                const body = object.add(C.object.body).readPointer(); requireClass(body, C.candy_body_probe.body_name);
+                result.push({ object: object.toString(), rarity: object.add(C.candy.rarity).readS32(),
+                    chain: fixtureChain(body.add(C.hero_body.physics).readPointer()) });
+            }
+            return result;
+        }) };
+}
 function sample(state) {
     if (!C.diagnostics) {
         if (lastTime !== null && Date.now() - lastTime < C.limits.sample_ms) { skipped++; return; }
         lastTime = Date.now(); samples++;
+        safe(() => captureFixtureReport(state));
         latest = { time: lastTime, state: { address: state.toString() },
             phase_raw: safe(() => state.add(C.state.phase).readS32()),
             paused_raw: safe(() => state.add(C.state.paused).readU8()) };
@@ -270,6 +339,7 @@ function sample(state) {
     const key = state.toString();
     if (lastTime !== null && now - lastTime < C.limits.sample_ms) { skipped++; return; }
     lastTime = now;
+    safe(() => captureFixtureReport(state));
     captureLifecycleCandidates();
     const snap = { time: now, state: identity(state),
         phase_raw: safe(() => state.add(C.state.phase).readS32()),
@@ -560,11 +630,11 @@ function requestMove(mode = 'visual') {
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 function stop() { restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { enabled, error, calls, samples, skipped, resolution, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
-    autoRun = null; autoSeen.clear();
+    autoRun = null; autoSeen.clear(); fixtureReport = null; filterSymbols = null;
     if (!wallPatch) { wallState = null; wallEvents = []; }
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
