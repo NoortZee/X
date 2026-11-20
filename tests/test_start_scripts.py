@@ -98,11 +98,17 @@ elif name == 'sudo':
         result, commands = self.run_dependencies(('pacman',))
         self.assertEqual(result.returncode, 0, result.stderr)
         install = commands[-1]
-        self.assertEqual(install[:4], ['pacman', '-Syu', '--needed', '--noconfirm'])
+        self.assertEqual(install[:4], ['pacman', '-S', '--needed', '--noconfirm'])
         for package in ('android-tools', 'base-devel', 'pkgconf', 'clang', 'llvm', 'openssl',
                         'python', 'python-pip', 'python-yaml', 'jdk17-openjdk', 'procps-ng'):
             self.assertIn(package, install)
         self.assertNotIn('python3-venv', install)
+        self.assertNotIn('shellcheck', install)
+        self.assertEqual(len(commands), 2)  # sudo -v and the targeted install only
+        for command in commands:
+            if command[0] == 'pacman':
+                self.assertFalse(any('y' in arg or 'u' in arg for arg in command[1:]
+                                     if arg.startswith('-') and not arg.startswith('--')))
         self.assertIn('JAVA_HOME=/usr/lib/jvm/java-17-openjdk', result.stdout)
 
     def test_debian_apt_dependencies_preserved(self):
