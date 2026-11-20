@@ -95,7 +95,7 @@ test('report never dereferences a retained pointer', () => {
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 8);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 10);
     assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
@@ -449,4 +449,40 @@ test('auto handles multiple Candy objects across updates, not one session-only t
     f.c.testTime=1400; f.leave(); assert.equal(calls,2);
     assert.equal(f.rpc.status().auto_run.moved,2);
     assert.throws(()=>f.rpc.teleportWhite(),/automatic teleport enabled/);
+});
+
+function wallFixture(count = 1, mismatch = false) {
+    const f = fixture();
+    const mod=f.c.Process.findModuleByName();
+    mod.enumerateRanges=()=>[{base:f.pointer(0x200000),size:0x100000}];
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x200000),size:0x100000,protection:'rw-'});
+    f.c.Memory.scanSync=()=>Array.from({length:count},(_,i)=>({address:f.pointer(0x250000+i*0x200)}));
+    const neighbours=vm.runInContext('MEMORY_LAYOUT.catacombs.wall_pass.neighbours',f.c);
+    for(let i=0;i<count;i++) {
+        const base=0x250000+i*0x200;f.memory.set(base,26.67499923706);
+        for(const [off,value] of neighbours) f.memory.set(base+off,value);
+    }
+    if(mismatch)f.memory.set(0x250008,999);
+    f.c.wallTestState=f.pointer(0x1000);
+    return f;
+}
+test('Lua wall parameter applies only to unique validated block and restores original on stop',()=>{
+    const f=wallFixture(); vm.runInContext('enableWalls(wallTestState)',f.c);
+    assert.equal(f.rpc.status().wall_pass.status,'applied');
+    assert.equal(f.memory.get(0x250000),-3.00000691414);
+    assert.equal(f.memory.get(0x250008),2.20000004768); // no speed/reward modification
+    vm.runInContext('enableWalls(wallTestState)',f.c);assert.equal(f.writes.length,1);
+    f.rpc.stop(); assert.equal(f.memory.get(0x250000),26.67499923706);
+    assert.equal(f.rpc.status().wall_pass.status,'restored');
+});
+test('wall mode refuses missing, ambiguous or mismatching parameter block',()=>{
+    for(const [count,mismatch] of [[0,false],[2,false],[1,true]]) {
+        const f=wallFixture(count,mismatch);vm.runInContext('enableWalls(wallTestState)',f.c);
+        assert.equal(f.rpc.status().wall_pass.status,'unavailable');assert.equal(f.writes.length,0);
+    }
+});
+test('wall restoration does not overwrite external edits',()=>{
+    const f=wallFixture();vm.runInContext('enableWalls(wallTestState)',f.c);
+    f.memory.set(0x250000,123);f.rpc.stop();
+    assert.equal(f.memory.get(0x250000),123);assert.equal(f.rpc.status().wall_pass.status,'restore_failed');
 });
