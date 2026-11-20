@@ -1,3 +1,5 @@
+#[path = "../catacombs/mod.rs"]
+mod catacombs;
 mod config;
 mod frida_agent;
 mod memory;
@@ -30,6 +32,7 @@ const MENU: &str = r#"
   play                only play
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
+  catacombs start|status|dump|mark <label>|stop
   stones <filter>     rival stones live + burst-skip (см. help)
   help                справка по stones
   clear               wipe console + delete replay.json
@@ -483,6 +486,7 @@ fn main() {
         }
     };
 
+    let mut catacombs_mod = catacombs::CatacombsModule::new(&session, root.clone());
     let mut stones_mod = StonesModule::new(
         &session,
         root.join("stones").join("rival_hook.js"),
@@ -550,6 +554,12 @@ fn main() {
                 in_cmd.store(false, Ordering::SeqCst);
                 break;
             }
+            s if s.split_whitespace().next() == Some("catacombs") => {
+                let arguments = s.strip_prefix("catacombs").unwrap_or("").trim();
+                if let Err(e) = catacombs_mod.command(arguments, &aborted) {
+                    eprintln!("ERROR catacombs: {e}");
+                }
+            }
             s if s.starts_with("stones") => {
                 let parts: Vec<&str> = cmd.split_whitespace().collect();
                 if parts.first().copied() == Some("stones") {
@@ -574,6 +584,7 @@ fn main() {
     }
 
     phantom.close();
+    drop(catacombs_mod);
     drop(stones_mod);
     drop(agent);
     let _ = session.detach();
