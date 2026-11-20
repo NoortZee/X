@@ -16,6 +16,8 @@ let traces = new Map();
 let metadata = null;
 let playSamples = {};
 let lastPlayStates = {};
+let lastEndlessSample = null;
+let lastEndless = null;
 function emit(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -135,6 +137,36 @@ function heroValues(hero) {
     } catch (error) { values.read_error = String(error); }
     return values;
 }
+function endlessSnapshot(state) {
+    const layout = C.endless;
+    const result = { identity: heroIdentity(state), values: {}, pointers: {}, container: {} };
+    function read(target, name, action) {
+        try { target[name] = action(); }
+        catch (error) { target[name + '_error'] = String(error); }
+    }
+    for (const name of ['state', 'index_min', 'index_max'])
+        read(result.values, name, () => state.add(layout[name]).readS32());
+    for (const name of ['timer', 'index_current', 'index_next']) {
+        read(result.values, name, () => {
+            const value = state.add(layout[name]).readFloat();
+            if (!Number.isFinite(value)) throw new Error('non-finite ' + name);
+            return value;
+        });
+    }
+    read(result.values, 'recalculate', () => state.add(layout.recalculate).readU8());
+    for (const name of ['container', 'related'])
+        read(result.pointers, name, () => state.add(layout[name]).readPointer().toString());
+    read(result.container, 'header', () => {
+        const container = state.add(layout.container).readPointer();
+        if (container.isNull()) return { null: true };
+        const count = container.add(layout.container_count).readS32();
+        if (count < 0 || count > layout.max_container_count)
+            throw new Error('invalid candidate container count: ' + count);
+        return { count, array: container.add(layout.container_array).readPointer().toString() };
+    });
+    // Header only: neither element layout nor relation to collectible skulls is confirmed.
+    return result;
+}
 function playStateSnapshot(state) {
     const fields = C.play_state;
     const sample = { identity: heroIdentity(state), pointers: {}, flags: {}, methods: {} };
@@ -200,6 +232,7 @@ function install() {
     resolutions = {}; lastHeroSample = null; lastHero = null;
     lastTraceSample = null; traces = new Map();
     playSamples = {}; lastPlayStates = {};
+    lastEndlessSample = null; lastEndless = null;
     const gameModule = Process.findModuleByName(MEMORY_LAYOUT.module_name);
     metadata = { captured_at: Date.now(), process_id: Process.id, arch: Process.arch,
         pointer_size: Process.pointerSize, profile_game_version: MEMORY_LAYOUT.game_version,
@@ -271,13 +304,21 @@ function install() {
                 samplePlayState(name, args[0], this.returnAddress);
             }) });
         }
+        attach('endless_update', { onEnter: guard(function (args) {
+            const now = Date.now();
+            if (lastEndlessSample !== null && now - lastEndlessSample < C.endless.sample_ms) return;
+            lastEndlessSample = now;
+            lastEndless = { time: now, ...endlessSnapshot(args[0]),
+                caller: this.returnAddress ? describeAddress(this.returnAddress) : null };
+            emit('endless_update', lastEndless);
+        }) });
         emit('enabled', { diagnostic_only: true });
     } catch (error) { fail(error); throw error; }
     return status();
 }
 function status() {
     return { enabled, diagnostic_only: true, metadata, traces_retained: traces.size, last_error: lastError,
-        resolutions, counters, last_hero: lastHero, last_play_states: lastPlayStates, events_retained: events.length, skulls_retained: skulls.size };
+        resolutions, counters, last_hero: lastHero, last_play_states: lastPlayStates, last_endless: lastEndless, events_retained: events.length, skulls_retained: skulls.size };
 }
 rpc.exports = {
     install, status,

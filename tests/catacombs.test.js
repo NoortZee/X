@@ -34,10 +34,10 @@ test('opt-in hooks, idempotent start, report and complete cleanup', () => {
     assert.equal(f.hooks.length, 0);
     assert.equal(f.rpc.install().enabled, true);
     f.rpc.install();
-    assert.equal(f.hooks.length, 8);
+    assert.equal(f.hooks.length, 9);
     assert.equal(f.rpc.report().events.length, 1);
     f.rpc.stop(); f.rpc.stop();
-    assert.equal(f.detached(), 8);
+    assert.equal(f.detached(), 9);
 });
 for (const matches of [0, 2]) test('reject nonunique signatures: ' + matches, () => {
     const f = fixture(matches);
@@ -55,7 +55,7 @@ test('invalid runtime field disables the entire module and records reason', () =
     f.hooks[2].onEnter([f.pointer()]);
     assert.equal(f.rpc.status().enabled, false);
     assert.match(f.rpc.status().last_error, /invalid skull active/);
-    assert.equal(f.detached(), 8);
+    assert.equal(f.detached(), 9);
 });
 test('read-only implementation never writes memory or invokes game functions', () => {
     const source = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
@@ -301,4 +301,57 @@ test('PlayState entry signatures match supplied disassembly with relocatable ope
         pattern.forEach((token, i) => { if (token === '??') changed[i] ^= 0xFF; });
         assert.ok(pattern.every((token, i) => token === '??' || parseInt(token, 16) === changed[i]), name);
     }
+});
+
+
+test('Endless samples isolate field errors and preserve entry counters', () => {
+    const f = fixture(); f.rpc.install();
+    for (let i = 0; i < 20; i++) f.hooks[8].onEnter([f.pointer()]);
+    const status = f.rpc.status();
+    assert.equal(status.counters.endless_update, 20);
+    assert.equal(status.enabled, true);
+    assert.ok(status.last_endless.values.timer_error);
+    assert.ok(status.last_endless.container.header_error);
+    assert.equal(f.rpc.report().events.filter(e => e.kind === 'endless_update').length, 1);
+});
+
+test('Endless container is bounded and never dereferences the candidate element array', () => {
+    const f = fixture();
+    let count = 3;
+    f.context.endlessState = { toString: () => '0x1000', add(offset) { return {
+        readS32: () => offset,
+        readFloat: () => offset / 100,
+        readU8: () => 1,
+        readPointer: () => ({ toString: () => '0x2000', isNull: () => false,
+            add(field) { return {
+                readS32: () => { assert.equal(field, 0x20); return count; },
+                readPointer: () => {
+                    assert.equal(field, 0x10);
+                    return { toString: () => '0x3000' }; // no read/add API: elements cannot be read
+                },
+            }; },
+        }),
+    }; } };
+    let sample = vm.runInContext('endlessSnapshot(endlessState)', f.context);
+    assert.equal(sample.values.state, 0x138);
+    assert.equal(sample.container.header.count, 3);
+    assert.equal(sample.container.header.array, '0x3000');
+    count = 100000;
+    sample = vm.runInContext('endlessSnapshot(endlessState)', f.context);
+    assert.match(sample.container.header_error, /invalid candidate container count/);
+    assert.equal(sample.values.recalculate, 1);
+});
+
+
+test('Endless entry signature matches supplied instructions and wildcards the direct call', () => {
+    const f = fixture();
+    const pattern = vm.runInContext('C.signatures.endless_update', f.context).split(/\s+/);
+    const bytes = Buffer.from('554889e54157415641554154534883ec184889fbf30f1145d4e8e218f2ff488b7b504885ff740b488b07f30f1045d4ff5078', 'hex');
+    assert.equal(pattern.length, bytes.length);
+    const matches = () => pattern.every((token, i) => token === '??' || parseInt(token, 16) === bytes[i]);
+    assert.equal(matches(), true);
+    bytes.fill(0xAA, 26, 30);
+    assert.equal(matches(), true);
+    bytes[33] ^= 1;
+    assert.equal(matches(), false);
 });
