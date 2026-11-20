@@ -1,3 +1,10 @@
+## Без выпуска — Body factory и наблюдение реального attach
+
+- spawn-probe снимает текущий Candy vptr+0x308 и код кандидата register0x1725210; существующие root/array snapshots сохранены.
+- Guarded read-only observer на подтверждённый attach0x15E9700: 20-byte signature/rx/module checks, только Candy RTTI, до8 реальных вызовов с parent-аргументом/callsite/body-after/physics-world и кодом candidate parent vptr[0]. Не вызывает игровые методы и не меняет аргументы/объекты.
+- Status attach_observer, records в spawn-probe; stop снимает hook. При невозможности observer остальные режимы не останавливаются. Для реальных аргументов start нужен до входа в новый уровень.
+- 83 Node mock-теста, syntax/diff-check прошли. Spawn/цикл по-прежнему не реализованы. Rust/README без изменений.
+
 ## Без выпуска — init/attach и метаданные массива для spawn-проверки
 
 - spawn-probe дополнен 0x15E90D0 и фактическим Candy vptr+0x300; код читается ограниченно, не вызывается.

@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-function fixture(matches = 1, production = false, underground = false, autoRise = false) {
+function fixture(matches = 1, production = false, underground = false, autoRise = false, observeAttach = false) {
     const memory = new Map(); const writes = []; let callback, detached = 0;
     class P {
         constructor(n) { this.n = n; }
@@ -33,7 +33,7 @@ function fixture(matches = 1, production = false, underground = false, autoRise 
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground).replace('auto_rise: true', 'auto_rise: ' + autoRise).replace('up: 1920', autoRise ? 'up: 1920' : 'up: 768').replace('timeout_ms: 6000', autoRise ? 'timeout_ms: 6000' : 'timeout_ms: 3000') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground).replace('auto_rise: true', 'auto_rise: ' + autoRise).replace('up: 1920', autoRise ? 'up: 1920' : 'up: 768').replace('timeout_ms: 6000', autoRise ? 'timeout_ms: 6000' : 'timeout_ms: 3000') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) .replace('observe_attach: true', 'observe_attach: ' + observeAttach) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -794,7 +794,7 @@ test('shipped profile arms automatic 30-cell rise and sufficient timeout',()=>{
     assert.ok(config.timeout_ms>config.up/100/config.velocity*1000);
 });
 
-test('spawn probe is opt-in, queued read-only capture of four ASLR-relative candidates',()=>{
+test('spawn probe is opt-in, queued read-only capture of five ASLR-relative candidates',()=>{
     const f=fixture();
     assert.throws(()=>f.rpc.spawnProbe(),/active Catacombs/);
     f.rpc.install();f.tick();assert.equal(f.rpc.report().spawn_probe,null);
@@ -805,7 +805,7 @@ test('spawn probe is opt-in, queued read-only capture of four ASLR-relative cand
     assert.throws(()=>f.rpc.spawnProbe(),/already queued/);
     f.leave();const r=f.rpc.report().spawn_probe;
     assert.equal(r.status,'captured');assert.equal(r.read_only,true);assert.equal(r.spawn_enabled,false);
-    assert.equal(r.abi_verified,false);assert.equal(Object.keys(r.candidates).length,4);
+    assert.equal(r.abi_verified,false);assert.equal(Object.keys(r.candidates).length,5);
     assert.equal(r.candidates.factory_candidate.target.rva,'0x15eea70');
     assert.equal(r.candidates.wrapper_candidate.target.rva,'0x15fb8a0');
     assert.equal(r.candidates.array_push_candidate.target.rva,'0x1092110');
@@ -873,4 +873,42 @@ test('early live Candy evidence survives collection without reusing historical p
     assert.equal(r.early_array.array.sample_candy.address,'0x3000');
     assert.match(r.early_array.warning,/Historical evidence/);
     assert.equal(f.writes.length,0);
+});
+
+test('spawn array probe resolves body creator from current Candy slot +0x308',()=>{
+    const f=spawnArrayFixture();f.memory.set(0x8408,0x270000);
+    const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
+    assert.equal(r.sample_candy.body_factory_method.vptr_byte_offset,0x308);
+    assert.equal(r.sample_candy.body_factory_method.target.address,'0x270000');
+    assert.equal(r.sample_candy.body_factory_method.code.window_bytes,768);
+    assert.equal(f.writes.length,0);
+});
+test('guarded attach observer captures actual arguments only from live Candy calls and caps records',()=>{
+    const f=fixture(1,false,false,false,true);
+    const config=vm.runInContext('C.spawn_probe',f.c);
+    config.attach_prefix.forEach((byte,i)=>f.memory.set(0x100000+config.attach_rva+i,byte));
+    f.identity(0x4000,0x8600,0x9600,0xA600,'12TestParent');f.memory.set(0x8600,0x280000);
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
+    f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
+    let observer, detached=0;
+    f.c.Interceptor.attach=(target,cb)=>{assert.equal(target.toString(),'0x16e9700');observer=cb;return{detach(){detached++;}};};
+    vm.runInContext('enabled=true; installAttachObserver(Process.findModuleByName(MEMORY_LAYOUT.module_name))',f.c);
+    for(let i=0;i<12;i++) {
+        const context={returnAddress:f.pointer(0x290000)};
+        observer.onEnter.call(context,[f.pointer(0x3000),f.pointer(0x4000)]);
+        observer.onLeave.call(context);
+    }
+    const records=vm.runInContext('attachObservations',f.c);
+    assert.equal(records.length,8);assert.equal(records[0].parent_argument.address,'0x4000');
+    assert.equal(records[0].parent_first_method.target.address,'0x280000');
+    assert.equal(records[0].body_after.null,true);assert.equal(f.writes.length,0);
+    f.rpc.stop();assert.equal(detached,1);
+});
+test('attach observer refuses code signature mismatch without attaching hook',()=>{
+    const f=fixture(1,false,false,false,true);let attached=0;
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
+    f.c.Interceptor.attach=()=>{attached++;};
+    vm.runInContext('installAttachObserver(Process.findModuleByName(MEMORY_LAYOUT.module_name))',f.c);
+    assert.equal(f.rpc.status().attach_observer.status,'unavailable');assert.equal(attached,0);
+    assert.match(f.rpc.status().attach_observer.error,/signature mismatch/);
 });
