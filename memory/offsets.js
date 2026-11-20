@@ -69,6 +69,7 @@ const MEMORY_LAYOUT = {
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
             // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.
             neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12, false]] },
+        speed_test: { enabled: true, offset: 0x8, multiplier: 5, baseline: 2.20000004768 },
         mask_test: { enabled: true, value: 4, category: 2, group: 0, allowed_masks: [65533, 1, 4] },
         fixture_probe: { enabled: true, fixture_head: 0x70, next: 0x8, owner: 0x10,
             category: 0x34, mask: 0x36, group: 0x38, limit: 8, candies: 3, symbols: 4 },

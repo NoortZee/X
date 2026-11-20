@@ -13,6 +13,7 @@ let wallState = null, wallPatch = null;
 let wallEvents = [];
 let fixtureReport = null, filterSymbols = null;
 let maskTest = null, maskBackup = null;
+let speedTest = null, speedBackup = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -283,6 +284,68 @@ function fixtureChain(body) {
     } catch (e) { report.error = String(e); }
     return report;
 }
+function speedBlockMatches(base) {
+    return Math.abs(base.readFloat() - C.wall_pass.original) <= C.wall_pass.tolerance &&
+        C.wall_pass.neighbours.every(([offset, value, required]) => offset === C.speed_test.offset || required === false ||
+            Math.abs(numberAt(base, offset) - value) <= C.wall_pass.tolerance);
+}
+function restoreSpeed(reason) {
+    if (!speedBackup) return;
+    try {
+        const { base, pointer, original, patched } = speedBackup;
+        writableFloat(pointer);
+        if (!speedBlockMatches(base) || Math.abs(pointer.readFloat() - patched) > C.wall_pass.tolerance)
+            throw new Error('speed block changed externally; restore refused');
+        pointer.writeFloat(original);
+        if (Math.abs(pointer.readFloat() - original) > C.wall_pass.tolerance) throw new Error('speed restore readback failed');
+        speedBackup = null; speedTest = { ...speedTest, status: 'restored', reason };
+    } catch (e) { speedTest = { ...speedTest, status: 'restore_failed', reason, error: String(e) }; }
+    event('speed_restore', { result: speedTest });
+}
+function applySpeed(state) {
+    if (!C.speed_test.enabled) return;
+    try {
+        if (state.add(C.state.phase).readS32() !== 1) {
+            restoreSpeed('level inactive'); if (speedTest) speedTest.active = false; return;
+        }
+        if (state.add(C.state.paused).readU8() !== 0) return;
+        requireClass(state, C.move_white.state_name);
+        if (speedTest && speedTest.state === state.toString() && speedTest.active !== false) return;
+        if (speedBackup) { restoreSpeed('new state'); if (speedBackup) return; }
+        speedTest = { state: state.toString(), active: true, status: 'searching', multiplier: C.speed_test.multiplier };
+        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+        if (!m) throw new Error('game module missing');
+        let scanned = 0, matches = 0; const candidates = new Map();
+        for (const range of m.enumerateRanges('rw-')) {
+            if ((scanned += range.size) > C.wall_pass.max_scan_bytes) throw new Error('speed scan byte budget');
+            for (const match of Memory.scanSync(range.base, range.size, C.wall_pass.pattern)) {
+                if (++matches > C.wall_pass.max_matches) throw new Error('speed scan match budget');
+                const base = match.address;
+                const delta = Number(base.sub(m.base).toString());
+                if (delta < 0 || delta + C.speed_test.offset + 4 > m.size) continue;
+                if (safe(() => speedBlockMatches(base) && Math.abs(numberAt(base, C.speed_test.offset) - C.speed_test.baseline) <= C.wall_pass.tolerance) === true)
+                    candidates.set(base.toString(), base);
+            }
+        }
+        speedTest.matches = candidates.size;
+        if (candidates.size !== 1) throw new Error('speed block not unique/found: ' + candidates.size);
+        const base = candidates.values().next().value, pointer = base.add(C.speed_test.offset);
+        writableFloat(pointer);
+        const original = pointer.readFloat(), patched = original * C.speed_test.multiplier;
+        if (!Number.isFinite(patched) || patched <= 0) throw new Error('invalid speed multiplier');
+        speedBackup = { base, pointer, original, patched }; mutationAttempted = true;
+        pointer.writeFloat(patched);
+        const readback = pointer.readFloat();
+        if (Math.abs(readback - patched) > C.wall_pass.tolerance) throw new Error('speed readback failed');
+        speedTest = { ...speedTest, status: 'applied', parameter: address(pointer), original, patched, readback,
+            note: 'configuration multiplier; actual movement rate not measured' };
+        event('speed_applied', { result: speedTest });
+    } catch (e) {
+        speedTest = { ...speedTest, state: state.toString(), active: true, status: 'unavailable', error: String(e) };
+        if (speedBackup) restoreSpeed('apply failed');
+        event('speed_error', { result: speedTest });
+    }
+}
 function heroMaskContext(state) {
     requireClass(state, C.move_white.state_name);
     const hero = state.add(C.state.world).readPointer().add(C.world.hero).readPointer();
@@ -405,6 +468,7 @@ function captureFixtureReport(state) {
         }) };
 }
 function sample(state) {
+    if (speedBackup && speedTest) speedTest.current = safe(() => speedBackup.pointer.readFloat());
     if (!C.diagnostics) {
         if (lastTime !== null && Date.now() - lastTime < C.limits.sample_ms) { skipped++; return; }
         lastTime = Date.now(); samples++;
@@ -708,11 +772,12 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    if (!speedBackup) speedTest = null;
     if (!maskBackup) maskTest = null;
     autoRun = null; autoSeen.clear(); fixtureReport = null; filterSymbols = null;
     if (!wallPatch) { wallState = null; wallEvents = []; }
@@ -736,6 +801,7 @@ function install() {
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
         }, onLeave() {
             if (!enabled) return;
+            applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             if (pendingMove) performMove(this.updateState);
             else autoTeleport(this.updateState);
