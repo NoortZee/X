@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-function fixture(matches = 1, production = false, underground = false) {
+function fixture(matches = 1, production = false, underground = false, autoRise = false) {
     const memory = new Map(); const writes = []; let callback, detached = 0;
     class P {
         constructor(n) { this.n = n; }
@@ -32,7 +32,7 @@ function fixture(matches = 1, production = false, underground = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground) : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground).replace('auto_rise: true', 'auto_rise: ' + autoRise).replace('up: 1920', autoRise ? 'up: 1920' : 'up: 768').replace('timeout_ms: 6000', autoRise ? 'timeout_ms: 6000' : 'timeout_ms: 3000') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -167,8 +167,8 @@ test('code probe refuses non-executable memory and caps distinct target records'
 });
 
 
-function movementFixture(production = false, underground = false) {
-    const f = fixture(1, production, underground);
+function movementFixture(production = false, underground = false, autoRise = false) {
+    const f = fixture(1, production, underground, autoRise);
     f.identity(0x5000, 0x8200, 0x9200, 0xA200, '4Hero');
     f.identity(0x6000, 0x8300, 0x9300, 0xA300, '8HeroBody');
     for (const [p, v] of [[0x1040, 0x4000], [0x4018, 0x5000], [0x5198, 0x6000],
@@ -349,8 +349,8 @@ test('create root requests extended bounded window', () => {
     assert.equal(code.requested_instructions, 512);
 });
 
-function teleportFixture(production = false, underground = false) {
-    const f = movementFixture(production, underground);
+function teleportFixture(production = false, underground = false, autoRise = false) {
+    const f = movementFixture(production, underground, autoRise);
     f.identity(0x16000, 0xB000, 0xC000, 0xD000, '20EndlessMazeCandyBody');
     for (const [p,v] of [[0x3198,0x16000],[0x16020,0xE000],[0xE000,0],[0xE00C,0.12],
         [0xE010,0.06],[0xE040,0],[0xE044,0],[0xE038,0],[0xE048,0],[0xE0A8,1],
@@ -397,8 +397,8 @@ test('native failure is uncertain: no rollback or retry and report no longer rea
     assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
 });
 
-function autoFixture(underground = false) {
-    const f = teleportFixture(true, underground);
+function autoFixture(underground = false, autoRise = false) {
+    const f = teleportFixture(true, underground, autoRise);
     f.c.testTime = 1000;
     vm.runInContext('Date.now = () => testTime', f.c);
     return f;
@@ -581,8 +581,8 @@ test('compact dump retains most recent active fixture observation after level ex
     assert.ok(JSON.stringify(f.rpc.report()).length<20000);
 });
 
-function maskFixture(underground = false) {
-    const f=autoFixture(underground);
+function maskFixture(underground = false, autoRise = false) {
+    const f=autoFixture(underground, autoRise);
     f.memory.set(0x6020,0x20000);f.memory.set(0x20058,0xF000);f.memory.set(0x20070,0x21000);
     for(let i=0;i<5;i++) {
         const a=0x21000+i*0x100;
@@ -684,8 +684,8 @@ test('automatic series does not halt on float32 roundoff at live large Y',()=>{
     assert.equal(f.rpc.status().last_move.position_check.matches,true);
 });
 
-function noFallFixture(underground = false) {
-    const f=maskFixture(underground);
+function noFallFixture(underground = false, autoRise = false) {
+    const f=maskFixture(underground, autoRise);
     f.memory.set(0x20000,2);f.memory.set(0x200A8,1);f.memory.set(0x20044,20);
     return f;
 }
@@ -759,4 +759,36 @@ test('manual altitude timeout stops velocity, stop clears pending, no automatic 
     f.rpc.above();f.leave();f.c.testTime=4001;f.leave();
     assert.equal(f.rpc.status().no_fall.altitude.status,'timed_out');assert.equal(f.memory.get(0x20044),0);
     f.force();f.tick();f.rpc.above();f.rpc.stop();assert.equal(f.rpc.status().altitude_pending,null);
+});
+
+test('auto-rise waits for active Hero then targets 30 cells up without above command or expiry',()=>{
+    const f=noFallFixture(false,true);
+    f.memory.set(0x1138,0);f.leave();assert.equal(f.rpc.status().no_fall,null);
+    assert.equal(f.rpc.status().auto_rise_enabled,true);
+    f.c.testTime=60000;f.memory.set(0x1138,1);f.leave();
+    assert.equal(f.rpc.status().no_fall.altitude.mode,'auto_above');
+    assert.equal(f.rpc.status().no_fall.altitude.target_y,600-1920);
+    assert.equal(f.memory.get(0x20044),-8);
+    f.memory.set(0x5038,500);f.leave();assert.equal(f.rpc.status().no_fall.altitude.target_y,-1320);
+});
+test('auto-rise stops on arrival, stays stopped, and manual return-height does not rearm ascent',()=>{
+    const f=noFallFixture(false,true);f.leave();f.force();f.tick();
+    f.memory.set(0x5038,-1320);f.leave();
+    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.altitude.status,'reached');
+    f.rpc.returnHeight();f.leave();assert.equal(f.rpc.status().no_fall.altitude.target_y,600);
+    f.memory.set(0x5038,600);f.leave();f.leave();
+    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.altitude.mode,'return');
+});
+test('auto-rise times out once and rearms after observed inactive phase, not every frame',()=>{
+    const f=noFallFixture(false,true);f.leave();f.c.testTime=7001;f.leave();
+    assert.equal(f.rpc.status().no_fall.altitude.status,'timed_out');
+    f.leave();assert.equal(f.memory.get(0x20044),0);
+    f.memory.set(0x1138,2);f.leave();f.memory.set(0x1138,1);f.leave();
+    assert.equal(f.rpc.status().no_fall.altitude.status,'moving');assert.equal(f.memory.get(0x20044),-8);
+});
+test('shipped profile arms automatic 30-cell rise and sufficient timeout',()=>{
+    const profile=fs.readFileSync(path.join(root,'memory/offsets.js'),'utf8');
+    const config=vm.runInNewContext(profile+'; MEMORY_LAYOUT.catacombs.altitude_test');
+    assert.equal(config.auto_rise,true);assert.equal(config.up,30*64);
+    assert.ok(config.timeout_ms>config.up/100/config.velocity*1000);
 });
