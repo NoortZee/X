@@ -16,7 +16,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MOCK = r'''#!PYTHON
-import json, os, pathlib, subprocess, sys, time
+import json, os, pathlib, signal, subprocess, sys, time
 name = pathlib.Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ['MOCK_LOG'], 'a') as f:
@@ -45,6 +45,16 @@ elif name == 'python':
     sys.stdin.read()
     if os.environ.get('FAIL_HEALTH'): sys.exit(1)
 elif name == 'kot-tas':
+    if os.environ.get('MOCK_QUIT_FILE'):
+        def cancel_command(signum, frame):
+            with open(os.environ['MOCK_LOG'], 'a') as f:
+                f.write(json.dumps(['menu-after-sigint']) + '\n')
+        signal.signal(signal.SIGINT, cancel_command)
+        with open(os.environ['MOCK_LOG'], 'a') as f:
+            f.write(json.dumps(['fake-tas-ready']) + '\n')
+        while not pathlib.Path(os.environ['MOCK_QUIT_FILE']).exists():
+            time.sleep(0.01)
+        sys.exit(0)
     if os.environ.get('RESTRICT_LOGS'):
         sessions = pathlib.Path(os.environ['XDG_DATA_HOME']) / 'kot-tas/sessions'
         for session in sessions.glob('session.*'):
@@ -336,6 +346,37 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher(FAIL_WATCH='1', APP_SLEEP='30')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Stopping TAS', result.stderr)
+        self.assert_cleanup()
+
+    def test_terminal_ctrl_c_keeps_tas_menu_and_servers_alive(self):
+        quit_file = self.root / 'quit-tas'
+        process = subprocess.Popen([self.root / 'start/start.sh'],
+                                   env={**self.env, 'MOCK_QUIT_FILE': str(quit_file)},
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        self.addCleanup(lambda: process.kill() if process.poll() is None else None)
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if self.log.exists() and ['fake-tas-ready'] in self.commands():
+                break
+            time.sleep(0.02)
+        else:
+            self.fail('TAS did not become ready')
+        # Like a terminal Ctrl+C: signal the launcher's entire foreground group.
+        os.killpg(process.pid, signal.SIGINT)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if ['menu-after-sigint'] in self.commands():
+                break
+            time.sleep(0.02)
+        else:
+            self.fail('SIGINT was not forwarded to TAS')
+        time.sleep(0.3)  # allow several supervisor ticks after cancellation
+        self.assertIsNone(process.poll())
+        self.assertFalse(any(c[-2:] == ['--remove', 'tcp:27183'] for c in self.commands()))
+        quit_file.touch()  # simulate an explicit q/exit in the menu
+        _, stderr = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, stderr)
         self.assert_cleanup()
 
     def test_signal_stops_tas_and_cleans_servers(self):

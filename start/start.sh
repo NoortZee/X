@@ -215,12 +215,15 @@ if (( ! ready )); then
 fi
 
 cd "$ROOT"
-"$ROOT/target/release/kot-tas" "$CONFIG" <&0 &
+setsid "$ROOT/target/release/kot-tas" "$CONFIG" <&0 &
 TAS_PID=$!
+# The launcher owns terminal SIGINT; TAS has its own group and handles command cancellation.
+trap 'if [[ -n "$TAS_PID" ]] && kill -0 "$TAS_PID" 2>/dev/null; then kill -INT "$TAS_PID" 2>/dev/null || true; else exit 130; fi' INT
 PARENT_PID=$$
 # Supervise both servers while TAS is running; renew sudo for reliable EXIT cleanup.
 (
-    trap - EXIT INT TERM HUP
+    trap - EXIT TERM HUP
+    trap '' INT
     while sleep 5; do
         for name in sysmon phantom; do
             if [[ -f "$RUN/$name.exit" ]]; then
@@ -256,6 +259,10 @@ PARENT_PID=$$
 WATCH_PID=$!
 # wait preserves the application exit status; EXIT always tears down the session.
 status=0
-wait "$TAS_PID" || status=$?
+while true; do
+    wait "$TAS_PID" && status=0 || status=$?
+    # A trapped Ctrl+C interrupts wait even when TAS is still running in its menu.
+    kill -0 "$TAS_PID" 2>/dev/null || break
+done
 TAS_PID=''
 exit "$status"
