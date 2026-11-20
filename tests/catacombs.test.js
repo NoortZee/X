@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
-function fixture(matches = 1, production = false) {
+function fixture(matches = 1, production = false, underground = false) {
     const memory = new Map(); const writes = []; let callback, detached = 0;
     class P {
         constructor(n) { this.n = n; }
@@ -32,7 +32,7 @@ function fixture(matches = 1, production = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('underground: true', 'underground: ' + underground) : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -98,7 +98,7 @@ test('report never dereferences a retained pointer', () => {
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 15);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 16);
     assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
@@ -167,8 +167,8 @@ test('code probe refuses non-executable memory and caps distinct target records'
 });
 
 
-function movementFixture(production = false) {
-    const f = fixture(1, production);
+function movementFixture(production = false, underground = false) {
+    const f = fixture(1, production, underground);
     f.identity(0x5000, 0x8200, 0x9200, 0xA200, '4Hero');
     f.identity(0x6000, 0x8300, 0x9300, 0xA300, '8HeroBody');
     for (const [p, v] of [[0x1040, 0x4000], [0x4018, 0x5000], [0x5198, 0x6000],
@@ -349,8 +349,8 @@ test('create root requests extended bounded window', () => {
     assert.equal(code.requested_instructions, 512);
 });
 
-function teleportFixture(production = false) {
-    const f = movementFixture(production);
+function teleportFixture(production = false, underground = false) {
+    const f = movementFixture(production, underground);
     f.identity(0x16000, 0xB000, 0xC000, 0xD000, '20EndlessMazeCandyBody');
     for (const [p,v] of [[0x3198,0x16000],[0x16020,0xE000],[0xE000,0],[0xE00C,0.12],
         [0xE010,0.06],[0xE040,0],[0xE044,0],[0xE038,0],[0xE048,0],[0xE0A8,1],
@@ -397,8 +397,8 @@ test('native failure is uncertain: no rollback or retry and report no longer rea
     assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
 });
 
-function autoFixture() {
-    const f = teleportFixture(true);
+function autoFixture(underground = false) {
+    const f = teleportFixture(true, underground);
     f.c.testTime = 1000;
     vm.runInContext('Date.now = () => testTime', f.c);
     return f;
@@ -581,8 +581,8 @@ test('compact dump retains most recent active fixture observation after level ex
     assert.ok(JSON.stringify(f.rpc.report()).length<20000);
 });
 
-function maskFixture() {
-    const f=autoFixture();
+function maskFixture(underground = false) {
+    const f=autoFixture(underground);
     f.memory.set(0x6020,0x20000);f.memory.set(0x20058,0xF000);f.memory.set(0x20070,0x21000);
     for(let i=0;i<5;i++) {
         const a=0x21000+i*0x100;
@@ -684,8 +684,8 @@ test('automatic series does not halt on float32 roundoff at live large Y',()=>{
     assert.equal(f.rpc.status().last_move.position_check.matches,true);
 });
 
-function noFallFixture() {
-    const f=maskFixture();
+function noFallFixture(underground = false) {
+    const f=maskFixture(underground);
     f.memory.set(0x20000,2);f.memory.set(0x200A8,1);f.memory.set(0x20044,20);
     return f;
 }
@@ -710,4 +710,24 @@ test('no-fall restore refuses stale Hero and externally changed gravity',()=>{
         assert.equal(f.rpc.status().no_fall.status,'restore_failed');
         if(address===0x200A8)assert.equal(f.memory.get(address),2);
     }
+});
+
+test('underground descent uses positive VY to a fixed start+64 target, then stops without accumulating offset',()=>{
+    const f=noFallFixture(true);f.leave();
+    assert.equal(f.rpc.status().no_fall.target_y,664);
+    assert.equal(f.memory.get(0x20044),2);
+    f.memory.set(0x5038,632);f.tick();f.leave();
+    assert.equal(f.rpc.status().no_fall.target_y,664);assert.equal(f.memory.get(0x20044),2);
+    f.memory.set(0x5038,665);f.tick();f.leave();
+    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.descent,'complete');
+    f.memory.set(0x5038,670);f.leave();assert.equal(f.rpc.status().no_fall.target_y,664);
+    assert.equal(f.memory.get(0x20044),0);
+    assert.ok(!f.writes.some(([p])=>p===0x5038 || p===0x20010));
+});
+test('underground descent times out without retry, and stop clears forced vertical speed',()=>{
+    const f=noFallFixture(true);f.leave();f.c.testTime=3001;f.leave();
+    assert.equal(f.rpc.status().no_fall.descent,'timed_out');assert.equal(f.memory.get(0x20044),0);
+    f.c.testTime=4000;f.leave();assert.equal(f.memory.get(0x20044),0);
+    const stopped=noFallFixture(true);stopped.leave();assert.equal(stopped.memory.get(0x20044),2);
+    stopped.rpc.stop();assert.equal(stopped.memory.get(0x20044),0);assert.equal(stopped.memory.get(0x200A8),1);
 });
