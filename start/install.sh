@@ -104,13 +104,30 @@ echo 'Android SDK licenses: review and accept the prompts below.'
 "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" --licenses
 "$SDKMANAGER" --sdk_root="$ANDROID_SDK_ROOT" 'platforms;android-35' 'build-tools;35.0.0'
 
+# Validate the configured repository, not the transport URL expanded by Git insteadOf.
+validate_phantom_source() {
+    local remote
+    remote="$(git -C "$SOURCE" config --local --get-all remote.origin.url)" || fail "Missing Phantom origin in $SOURCE."
+    remote="${remote,,}"
+    remote="${remote%/}"
+    remote="${remote%.git}"
+    case "$remote" in
+        https://github.com/noortzee/phantom_keymaper|git@github.com:noortzee/phantom_keymaper|ssh://git@github.com/noortzee/phantom_keymaper|ssh://git@github.com:22/noortzee/phantom_keymaper)
+            ;;
+        *)
+            # Do not print raw URLs: they can contain embedded credentials.
+            fail "Unexpected Phantom source remote in $SOURCE. Expected NoortZee/phantom_keymaper on github.com; check git config --local --get-all remote.origin.url in that directory. Existing files were not changed."
+            ;;
+    esac
+}
+
 # Build the Android server component required by TAS, not the unrelated desktop mapper/GUI.
 KEYMAPPER_COMMIT=bc4f338488f03f229e9a9812e4b48baee56a45d8
 SOURCE="$DATA/src/phantom_keymaper"
 if [[ ! -d "$SOURCE/.git" ]]; then
     git clone https://github.com/NoortZee/phantom_keymaper.git "$SOURCE"
 fi
-[[ $(git -C "$SOURCE" remote get-url origin) == https://github.com/NoortZee/phantom_keymaper.git ]] || fail 'Unexpected Phantom source remote.'
+validate_phantom_source
 [[ -z $(git -C "$SOURCE" status --porcelain) ]] || fail "Local edits in $SOURCE; refusing to overwrite."
 git -C "$SOURCE" fetch origin "$KEYMAPPER_COMMIT"
 git -C "$SOURCE" checkout --detach "$KEYMAPPER_COMMIT"
