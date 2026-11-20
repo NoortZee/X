@@ -34,10 +34,10 @@ test('opt-in hooks, idempotent start, report and complete cleanup', () => {
     assert.equal(f.hooks.length, 0);
     assert.equal(f.rpc.install().enabled, true);
     f.rpc.install();
-    assert.equal(f.hooks.length, 5);
+    assert.equal(f.hooks.length, 6);
     assert.equal(f.rpc.report().events.length, 1);
     f.rpc.stop(); f.rpc.stop();
-    assert.equal(f.detached(), 5);
+    assert.equal(f.detached(), 6);
 });
 for (const matches of [0, 2]) test('reject nonunique signatures: ' + matches, () => {
     const f = fixture(matches);
@@ -55,7 +55,7 @@ test('invalid runtime field disables the entire module and records reason', () =
     f.hooks[2].onEnter([f.pointer()]);
     assert.equal(f.rpc.status().enabled, false);
     assert.match(f.rpc.status().last_error, /invalid skull active/);
-    assert.equal(f.detached(), 5);
+    assert.equal(f.detached(), 6);
 });
 test('read-only implementation never writes memory or invokes game functions', () => {
     const source = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
@@ -134,4 +134,47 @@ test('collect_request uses the distinguishing 117-byte prefix from the supplied 
     otherBuilder[116] = 0x1C;
     assert.equal(matches(otherBuilder), false);
     assert.equal(matches(bytes.subarray(0, 44)), false);
+});
+
+
+test('entry counters survive candidate field validation failure', () => {
+    const f = fixture(); f.rpc.install();
+    f.hooks[2].onEnter([f.pointer()]);
+    assert.equal(f.rpc.status().counters.death_skull_update, 1);
+    assert.equal(f.rpc.status().counters.replay_update, 0);
+    assert.equal(f.rpc.status().enabled, false);
+});
+
+test('control hook counts every call but bounds identity samples and tolerates RTTI failure', () => {
+    const f = fixture(); f.rpc.install();
+    for (let i = 0; i < 20; i++) f.hooks[5].onEnter([f.pointer()]);
+    const status = f.rpc.status();
+    assert.equal(status.counters.hero_control, 20);
+    assert.equal(status.enabled, true);
+    assert.equal(status.last_hero.object, '0x64');
+    assert.ok(status.last_hero.rtti_error);
+    assert.equal(f.rpc.report().events.filter(e => e.kind === 'hero_control').length, 1);
+    f.rpc.stop();
+    f.hooks[5].onEnter([f.pointer()]);
+    assert.equal(f.rpc.status().counters.hero_control, 20);
+});
+
+test('control identity uses the object address point without adding a vtable header', () => {
+    const f = fixture(); f.rpc.install();
+    const name = { readCString(max) { assert.equal(max, 128); return '8HeroBody'; } };
+    const typeinfo = { toString: () => '0x3000', add(offset) {
+        assert.equal(offset, 8); return { readPointer: () => name };
+    } };
+    const vptr = { toString: () => '0x2000', add(offset) {
+        assert.equal(offset, -8); return { readPointer: () => typeinfo };
+    } };
+    const hero = { toString: () => '0x1000', add(offset) {
+        assert.equal(offset, 0); return { readPointer: () => vptr };
+    } };
+    f.hooks[5].onEnter([hero]);
+    const identity = f.rpc.status().last_hero;
+    assert.equal(identity.vptr, '0x2000');
+    assert.equal(identity.typeinfo, '0x3000');
+    assert.equal(identity.rtti_name, '8HeroBody');
+    assert.equal(identity.rtti_error, undefined);
 });
