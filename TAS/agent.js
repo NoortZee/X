@@ -1,9 +1,5 @@
-// agent.js — TAS agent for King of Thieves x86_64
-// v5.7 — READ-ONLY + JUMP monitor + SMART FRAME_FUNC resolver
-//        + refined FRAME_FUNC AOB (1 матч, 8B 87 B0 00 00 00)
-//        + lazy pump install (main.py вызывает pump_install только в record/play)
-//        + FPS-optimized hot path (1 try/catch, no findRangeByAddress)
-//        + detectFrameAtStart для корректного avg_fps
+// TAS agent for King of Thieves x86_64.
+// История изменений и совместимость: docs/CHANGELOG.md.
 'use strict';
 
 const MODULE_NAME = 'libthieves.so';
@@ -27,10 +23,7 @@ send({ type: 'module_base', name: MODULE_NAME,
 // ------------------------------------------------------------
 // Address resolver
 // ------------------------------------------------------------
-// v2.84.1 x86_64 — FRAME_FUNC refined AOB даёт 1 матч (0x1612A20, HeroBody).
-// Старая сигнатура матчила и FrogBody/BoilerBody (0x161B7C0). Refined
-// добавлен хвост `41 89 F4 48 89 FB 8B 87 B0 00 00 00` — чтение +0xB0,
-// характерное только для HeroBody.
+// FRAME_FUNC использует чтение +0xB0 для различения HeroBody и других тел.
 const SIGS = {
     FRAME_FUNC:      '48 83 7F 20 00 0F 84 ?? ?? ?? ?? 55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 41 89 F4 48 89 FB 8B 87 B0 00 00 00',
     JUMP:            '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 84 C0 74 ?? 48 89 DF 48 83 C4 08 5B 5D E9 ?? ?? ?? ??',
@@ -91,8 +84,7 @@ function _resolveByFallback(name) {
 }
 function _resolveSimple(name) { return _resolveBySig(name) || _resolveByFallback(name); }
 
-// v5.7: SMART resolver — больше не отклоняем правильный AOB при сдвиге
-// функции. Логика:
+// SMART resolver — поиск функции по AOB. Логика:
 //   * 1 матч refined AOB → доверяем (refined AOB уже уникален — хвост
 //     `8B 87 B0 00 00 00` отличает HeroBody от FrogBody/BoilerBody)
 //   * 0 матчей → fallback на захардкоженный RVA + warning

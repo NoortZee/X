@@ -1,16 +1,5 @@
-// rival_hook.js — хукает Response_RivalDungeon (v2.84.1 x86_64).
-// v6:
-//   * Offsets RivalDungeon/Item вынесены в RIVAL_FIELDS / ITEM_FIELDS —
-//     при обновлении игры менять только их.
-//   * Sanity-check первых 5 rival_update: если данные выглядят мусором
-//     (gold вне 0..1e10, level вне 0..1e6, n_items=ERR) — emit
-//     'rival_data_suspect'. Если все первые 5 мусорные — emit
-//     'rival_data_invalid' с подсказкой про offsets/AOB.
-//
-// v5:
-//   * AOB-скан парсера (36-байтовый уникальный префикс) + fallback.
-// v4:
-//   * СНИМОК В onLeave; журнал _rivals (50).
+// Хук Response_RivalDungeon: снимки данных соперников.
+// История изменений и совместимость: docs/CHANGELOG.md.
 'use strict';
 
 let MODULE_BASE = null;

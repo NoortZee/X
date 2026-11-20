@@ -3,6 +3,7 @@ mod frida_agent;
 mod orchestrator;
 mod phantom;
 mod replay;
+#[path = "../stones/mod.rs"]
 mod stones;
 
 use std::io::{self, BufRead, Write};
@@ -36,12 +37,12 @@ const MENU: &str = r#"
 
 fn project_root() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if cwd.join("agent.js").exists() {
+    if cwd.join("TAS").join("agent.js").exists() {
         return cwd;
     }
     if let Ok(exe) = std::env::current_exe() {
         for anc in exe.ancestors() {
-            if anc.join("agent.js").exists() {
+            if anc.join("TAS").join("agent.js").exists() {
                 return anc.to_path_buf();
             }
         }
@@ -464,10 +465,10 @@ fn main() {
         }
     };
 
-    let mut agent = match TasAgent::load(&session, &root.join("agent.js")) {
+    let mut agent = match TasAgent::load(&session, &root.join("TAS").join("agent.js")) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("ERROR main: load agent.js failed: {e}");
+            eprintln!("ERROR main: load TAS/agent.js failed: {e}");
             std::process::exit(1);
         }
     };

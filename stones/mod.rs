@@ -10,7 +10,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::config::{StonesConfig, TelegramConfig};
+pub mod config;
+
+use self::config::{StonesConfig, TelegramConfig};
 use crate::phantom::PhantomBridge;
 
 pub const HELP: &str = r#"=== stones — камни соперника (burst-режим) ===
