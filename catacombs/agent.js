@@ -12,6 +12,7 @@ let autoSeen = new Set();
 let wallState = null, wallPatch = null;
 let wallEvents = [];
 let fixtureReport = null, filterSymbols = null;
+let maskTest = null, maskBackup = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -281,6 +282,84 @@ function fixtureChain(body) {
         report.truncated = !report.complete;
     } catch (e) { report.error = String(e); }
     return report;
+}
+function heroMaskContext(state) {
+    requireClass(state, C.move_white.state_name);
+    const hero = state.add(C.state.world).readPointer().add(C.world.hero).readPointer();
+    requireClass(hero, C.move_white.hero_name);
+    const body = hero.add(C.object.body).readPointer(); requireClass(body, C.move_white.hero_body_name);
+    const physics = body.add(C.hero_body.physics).readPointer();
+    if (physics.isNull()) throw new Error('null hero physics');
+    const world = physics.add(C.teleport_white.world).readPointer();
+    if (world.isNull() || (world.add(C.teleport_white.lock).readU8() & C.teleport_white.lock_mask))
+        throw new Error('hero physics world locked/null');
+    const chain = fixtureChain(physics);
+    if (chain.error || !chain.complete || !chain.fixtures.length) throw new Error('hero fixture chain incomplete/invalid');
+    return { hero, physics, chain };
+}
+function restoreHeroMasks(reason) {
+    if (!maskBackup) return;
+    const backup = maskBackup;
+    try {
+        // Re-resolve current Hero/fixture chain before touching any saved fixture address.
+        const current = heroMaskContext(backup.state);
+        if (current.hero.toString() !== backup.hero || current.physics.toString() !== backup.physics)
+            throw new Error('hero body changed; saved masks not touched');
+        for (const item of backup.items) {
+            const fresh = current.chain.fixtures.find(f => f.address === item.pointer.toString());
+            if (!fresh || fresh.category !== C.mask_test.category || fresh.group !== C.mask_test.group || (fresh.mask !== C.mask_test.value && fresh.mask !== item.mask))
+                throw new Error('fixture changed externally; saved masks not touched');
+            writableFloat(item.pointer.add(C.fixture_probe.mask));
+        }
+        for (const item of backup.items) {
+            item.pointer.add(C.fixture_probe.mask).writeU16(item.mask);
+            if (item.pointer.add(C.fixture_probe.mask).readU16() !== item.mask) throw new Error('restore mask readback failed');
+        }
+        maskBackup = null;
+        maskTest = { ...maskTest, status: 'restored', reason };
+    } catch (e) { maskTest = { ...maskTest, status: 'restore_failed', reason, error: String(e) }; }
+    event('hero_mask_restore', { result: maskTest });
+}
+function applyHeroMasks(state) {
+    if (!C.mask_test.enabled) return;
+    try {
+        if (state.add(C.state.phase).readS32() !== 1) {
+            restoreHeroMasks('level inactive');
+            if (maskTest) maskTest.active = false;
+            return;
+        }
+        if (state.add(C.state.paused).readU8() !== 0) return;
+        if (maskTest && maskTest.state === state.toString() && maskTest.active !== false) return;
+        if (maskBackup) { restoreHeroMasks('new state'); if (maskBackup) return; }
+        maskTest = { state: state.toString(), active: true, status: 'validating', refilter_called: false };
+        const context = heroMaskContext(state);
+        const items = context.chain.fixtures.map(f => {
+            if (f.category !== C.mask_test.category || f.group !== C.mask_test.group || !C.mask_test.allowed_masks.includes(f.mask))
+                throw new Error('unexpected hero filter; no mask writes');
+            // Resolve from current chain through Frida pointer, never a hardcoded live address.
+            return { address: f.address, mask: f.mask };
+        });
+        // Rewalk the already validated bounded linked list to retain live NativePointers.
+        let fixture = context.physics.add(C.fixture_probe.fixture_head).readPointer();
+        for (const item of items) {
+            if (fixture.toString() !== item.address) throw new Error('fixture chain changed');
+            item.pointer = fixture; writableFloat(fixture.add(C.fixture_probe.mask));
+            fixture = fixture.add(C.fixture_probe.next).readPointer();
+        }
+        maskBackup = { state, hero: context.hero.toString(), physics: context.physics.toString(), items: [] };
+        maskTest.before = items.map(i => ({ address: i.address, mask: i.mask }));
+        for (const item of items) {
+            maskBackup.items.push(item); mutationAttempted = true;
+            item.pointer.add(C.fixture_probe.mask).writeU16(C.mask_test.value);
+            if (item.pointer.add(C.fixture_probe.mask).readU16() !== C.mask_test.value) throw new Error('mask readback failed');
+        }
+        maskTest.status = 'applied'; maskTest.count = items.length; maskTest.value = C.mask_test.value;
+        event('hero_mask_applied', { result: maskTest });
+    } catch (e) {
+        maskTest = { ...maskTest, state: state.toString(), active: true, status: 'failed', error: String(e) };
+        if (maskBackup) restoreHeroMasks('apply failed');
+        event('hero_mask_error', { result: maskTest });
+    }
 }
 function probeFilterSymbols() {
     if (filterSymbols !== null) return;
@@ -629,11 +708,12 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    if (!maskBackup) maskTest = null;
     autoRun = null; autoSeen.clear(); fixtureReport = null; filterSymbols = null;
     if (!wallPatch) { wallState = null; wallEvents = []; }
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
@@ -656,6 +736,7 @@ function install() {
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
         }, onLeave() {
             if (!enabled) return;
+            applyHeroMasks(this.updateState);
             if (pendingMove) performMove(this.updateState);
             else autoTeleport(this.updateState);
         } });

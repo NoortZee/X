@@ -20,6 +20,7 @@ function fixture(matches = 1, production = false) {
         readU16() { return this.value(); }
         readS16() { const n = this.value(); return n > 32767 ? n - 65536 : n; }
         readFloat() { return this.value(); }
+        writeU16(n) { writes.push([this.n,n]); memory.set(this.n,n); }
         writeFloat(n) { writes.push([this.n, n]); memory.set(this.n, n); }
         readByteArray(length) { return Uint8Array.from({ length }, (_, i) => memory.get(this.n + i) || 0).buffer; }
     }
@@ -31,7 +32,7 @@ function fixture(matches = 1, production = false) {
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -578,4 +579,40 @@ test('compact dump retains most recent active fixture observation after level ex
     f.memory.set(0x1138,2);f.c.testTime+=1000;f.force();f.tick();
     assert.equal(f.rpc.report().fixture_probe.time,time);
     assert.ok(JSON.stringify(f.rpc.report()).length<20000);
+});
+
+function maskFixture() {
+    const f=autoFixture();
+    f.memory.set(0x6020,0x20000);f.memory.set(0x20058,0xF000);f.memory.set(0x20070,0x21000);
+    for(let i=0;i<5;i++) {
+        const a=0x21000+i*0x100;
+        for(const [off,v] of [[0x10,0x20000],[0x34,2],[0x36,i===4?1:65533],[0x38,0],[8,i===4?0:a+0x100]])f.memory.set(a+off,v);
+    }
+    return f;
+}
+test('explicit mask=4 experiment changes all five fixtures once, stop restores individual masks',()=>{
+    const f=maskFixture();f.leave();
+    assert.equal(f.rpc.status().hero_mask_test.status,'applied');
+    assert.equal(f.rpc.status().hero_mask_test.count,5);
+    for(let i=0;i<5;i++)assert.equal(f.memory.get(0x21036+i*0x100),4);
+    f.leave();assert.equal(f.writes.length,5);
+    f.rpc.stop();assert.equal(f.rpc.status().hero_mask_test.status,'restored');
+    for(let i=0;i<5;i++)assert.equal(f.memory.get(0x21036+i*0x100),i===4?1:65533);
+});
+test('mask experiment refuses lock, unexpected group and invalid owner without writes',()=>{
+    for(const [address,value] of [[0xF000+0x19298,2],[0x21038,1],[0x21010,0]]) {
+        const f=maskFixture();f.memory.set(address,value);f.leave();
+        assert.equal(f.rpc.status().hero_mask_test.status,'failed');assert.equal(f.writes.length,0);
+    }
+});
+test('mask restore refuses changed Hero physics instead of touching old fixture pointers',()=>{
+    const f=maskFixture();f.leave();f.memory.set(0x6020,0);f.rpc.stop();
+    assert.equal(f.rpc.status().hero_mask_test.status,'restore_failed');assert.equal(f.writes.length,5);
+});
+test('mask partial failure attempts restoration without retrying application',()=>{
+    const f=maskFixture();const proto=Object.getPrototypeOf(f.pointer(0));const write=proto.writeU16;
+    proto.writeU16=function(n){if(this.n===0x21236 && n===4)throw Error('write fault');return write.call(this,n);};
+    f.leave();assert.equal(f.rpc.status().hero_mask_test.status,'restored');
+    assert.equal(f.memory.get(0x21036),65533);assert.equal(f.memory.get(0x21136),65533);
+    const count=f.writes.length;f.leave();assert.equal(f.writes.length,count);
 });
