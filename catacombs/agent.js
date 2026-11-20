@@ -18,6 +18,7 @@ let playSamples = {};
 let lastPlayStates = {};
 let lastEndlessSample = null;
 let lastEndless = null;
+let updateChanges = [];
 function emit(kind, data) {
     events.push({ time: Date.now(), kind, ...data });
     if (events.length > C.limits.events) events.shift();
@@ -137,6 +138,55 @@ function heroValues(hero) {
     } catch (error) { values.read_error = String(error); }
     return values;
 }
+function codeDiagnostics() {
+    const output = {};
+    const config = C.code_diagnostics;
+    const module = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    for (const [name, rva] of Object.entries(config.candidates)) {
+        const entry = { candidate_rva: '0x' + rva.toString(16),
+            boundary_verified: false, instructions: [] };
+        output[name] = entry;
+        try {
+            if (!module || rva < 0 || rva >= module.size) throw new Error('candidate outside module');
+            const start = module.base.add(rva);
+            const range = Process.findRangeByAddress(start);
+            if (!range || !range.protection.includes('r') || !range.protection.includes('x'))
+                throw new Error('candidate is not readable executable memory');
+            const available = Number(range.base.add(range.size).sub(start).toString());
+            const length = Math.min(config.max_bytes, module.size - rva, available);
+            if (length <= 0) throw new Error('empty code window');
+            entry.address = start.toString();
+            entry.window_bytes = length;
+            entry.is_complete_function = false;
+            entry.bytes = Array.from(new Uint8Array(start.readByteArray(length)))
+                .map(byte => byte.toString(16).padStart(2, '0')).join(' ');
+            let offset = 0;
+            while (offset < length && entry.instructions.length < config.max_instructions) {
+                const instruction = Instruction.parse(start.add(offset));
+                if (instruction.size <= 0 || instruction.size > length - offset) break;
+                entry.instructions.push({ rva: '0x' + (rva + offset).toString(16),
+                    size: instruction.size, mnemonic: instruction.mnemonic, operands: instruction.opStr });
+                offset += instruction.size;
+                // Do not guess function boundaries: retain branches/ret and continue to window limit.
+            }
+        } catch (error) { entry.error = String(error); }
+    }
+    return output;
+}
+function updateProbe(state) {
+    // Raw candidate values, not interpreted as health or skull count.
+    return { state: state.add(C.endless.state).readS32(),
+        field_f4: state.add(C.endless.index_next).readFloat() };
+}
+function recordUpdateChange(before, after, state, caller) {
+    if (before.state === after.state && Object.is(before.field_f4, after.field_f4)) return;
+    const event = { object: state.toString(), before, after,
+        caller: caller ? describeAddress(caller) : null, time: Date.now(),
+        scope: 'changed during update; exact writer not identified' };
+    updateChanges.push(event);
+    if (updateChanges.length > C.limits.events) updateChanges.shift();
+    emit('endless_update_change', event);
+}
 function endlessSnapshot(state) {
     const layout = C.endless;
     const result = { identity: heroIdentity(state), values: {}, pointers: {}, container: {} };
@@ -160,6 +210,7 @@ function endlessSnapshot(state) {
         const container = state.add(layout.container).readPointer();
         if (container.isNull()) return { null: true };
         const count = container.add(layout.container_count).readS32();
+        result.container.count_raw = count;
         if (count < 0 || count > layout.max_container_count)
             throw new Error('invalid candidate container count: ' + count);
         return { count, array: container.add(layout.container_array).readPointer().toString() };
@@ -232,7 +283,7 @@ function install() {
     resolutions = {}; lastHeroSample = null; lastHero = null;
     lastTraceSample = null; traces = new Map();
     playSamples = {}; lastPlayStates = {};
-    lastEndlessSample = null; lastEndless = null;
+    lastEndlessSample = null; lastEndless = null; updateChanges = [];
     const gameModule = Process.findModuleByName(MEMORY_LAYOUT.module_name);
     metadata = { captured_at: Date.now(), process_id: Process.id, arch: Process.arch,
         pointer_size: Process.pointerSize, profile_game_version: MEMORY_LAYOUT.game_version,
@@ -305,12 +356,21 @@ function install() {
             }) });
         }
         attach('endless_update', { onEnter: guard(function (args) {
+            this.endlessState = args[0];
+            try { this.beforeUpdate = updateProbe(args[0]); }
+            catch (_) { this.beforeUpdate = null; }
             const now = Date.now();
             if (lastEndlessSample !== null && now - lastEndlessSample < C.endless.sample_ms) return;
             lastEndlessSample = now;
             lastEndless = { time: now, ...endlessSnapshot(args[0]),
                 caller: this.returnAddress ? describeAddress(this.returnAddress) : null };
             emit('endless_update', lastEndless);
+        }), onLeave: guard(function () {
+            if (!this.beforeUpdate) return;
+            try {
+                recordUpdateChange(this.beforeUpdate, updateProbe(this.endlessState),
+                    this.endlessState, this.returnAddress);
+            } catch (error) { emit('update_probe_error', { error: String(error) }); }
         }) });
         emit('enabled', { diagnostic_only: true });
     } catch (error) { fail(error); throw error; }
@@ -323,5 +383,5 @@ function status() {
 rpc.exports = {
     install, status,
     stop() { stop(); return status(); },
-    report() { return { ...status(), traces: Array.from(traces.values()), events: events.slice() }; },
+    report() { return { ...status(), traces: Array.from(traces.values()), code_diagnostics: codeDiagnostics(), update_changes: updateChanges.slice(), events: events.slice() }; },
 };

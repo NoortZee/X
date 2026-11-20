@@ -355,3 +355,46 @@ test('Endless entry signature matches supplied instructions and wildcards the di
     bytes[33] ^= 1;
     assert.equal(matches(), false);
 });
+
+test('code diagnostics bounds decoding and never installs candidate hooks', () => {
+    const f = fixture(); f.rpc.install();
+    class Address {
+        constructor(n) { this.n = n; }
+        add(n) { return new Address(this.n + n); }
+        sub(p) { return new Address(this.n - p.n); }
+        toString() { return '0x' + this.n.toString(16); }
+        readByteArray(length) { assert.ok(length <= 768); return new Uint8Array(length).buffer; }
+    }
+    f.context.Process.findModuleByName = () => ({ base: new Address(0x100000), size: 0x3000000 });
+    f.context.Process.findRangeByAddress = () => ({ base: new Address(0x100000), size: 0x3000000, protection: 'r-x' });
+    f.context.Instruction = { parse: () => ({ size: 4, mnemonic: 'test', opStr: 'mock' }) };
+    const report = f.rpc.report();
+    assert.equal(Object.keys(report.code_diagnostics).length, 6);
+    for (const entry of Object.values(report.code_diagnostics)) {
+        assert.equal(entry.boundary_verified, false);
+        assert.equal(entry.instructions.length, 192);
+        assert.equal(entry.error, undefined);
+    }
+    assert.equal(f.hooks.length, 9);
+});
+
+test('code diagnostics rejects non-executable ranges without disabling module', () => {
+    const f = fixture(); f.rpc.install();
+    f.context.Process.findModuleByName = () => ({ base: { add: () => ({}) }, size: 0x3000000 });
+    f.context.Process.findRangeByAddress = () => ({ protection: 'rw-' });
+    assert.match(f.rpc.report().code_diagnostics.state1.error, /not readable executable/);
+    assert.equal(f.rpc.status().enabled, true);
+});
+
+test('before/after update changes are retained separately and never called exact writers', () => {
+    const f = fixture(); f.rpc.install();
+    f.context.probeObject = { toString: () => '0x1000' };
+    vm.runInContext('recordUpdateChange({state: 1, field_f4: 5}, {state: 1, field_f4: 5}, probeObject, null)', f.context);
+    assert.equal(f.rpc.report().update_changes.length, 0);
+    vm.runInContext('recordUpdateChange({state: 1, field_f4: 5}, {state: 1, field_f4: 4}, probeObject, null)', f.context);
+    const change = f.rpc.report().update_changes[0];
+    assert.equal(change.after.field_f4, 4);
+    assert.match(change.scope, /exact writer not identified/);
+    for (let i = 0; i < 1100; i++) f.hooks[4].onEnter([]);
+    assert.equal(f.rpc.report().update_changes.length, 1);
+});

@@ -81,6 +81,11 @@ const MEMORY_LAYOUT = {
         },
         // Itanium ABI: object vptr is already the address point (past _ZTV header).
         rtti: { object_vptr: 0, typeinfo_from_vptr: -8, name_from_typeinfo: 8, max_name_bytes: 128 },
+        code_diagnostics: { max_bytes: 768, max_instructions: 200,
+            // Unverified candidate starts from supplied static analysis: read/decode only, never hook/call.
+            candidates: { state1: 0x14D77E0, state2_or_4: 0x14D79D0,
+                helper_a: 0x14D76D0, helper_b: 0x14D7B30,
+                helper_c: 0x14D7D60, helper_d: 0x14D6D00 } },
         endless: { state: 0x138, index_min: 0x178, index_max: 0x17C,
             timer: 0x190, index_current: 0xF0, index_next: 0xF4, recalculate: 0xF9,
             container: 0x60, related: 0x188,
