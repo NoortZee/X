@@ -69,13 +69,17 @@ const MEMORY_LAYOUT = {
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
             // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.
             neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12, false]] },
-        speed_test: { enabled: true, offset: 0x8, multiplier: 5, baseline: 2.20000004768 },
+        speed_test: { enabled: true, offset: 0x8, multiplier: 1, baseline: 2.20000004768 },
         // Initial underground descent disabled: finish regression reported; keep prior no-fall mode.
         altitude_test: { auto_rise: true, up: 1920, velocity: 8, timeout_ms: 6000, expiry_ms: 5000, tolerance: 4 },
         no_fall: { enabled: true, underground: false, down: 64, descent_vy: 2, descent_timeout_ms: 2000 },
         mask_test: { enabled: true, value: 4, category: 2, group: 0, allowed_masks: [65533, 1, 4] },
         fixture_probe: { enabled: true, fixture_head: 0x70, next: 0x8, owner: 0x10,
             category: 0x34, mask: 0x36, group: 0x38, limit: 8, candies: 3, symbols: 4 },
+        spawn_probe: { expiry_ms: 5000, instructions: 256, candidates: {
+            factory_candidate: { rva: 0x15EEA70, bytes: 768 },
+            wrapper_candidate: { rva: 0x15FB8A0, bytes: 384 },
+            array_push_candidate: { rva: 0x1092110, bytes: 768 } } },
         diagnostics: false,
         auto_teleport: { enabled: true, delay_ms: 300, interval_ms: 20, rarities: [1, 2, 3, 4], events: 80 },
         profile: '2.84.2 live candidates; not automatic game version detection',

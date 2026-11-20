@@ -16,6 +16,7 @@ let maskTest = null, maskBackup = null;
 let speedTest = null, speedBackup = null;
 let fallStatus = null, fallBackup = null;
 let pendingAltitude = null;
+let pendingSpawnProbe = null, spawnInspection = null;
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
@@ -386,6 +387,7 @@ function restoreHeroMasks(reason) {
     event('hero_mask_restore', { result: maskTest });
 }
 function restoreNoFall(reason) {
+    pendingSpawnProbe = null; spawnInspection = null;
     pendingAltitude = null;
     if (!fallBackup) return;
     try {
@@ -881,6 +883,40 @@ function autoTeleport(state) {
         error = String(e); event('auto_teleport_error', { error });
     }
 }
+function requestSpawnProbe() {
+    if (!enabled || !latest || latest.phase_raw !== 1) throw new Error('start module and enter active Catacombs first');
+    if (Date.now() - latest.time > C.spawn_probe.expiry_ms) throw new Error('state snapshot stale');
+    if (pendingSpawnProbe) throw new Error('spawn probe already queued');
+    pendingSpawnProbe = { state: latest.state.address, time: Date.now() };
+    return { queued: true, read_only: true, spawn_enabled: false };
+}
+function performSpawnProbe(state) {
+    if (!pendingSpawnProbe) return;
+    const request = pendingSpawnProbe; pendingSpawnProbe = null;
+    spawnInspection = { time: Date.now(), state: state.toString(), read_only: true,
+        spawn_enabled: false, abi_verified: false, candidates: {} };
+    try {
+        if (Date.now() - request.time > C.spawn_probe.expiry_ms || request.state !== state.toString())
+            throw new Error('spawn probe expired/state changed');
+        requireClass(state, C.move_white.state_name);
+        if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0)
+            throw new Error('run not active/unpaused');
+        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+        if (!m) throw new Error('game module missing');
+        for (const [role, candidate] of Object.entries(C.spawn_probe.candidates)) {
+            spawnInspection.candidates[role] = safe(() => {
+                if (!Number.isSafeInteger(candidate.rva) || candidate.rva < 0 || candidate.rva >= m.size)
+                    throw new Error('candidate outside game module');
+                const target = m.base.add(candidate.rva);
+                const key = captureMethodCode(target, candidate.bytes, C.spawn_probe.instructions);
+                if (!key) throw new Error('code capture budget exhausted; stop/start before probe');
+                return { target: address(target), candidate_only: true, code: methodCode.get(key) };
+            });
+        }
+        spawnInspection.status = 'captured'; // Code records may individually contain read/decode errors.
+    } catch (e) { spawnInspection.status = 'failed'; spawnInspection.error = String(e); }
+    event('spawn_probe_result', { status: spawnInspection.status, error: spawnInspection.error });
+}
 function requestAltitude(mode) {
     if (!enabled || !latest || !C.no_fall.enabled) throw new Error('start module and enter active Catacombs first');
     if (latest.phase_raw !== 1 || Date.now() - latest.time > C.altitude_test.expiry_ms)
@@ -899,8 +935,8 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
@@ -931,6 +967,7 @@ function install() {
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
         }, onLeave() {
             if (!enabled) return;
+            performSpawnProbe(this.updateState);
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             preventFall(this.updateState);
@@ -942,16 +979,16 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
             ...status(), metadata: { time: Date.now(), module: moduleInfo,
                 warning: 'Physics readback is not proof of collection; check HUD.' },
-            latest, events: events.slice() };
+            spawn_probe: spawnInspection, latest, events: events.slice() };
         return { schema_version: 2, diagnostic_only: !mutationAttempted, experimental_position_moves: true, ...status(),
         metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
-        lifecycle_candidates: lifecycleCode, method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
+        spawn_probe: spawnInspection, lifecycle_candidates: lifecycleCode, method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
 };

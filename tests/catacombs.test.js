@@ -617,12 +617,12 @@ test('mask partial failure attempts restoration without retrying application',()
     const count=f.writes.length;f.leave();assert.equal(f.writes.length,count);
 });
 
-test('speed multiplier changes only unique config speed by x5 and restores original',()=>{
+test('normal speed configuration uses multiplier one and preserves baseline',()=>{
     const f=wallFixture(1,false,true);
     vm.runInContext('applySpeed(wallTestState)',f.c);
     const r=f.rpc.status().speed_test;
-    assert.equal(r.status,'applied');assert.equal(r.multiplier,5);
-    assert.ok(Math.abs(f.memory.get(0x250008)-11)<0.0001);
+    assert.equal(r.status,'applied');assert.equal(r.multiplier,1);
+    assert.ok(Math.abs(f.memory.get(0x250008)-2.2)<0.0001);
     assert.equal(f.memory.get(0x250000),26.67499923706);
     assert.equal(f.writes.length,1);
     vm.runInContext('applySpeed(wallTestState)',f.c);assert.equal(f.writes.length,1);
@@ -738,7 +738,7 @@ test('shipped configuration disables underground descent while preserving no-fal
     const values=vm.runInNewContext(profile+'; ({fall: MEMORY_LAYOUT.catacombs.no_fall, mask: MEMORY_LAYOUT.catacombs.mask_test.enabled, speed: MEMORY_LAYOUT.catacombs.speed_test.multiplier, auto: MEMORY_LAYOUT.catacombs.auto_teleport.enabled})');
     assert.equal(values.fall.underground,false);
     assert.equal(values.fall.enabled,true);
-    assert.equal(values.mask,true);assert.equal(values.speed,5);assert.equal(values.auto,true);
+    assert.equal(values.mask,true);assert.equal(values.speed,1);assert.equal(values.auto,true);
 });
 
 test('manual above queues upward velocity and return-height uses original altitude without cumulative offset',()=>{
@@ -791,4 +791,36 @@ test('shipped profile arms automatic 30-cell rise and sufficient timeout',()=>{
     const config=vm.runInNewContext(profile+'; MEMORY_LAYOUT.catacombs.altitude_test');
     assert.equal(config.auto_rise,true);assert.equal(config.up,30*64);
     assert.ok(config.timeout_ms>config.up/100/config.velocity*1000);
+});
+
+test('spawn probe is opt-in, queued read-only capture of three ASLR-relative candidates',()=>{
+    const f=fixture();
+    assert.throws(()=>f.rpc.spawnProbe(),/active Catacombs/);
+    f.rpc.install();f.tick();assert.equal(f.rpc.report().spawn_probe,null);
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
+    f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
+    f.c.NativeFunction=function(){throw Error('probe must not call native');};
+    f.rpc.spawnProbe();assert.equal(f.rpc.report().spawn_probe,null);
+    assert.throws(()=>f.rpc.spawnProbe(),/already queued/);
+    f.leave();const r=f.rpc.report().spawn_probe;
+    assert.equal(r.status,'captured');assert.equal(r.read_only,true);assert.equal(r.spawn_enabled,false);
+    assert.equal(r.abi_verified,false);assert.equal(Object.keys(r.candidates).length,3);
+    assert.equal(r.candidates.factory_candidate.target.rva,'0x15eea70');
+    assert.equal(r.candidates.wrapper_candidate.target.rva,'0x15fb8a0');
+    assert.equal(r.candidates.array_push_candidate.target.rva,'0x1092110');
+    assert.equal(r.candidates.factory_candidate.code.window_bytes,768);
+    assert.equal(r.candidates.wrapper_candidate.code.window_bytes,384);
+    assert.equal(r.candidates.array_push_candidate.code.instructions.length,256);
+    assert.equal(f.writes.length,0);
+    f.memory.clear();assert.equal(f.rpc.report().spawn_probe,r);
+});
+test('spawn probe cancels on stop and refuses stale or inactive state before code capture',()=>{
+    for(const kind of ['stop','expired','state','inactive']) {
+        const f=fixture();f.rpc.install();f.tick();f.rpc.spawnProbe();
+        if(kind==='stop'){f.rpc.stop();assert.equal(f.rpc.status().spawn_probe_pending,null);continue;}
+        if(kind==='expired')vm.runInContext('pendingSpawnProbe.time -= 6000',f.c);
+        if(kind==='state')vm.runInContext('pendingSpawnProbe.state = "other"',f.c);
+        if(kind==='inactive')f.memory.set(0x1138,2);
+        f.leave();assert.equal(f.rpc.report().spawn_probe.status,'failed');assert.equal(f.writes.length,0);
+    }
 });
