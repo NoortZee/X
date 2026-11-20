@@ -70,6 +70,7 @@ const MEMORY_LAYOUT = {
     catacombs: {
         // Candidate profile supplied by static analysis, not runtime verified.
         signatures: {
+            endless_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB F3 0F 11 45 D4 E8 ?? ?? ?? ?? 48 8B 7B 50 48 85 FF 74 0B 48 8B 07 F3 0F 10 45 D4 FF 50 78',
             play_update: '55 48 89 E5 41 56 53 48 83 EC 10 80 BF C0 00 00 00 00 74 11 48 8B 07 48 83 C4 10 5B 41 5E 5D FF A0 C0 00 00 00 80 BF C1 00 00 00 00 74 11 48 8B 07 48 83 C4 10 5B 41 5E 5D FF A0 B8 00 00 00',
             play_update_heroes: '55 48 89 E5 41 56 53 48 89 FB 4C 8B B7 98 00 00 00 4D 85 F6 74 1A 48 8D 05 ?? ?? ?? ?? F3 0F 10 00 E8 ?? ?? ?? ?? 4C 89 F7 89 C6 E8 ?? ?? ?? ?? 4C 8B B3 A0 00 00 00',
             replay_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB E8 ?? ?? ?? ?? 48 8B BB 60 01 00 00',
@@ -80,6 +81,11 @@ const MEMORY_LAYOUT = {
         },
         // Itanium ABI: object vptr is already the address point (past _ZTV header).
         rtti: { object_vptr: 0, typeinfo_from_vptr: -8, name_from_typeinfo: 8, max_name_bytes: 128 },
+        endless: { state: 0x138, index_min: 0x178, index_max: 0x17C,
+            timer: 0x190, index_current: 0xF0, index_next: 0xF4, recalculate: 0xF9,
+            container: 0x60, related: 0x188,
+            container_count: 0x20, container_array: 0x10,
+            max_container_count: 4096, sample_ms: 250 },
         play_state: { world: 0x40, world_content: 0x18, paused: 0x88,
             hero1: 0x98, hero2: 0xA0, timer: 0xB0, frame_time: 0xB4,
             mode1: 0xC0, mode2: 0xC1, optional: 0xD0,
