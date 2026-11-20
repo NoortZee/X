@@ -429,6 +429,15 @@ function preventFall(state) {
                 fallStatus.descent = 'descending';
             }
         }
+        if (C.altitude_test.auto_rise && !fallBackup.autoRiseStarted) {
+            const y = numberAt(context.hero, C.object.y);
+            fallBackup.autoRiseStarted = true;
+            fallBackup.originY = y;
+            fallBackup.flight = { target: y - C.altitude_test.up, started: Date.now(), mode: 'auto_above' };
+            fallStatus.altitude = { mode: 'auto_above', status: 'moving', origin_y: y, target_y: fallBackup.flight.target };
+            fallStatus.descent = 'cancelled_by_auto_altitude';
+            event('altitude_auto_started', { origin_y: y, target_y: fallBackup.flight.target });
+        }
         mutationAttempted = true;
         if (g !== 0) gravity.writeFloat(0);
         if (pendingAltitude) {
@@ -891,7 +900,7 @@ function requestMove(mode = 'visual') {
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 function stop() { restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { enabled, error, calls, samples, skipped, resolution, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
