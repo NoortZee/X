@@ -65,6 +65,8 @@ const MEMORY_LAYOUT = {
         item_first_ptr: 8,
     },
     catacombs: {
+        diagnostics: false,
+        auto_teleport: { enabled: true, delay_ms: 300, interval_ms: 20, rarities: [1, 2, 3, 4], events: 80 },
         profile: '2.84.2 live candidates; not automatic game version detection',
         signature: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB F3 0F 11 45 D4 E8 ?? ?? ?? ?? 48 8B 7B 50 48 85 FF 74 0B 48 8B 07 F3 0F 10 45 D4 FF 50 78',
         state: { world: 0x40, objects: 0x68, paused: 0x88, phase: 0x138 },
