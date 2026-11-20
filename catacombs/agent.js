@@ -18,6 +18,7 @@ let fallStatus = null, fallBackup = null;
 let pendingAltitude = null;
 let pendingSpawnProbe = null, spawnInspection = null;
 let earlySpawnArray = null;
+let pendingGold = null, goldResult = null, goldAttempted = false;
 let attachObserver = null, attachObservationStatus = null, attachObservations = [];
 let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
@@ -1012,6 +1013,91 @@ function installAttachObserver(m) {
         attachObservationStatus.status = 'listening';
     } catch (e) { attachObservationStatus.status = 'unavailable'; attachObservationStatus.error = String(e); }
 }
+function requestGold() {
+    if (!enabled || !latest || latest.phase_raw !== 1 || Date.now() - latest.time > C.spawn_gold.expiry_ms)
+        throw new Error('enter active Catacombs first');
+    if (goldAttempted || pendingGold) throw new Error('one spawn attempt per module; inspect dump before restarting');
+    pendingGold = { state: latest.state.address, time: Date.now() };
+    return { queued: true, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
+}
+function performGold(state) {
+    if (!pendingGold) return;
+    const request = pendingGold; pendingGold = null;
+    const result = { time: Date.now(), success: false, collection_confirmed: false, rarity: 4, native_started: false };
+    try {
+        if (request.state !== state.toString() || Date.now() - request.time > C.spawn_gold.expiry_ms) throw new Error('spawn request stale/state changed');
+        requireClass(state, C.move_white.state_name);
+        if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0) throw new Error('run not active');
+        const context = heroMaskContext(state), S = C.spawn_probe, G = C.spawn_gold;
+        const heroBody = context.hero.add(C.object.body).readPointer();
+        const world = context.physics.add(C.teleport_white.world).readPointer();
+        // Generic Body registration writes owner at +0x10; corroborate this fresh Hero owner against world.
+        const parent = heroBody.add(S.body_parent).readPointer();
+        if (parent.isNull() || parent.add(S.parent_world).readPointer().toString() !== world.toString())
+            throw new Error('fresh Hero registered parent/world mismatch');
+        const array = state.add(C.state.objects).readPointer(); requireClass(array, S.array_name);
+        const capacity = safeU64(array.add(C.array.slots));
+        if (capacity < 1 || capacity > C.limits.slots) throw new Error('array capacity invalid');
+        const data = array.add(C.array.data).readPointer();
+        if (data.isNull()) throw new Error('null array data');
+        let slot = -1;
+        for (let i = 0; i < capacity; i++) if (data.add(i * Process.pointerSize).readPointer().isNull()) { slot = i; break; }
+        if (slot < 0) throw new Error('no allocated free slot; refusing array growth/replacement');
+        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
+        for (const sig of G.signatures) {
+            if (!m || sig.rva < 0 || sig.rva + sig.bytes.length > m.size) throw new Error('spawn code outside module');
+            const code = m.base.add(sig.rva), range = Process.findRangeByAddress(code);
+            if (!range || !range.protection.includes('r') || !range.protection.includes('x') || Number(range.base.add(range.size).sub(code).toString()) < sig.bytes.length)
+                throw new Error('spawn code unreadable/nonexecutable');
+            const bytes = new Uint8Array(code.readByteArray(sig.bytes.length));
+            if (!sig.bytes.every((b,i) => bytes[i] === b)) throw new Error('spawn signature mismatch at ' + sig.rva.toString(16));
+        }
+        const direction = heroBody.add(C.move_white.direction).readS32();
+        if (direction !== 1 && direction !== -1) throw new Error('invalid Hero direction');
+        const target = { x: numberAt(context.hero,C.object.x) + direction*C.move_white.ahead, y: numberAt(context.hero,C.object.y) };
+        const factory = new NativeFunction(m.base.add(G.factory),'pointer',['int']);
+        const attach = new NativeFunction(m.base.add(G.attach),'void',['pointer','pointer',['float','float']]);
+        const assign = new NativeFunction(m.base.add(G.array_set),'void',['pointer','pointer','uint64']);
+        if (world.add(C.teleport_white.lock).readU8() & C.teleport_white.lock_mask) throw new Error('physics locked');
+        result.target = target; result.parent = parent.toString(); result.slot = slot;
+        goldAttempted = true; mutationAttempted = true; result.native_started = true;
+        const object = factory(G.rarity); result.object = object.toString();
+        if (object.isNull()) throw new Error('factory returned null');
+        requireClass(object,C.candy.name);
+        if (object.add(C.candy.rarity).readS32() !== G.rarity) throw new Error('factory rarity mismatch');
+        if (!object.add(C.object.body).readPointer().isNull()) throw new Error('factory already has Body; refusing duplicate attach');
+        const vptr = object.readPointer();
+        if (vptr.add(S.attach_slot).readPointer().toString() !== m.base.add(G.attach).toString() ||
+            vptr.add(S.body_factory_slot).readPointer().toString() !== m.base.add(G.body_factory).toString()) throw new Error('spawn vtable mismatch');
+        const setter = vptr.add(C.method_probe.object_methods.position_set_candidate).readPointer();
+        if (setter.toString() !== m.base.add(G.object_setter).toString()) throw new Error('unexpected object position setter');
+        const setterBytes = new Uint8Array(setter.readByteArray(C.move_white.setter_bytes.length));
+        if (!C.move_white.setter_bytes.every((b,i)=>setterBytes[i]===b)) throw new Error('object position setter changed');
+        attach(object,parent,[target.x,target.y]);
+        result.parent_check = inspectCandyParent(object);
+        if (!result.parent_check.world_matches || result.parent_check.parent !== parent.toString()) throw new Error('new Body parent/world mismatch');
+        const body = object.add(C.object.body).readPointer(), physics = body.add(C.hero_body.physics).readPointer();
+        result.physics_readback = { x: numberAt(physics,MEMORY_LAYOUT.tas.body.XF_PX)*C.candy_body_probe.scale,
+            y: numberAt(physics,MEMORY_LAYOUT.tas.body.XF_PY)*C.candy_body_probe.scale };
+        result.position_check = physicsPositionCheck(target,result.physics_readback);
+        if (!result.position_check.matches) throw new Error('new Body position mismatch');
+        const x = object.add(C.object.x), y = object.add(C.object.y); writableFloat(x); writableFloat(y);
+        x.writeFloat(target.x); y.writeFloat(target.y); // Verified trivial object setter, matching spawn wrapper.
+        if (state.add(C.state.objects).readPointer().toString() !== array.toString()) throw new Error('array changed during spawn');
+        const currentCapacity = safeU64(array.add(C.array.slots));
+        const currentData = array.add(C.array.data).readPointer();
+        if (slot >= currentCapacity || !currentData.add(slot*Process.pointerSize).readPointer().isNull()) throw new Error('reserved slot no longer free');
+        assign(array,object,slot); // Indexed assignment, NOT capacity+1 or an assumed append helper.
+        const registered = array.add(C.array.data).readPointer().add(slot*Process.pointerSize).readPointer();
+        if (registered.toString() !== object.toString()) throw new Error('array registration readback failed');
+        result.registered = true; result.success = true;
+        result.note = 'One new rarity4 object registered; check HUD. No manual refcount release or reward mutation.';
+    } catch (e) {
+        result.error = String(e);
+        if (result.native_started) result.warning = 'native spawn started; possible partial/orphan object. No guessed destructor, rollback or retry; restart game after failure.';
+    }
+    goldResult = result; event('spawn_gold_result',result);
+}
 function requestSpawnProbe() {
     if (!enabled || !latest || latest.phase_raw !== 1) throw new Error('start module and enter active Catacombs first');
     if (Date.now() - latest.time > C.spawn_probe.expiry_ms) throw new Error('state snapshot stale');
@@ -1068,11 +1154,12 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { enabled, error, calls, samples, skipped, resolution, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: false, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
+    pendingGold = null; goldResult = null; goldAttempted = false;
     pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
     attachObservationStatus = null; attachObservations = [];
     pendingAltitude = null;
@@ -1106,7 +1193,8 @@ function install() {
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             preventFall(this.updateState);
-            if (pendingMove) performMove(this.updateState);
+            if (pendingGold) performGold(this.updateState);
+            else if (pendingMove) performMove(this.updateState);
             else autoTeleport(this.updateState);
         } });
         installAttachObserver(m);
@@ -1115,7 +1203,7 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, spawnGold: requestGold, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
