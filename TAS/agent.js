@@ -2,7 +2,7 @@
 // История изменений и совместимость: docs/CHANGELOG.md.
 'use strict';
 
-const MODULE_NAME = 'libthieves.so';
+const MODULE_NAME = MEMORY_LAYOUT.module_name;
 
 let libModule = null;
 for (let i = 0; i < 100; i++) {
@@ -23,17 +23,11 @@ send({ type: 'module_base', name: MODULE_NAME,
 // ------------------------------------------------------------
 // Address resolver
 // ------------------------------------------------------------
-// FRAME_FUNC использует чтение +0xB0 для различения HeroBody и других тел.
-const SIGS = {
-    FRAME_FUNC:      '48 83 7F 20 00 0F 84 ?? ?? ?? ?? 55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 41 89 F4 48 89 FB 8B 87 B0 00 00 00',
-    JUMP:            '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 84 C0 74 ?? 48 89 DF 48 83 C4 08 5B 5D E9 ?? ?? ?? ??',
-    UNFREEZE:        '55 48 89 E5 41 57 41 56 41 54 53 48 89 FB 44 8B B7 B4 00 00 00 F3 0F 10 05 ?? ?? ?? ??',
-    UNFREEZE_ATTACK: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 80 BB 48 01 00 00 00 75 ?? 48 8B BB C8 00 00 00',
-};
-const FALLBACK = {
-    FRAME_FUNC: 0x1612A20, JUMP: 0x1611F00,
-    UNFREEZE:   0x13F92C0, UNFREEZE_ATTACK: 0x13DA8B0,
-};
+// Function signatures and relative addresses come from memory/offsets.js.
+const SIGS = MEMORY_LAYOUT.tas.signatures;
+const FALLBACK = MEMORY_LAYOUT.tas.fallback;
+const HERO = MEMORY_LAYOUT.tas.hero;
+const PLATFORM = MEMORY_LAYOUT.platform;
 
 const _resolutionLog = [];
 function isReadablePtr(p) {
@@ -189,19 +183,19 @@ function fnv1a32(bytes) {
 // ------------------------------------------------------------
 // Time
 // ------------------------------------------------------------
-const CLOCK_MONOTONIC = 1;
-const _SYS_clock_gettime_x86_64 = 228;
-const _tsBuf = Memory.alloc(16);
+const CLOCK_MONOTONIC = PLATFORM.clock_monotonic;
+const _SYS_clock_gettime_x86_64 = PLATFORM.syscall_clock_gettime;
+const _tsBuf = Memory.alloc(PLATFORM.time_struct_size);
 let _syscallFn = null;
 try {
-    const sa = findExport('libc.so', 'syscall');
+    const sa = findExport(PLATFORM.libc, 'syscall');
     if (sa) _syscallFn = new NativeFunction(sa, 'long', ['long', '...']);
 } catch (_) {}
 function nowNs() {
     if (_syscallFn) {
         try {
             _syscallFn(_SYS_clock_gettime_x86_64, CLOCK_MONOTONIC, _tsBuf);
-            const s = _tsBuf.readS64(), n = _tsBuf.add(8).readS64();
+            const s = _tsBuf.add(PLATFORM.time_seconds).readS64(), n = _tsBuf.add(PLATFORM.time_subseconds).readS64();
             return Number(s) * 1e9 + Number(n);
         } catch (_) {}
     }
@@ -212,8 +206,7 @@ function nowNs() {
 // Body state — hot path (1 try/catch, без findRangeByAddress)
 // ------------------------------------------------------------
 function _nz(v) { return v === 0 ? 0 : v; }
-const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
-    VX: 0x40, VY: 0x44, AV: 0x48, GRAVITY: 0xA8, BODY_SIZE: 0x200 };
+const BODY = MEMORY_LAYOUT.tas.body;
     const BODY_FIELDS = ['px', 'py', 'ang', 'vx', 'vy', 'av'];
 
     function readBodyState(bodyPtr) {
@@ -244,12 +237,12 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
     }
     function isValidHeroStrict(p) {
         if (!p || p.isNull() || !isReadablePtr(p)) return false;
-        try { if (!p.and(7).isNull()) return false; } catch (_) { return false; }
-        let body; try { body = p.add(0x20).readPointer(); } catch (_) { return false; }
+        try { if (!p.and(MEMORY_LAYOUT.pointer_alignment_mask).isNull()) return false; } catch (_) { return false; }
+        let body; try { body = p.add(HERO.BODY_PTR).readPointer(); } catch (_) { return false; }
         if (!isReadablePtr(body)) return false;
-        try { if (!body.and(7).isNull()) return false; } catch (_) { return false; }
-        let bt; try { bt = body.readU32(); } catch (_) { return false; }
-        if (bt !== 2) return false;
+        try { if (!body.and(MEMORY_LAYOUT.pointer_alignment_mask).isNull()) return false; } catch (_) { return false; }
+        let bt; try { bt = body.add(BODY.TYPE).readU32(); } catch (_) { return false; }
+        if (bt !== BODY.DYNAMIC_TYPE) return false;
         let grav; try { grav = body.add(BODY.GRAVITY).readFloat(); } catch (_) { return false; }
         return isFinite(grav) && grav > -100 && grav < 100;
     }
@@ -257,11 +250,11 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
         if (!p || p.isNull()) return { reason: 'nullptr' };
         try {
             return {
-                vt_rel:      p.readPointer().sub(MODULE_BASE).toString(),
-                state_a0:    p.add(0xA0).readS32(),
-                cooldown_b0: p.add(0xB0).readS32(),
-                ground_80:   p.add(0x80).readS32(),
-                ground_84:   p.add(0x84).readS32(),
+                vt_rel:      p.add(HERO.VTABLE).readPointer().sub(MODULE_BASE).toString(),
+                state_a0:    p.add(HERO.STATE_A0).readS32(),
+                cooldown_b0: p.add(HERO.COOLDOWN_B0).readS32(),
+                ground_80:   p.add(HERO.GROUND_80).readS32(),
+                ground_84:   p.add(HERO.GROUND_84).readS32(),
             };
         } catch (_) {
             return { reason: 'unreadable' };
@@ -303,7 +296,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
         if (_libcHooks.rngInstalled) return;
         _libcHooks.rngInstalled = true;
         for (const name of ['rand', 'random', 'lrand48', 'mrand48', 'drand48']) {
-            const a = findExport('libc.so', name);
+            const a = findExport(PLATFORM.libc, name);
             if (!a) continue;
             _libcHooks.rng.add(name);
             const h = Interceptor.attach(a, {
@@ -328,7 +321,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
         if (_libcHooks.timeInstalled) return;
         _libcHooks.timeInstalled = true;
         for (const name of ['clock_gettime', 'gettimeofday', 'clock_gettime64']) {
-            const a = findExport('libc.so', name);
+            const a = findExport(PLATFORM.libc, name);
             if (!a) continue;
             _libcHooks.time.add(name);
             const h = Interceptor.attach(a, {
@@ -340,8 +333,8 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                 onLeave(ret) {
                     if (pump._recordTime && this._ts && isReadablePtr(this._ts)) {
                         try {
-                            const s = BigInt(this._ts.readS64().toString());
-                            const sub = BigInt(this._ts.add(8).readS64().toString());
+                            const s = BigInt(this._ts.add(PLATFORM.time_seconds).readS64().toString());
+                            const sub = BigInt(this._ts.add(PLATFORM.time_subseconds).readS64().toString());
                             const ns = (this._fn === 'gettimeofday')
                                 ? (s * 1000000000n + sub * 1000n)
                                 : (s * 1000000000n + sub);
@@ -353,11 +346,11 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                             const ns = BigInt(pump._frozenNs);
                             const sec = ns / 1000000000n;
                             const rem = ns % 1000000000n;
-                            this._ts.writeS64(Number(sec));
+                            this._ts.add(PLATFORM.time_seconds).writeS64(Number(sec));
                             if (this._fn === 'gettimeofday') {
-                                this._ts.add(8).writeS64(Number(rem / 1000n));
+                                this._ts.add(PLATFORM.time_subseconds).writeS64(Number(rem / 1000n));
                             } else {
-                                this._ts.add(8).writeS64(Number(rem));
+                                this._ts.add(PLATFORM.time_subseconds).writeS64(Number(rem));
                             }
                             ret.replace(0);
                         } catch (_) {}
@@ -527,7 +520,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                         }
 
                         let body;
-                    try { body = hero.add(0x20).readPointer(); } catch (_) { return; }
+                    try { body = hero.add(HERO.BODY_PTR).readPointer(); } catch (_) { return; }
                     if (!body || body.isNull()) { pump._dbgStats.nullBody++; return; }
 
                     const rec = readBodyState(body);
@@ -684,7 +677,7 @@ const BODY = { XF_PX: 0x0C, XF_PY: 0x10, SW_A: 0x38,
                                snap: heroSnapshot(thisPtr),
                     };
                     try {
-                        const vt = thisPtr.readPointer();
+                        const vt = thisPtr.add(HERO.VTABLE).readPointer();
                         ev.vt = vt.toString();
                         ev.vt_rel = vt.sub(MODULE_BASE).toString();
                     } catch (_) { ev.vt = null; ev.vt_rel = null; }

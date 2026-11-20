@@ -136,6 +136,9 @@ impl<'a> TasAgent<'a> {
         let src = std::fs::read_to_string(script_path)
             .map_err(|e| AgentError::Io(script_path.display().to_string(), e))?;
 
+        let src = crate::memory::prepend_layout(script_path, &src)
+            .map_err(|e| AgentError::Io(script_path.display().to_string(), e))?;
+
         let mut opts = ScriptOption::default();
         let mut script = session.create_script(&src, &mut opts)?;
         let fatal = Arc::new(AtomicBool::new(false));
