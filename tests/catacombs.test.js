@@ -990,3 +990,29 @@ test('gold native failure is latched with no retry or guessed destructor; stop c
     assert.throws(()=>f.rpc.spawnGold(),/one spawn attempt/);
     const stopped=goldFixture();stopped.rpc.spawnGold();stopped.rpc.stop();assert.equal(stopped.rpc.status().spawn_gold_pending,null);
 });
+
+test('gold spawn detaches its own attach observer and flushes before verifying original bytes',()=>{
+    const f=goldFixture();
+    const sig=vm.runInContext('C.spawn_gold.signatures.find(s=>s.rva===C.spawn_gold.attach)',f.c);
+    const code=0x100000+sig.rva;let detached=0,flushed=0;
+    f.memory.set(code,0xCC); // simulate Interceptor's installed prologue patch
+    f.c.testDetach=()=>{detached++;sig.bytes.forEach((b,i)=>f.memory.set(code+i,b));};
+    f.c.Interceptor.flush=()=>{assert.equal(detached,1);flushed++;};
+    vm.runInContext("attachObserver={detach:testDetach};attachObservationStatus={status:'listening',observed:8}",f.c);
+    f.rpc.spawnGold();f.leave();const r=f.rpc.status().last_spawn_gold;
+    assert.equal(r.success,true,JSON.stringify(r));assert.equal(r.attach_observer_detached,true);
+    assert.equal(detached,1);assert.equal(flushed,1);assert.equal(f.rpc.status().attach_observer.status,'detached_for_spawn');
+    assert.equal(f.calls.join(','),'factory,attach,assign');
+});
+test('gold spawn still rejects altered original bytes after observer detachment',()=>{
+    const f=goldFixture();
+    const sig=vm.runInContext('C.spawn_gold.signatures.find(s=>s.rva===C.spawn_gold.attach)',f.c);
+    const code=0x100000+sig.rva;
+    f.memory.set(code,0xCC);f.memory.set(code+32,0x90);
+    f.c.testDetach=()=>{sig.bytes.slice(0,20).forEach((b,i)=>f.memory.set(code+i,b));};
+    f.c.Interceptor.flush=()=>{};
+    vm.runInContext('attachObserver={detach:testDetach}',f.c);
+    f.rpc.spawnGold();f.leave();const r=f.rpc.status().last_spawn_gold;
+    assert.equal(r.success,false);assert.equal(r.native_started,false);assert.equal(f.calls.length,0);
+    assert.match(r.error,/spawn signature mismatch at 15e9700/);
+});

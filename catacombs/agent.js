@@ -1013,6 +1013,16 @@ function installAttachObserver(m) {
         attachObservationStatus.status = 'listening';
     } catch (e) { attachObservationStatus.status = 'unavailable'; attachObservationStatus.error = String(e); }
 }
+function detachAttachObserverForSpawn() {
+    if (!attachObserver) return false;
+    attachObserver.detach();
+    attachObserver = null;
+    // Detach must be committed before reading the original prologue or invoking attach.
+    Interceptor.flush();
+    attachObservationStatus = { ...attachObservationStatus, status: 'detached_for_spawn',
+        reason: 'restore original code before strict native spawn signature checks' };
+    return true;
+}
 function requestGold() {
     if (!enabled || !latest || latest.phase_raw !== 1 || Date.now() - latest.time > C.spawn_gold.expiry_ms)
         throw new Error('enter active Catacombs first');
@@ -1043,6 +1053,7 @@ function performGold(state) {
         let slot = -1;
         for (let i = 0; i < capacity; i++) if (data.add(i * Process.pointerSize).readPointer().isNull()) { slot = i; break; }
         if (slot < 0) throw new Error('no allocated free slot; refusing array growth/replacement');
+        result.attach_observer_detached = detachAttachObserverForSpawn();
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         for (const sig of G.signatures) {
             if (!m || sig.rva < 0 || sig.rva + sig.bytes.length > m.size) throw new Error('spawn code outside module');
