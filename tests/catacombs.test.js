@@ -650,3 +650,36 @@ test('speed restore does not overwrite external modifications',()=>{
     f.memory.set(0x250008,7);f.rpc.stop();
     assert.equal(f.memory.get(0x250008),7);assert.equal(f.rpc.status().speed_test.status,'restore_failed');
 });
+
+test('physics readback accepts observed large-coordinate float32 roundoff, not actual displacement',()=>{
+    const f=fixture();
+    f.c.targetTest={x:74045.4453125,y:1599779.25};
+    f.c.readbackTest={x:74045.44067382812,y:1599779.19921875};
+    let r=vm.runInContext('physicsPositionCheck(targetTest,readbackTest)',f.c);
+    assert.equal(r.matches,true);assert.ok(r.error.y>0.05);assert.ok(r.tolerance.y<0.5);
+    f.c.readbackTest.y+=5;r=vm.runInContext('physicsPositionCheck(targetTest,readbackTest)',f.c);
+    assert.equal(r.matches,false);
+    f.c.readbackTest.y=NaN;
+    assert.throws(()=>vm.runInContext('physicsPositionCheck(targetTest,readbackTest)',f.c),/non-finite/);
+});
+test('physics precision check retains tight bounds near origin and handles negative coordinates',()=>{
+    const f=fixture();
+    for (const sign of [1,-1]) {
+        f.c.targetTest={x:sign*20,y:sign*30};f.c.readbackTest={x:sign*20.01,y:sign*30.01};
+        const r=vm.runInContext('physicsPositionCheck(targetTest,readbackTest)',f.c);
+        assert.equal(r.matches,true);assert.ok(r.tolerance.x<0.051);
+        f.c.readbackTest.x+=1;assert.equal(vm.runInContext('physicsPositionCheck(targetTest,readbackTest)',f.c).matches,false);
+    }
+});
+test('automatic series does not halt on float32 roundoff at live large Y',()=>{
+    const f=autoFixture();f.memory.set(0x5034,74021.4453125);f.memory.set(0x5038,1599779.25);
+    f.c.NativeFunction=function(){return body=>{
+        const p=f.memory.get(body.n+0x20);
+        f.memory.set(p+0xC,Math.fround(f.memory.get(body.n+0x38)/100));
+        f.memory.set(p+0x10,Math.fround(f.memory.get(body.n+0x3C)/100));
+    };};
+    f.leave();f.c.testTime=1300;f.leave();
+    assert.equal(f.rpc.status().auto_run.halted,false);
+    assert.equal(f.rpc.status().auto_run.moved,1);
+    assert.equal(f.rpc.status().last_move.position_check.matches,true);
+});
