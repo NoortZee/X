@@ -1,3 +1,5 @@
+#[path = "../catacombs/mod.rs"]
+mod catacombs;
 mod config;
 mod frida_agent;
 mod memory;
@@ -30,6 +32,7 @@ const MENU: &str = r#"
   play                only play
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
+  catacombs start|status|dump|stop  диагностика Catacombs
   stones <filter>     rival stones live + burst-skip (см. help)
   help                справка по stones
   clear               wipe console + delete replay.json
@@ -56,7 +59,8 @@ fn prune_logs_dir(log_dir: &Path, replay_name: &str) {
     if let Ok(entries) = std::fs::read_dir(log_dir) {
         for entry in entries.flatten() {
             let p = entry.path();
-            if p.file_name().and_then(|s| s.to_str()) == Some(replay_name) {
+            let name = p.file_name().and_then(|s| s.to_str());
+            if name == Some(replay_name) || name == Some("catacombs-report.json") {
                 continue;
             }
             if p.is_file() {
@@ -482,6 +486,7 @@ fn main() {
         }
     };
 
+    let mut catacombs_mod = catacombs::CatacombsModule::new(&session, root.clone());
     let mut stones_mod = StonesModule::new(
         &session,
         root.join("stones").join("rival_hook.js"),
@@ -549,6 +554,14 @@ fn main() {
                 in_cmd.store(false, Ordering::SeqCst);
                 break;
             }
+            s if s.split_whitespace().next() == Some("catacombs") => {
+                let parts: Vec<&str> = s.split_whitespace().collect();
+                if parts.len() > 2 {
+                    println!("usage: catacombs start|status|dump|stop");
+                } else if let Err(e) = catacombs_mod.command(parts.get(1).copied().unwrap_or("help")) {
+                    eprintln!("ERROR catacombs: {e}");
+                }
+            }
             s if s.starts_with("stones") => {
                 let parts: Vec<&str> = cmd.split_whitespace().collect();
                 if parts.first().copied() == Some("stones") {
@@ -573,6 +586,7 @@ fn main() {
     }
 
     phantom.close();
+    drop(catacombs_mod);
     drop(stones_mod);
     drop(agent);
     let _ = session.detach();

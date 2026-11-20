@@ -4,7 +4,7 @@ use std::path::Path;
 
 pub fn prepend_layout(agent_path: &Path, source: &str) -> io::Result<String> {
     let root = agent_path.parent().and_then(Path::parent).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "agent must be in TAS/ or stones/")
+        io::Error::new(io::ErrorKind::InvalidInput, "agent must be in a module directory")
     })?;
     let path = root.join("memory").join("offsets.js");
     let layout = std::fs::read_to_string(&path).map_err(|error| {
@@ -30,7 +30,7 @@ mod tests {
     #[test]
     fn both_agents_load_the_same_runtime_layout() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        for agent in ["TAS/agent.js", "stones/rival_hook.js"] {
+        for agent in ["TAS/agent.js", "stones/rival_hook.js", "catacombs/agent.js"] {
             let source = prepend_layout(&root.join(agent), "// test agent").unwrap();
             assert!(source.contains("const MEMORY_LAYOUT ="));
             assert!(source.contains("Process.arch !== MEMORY_LAYOUT.arch"));

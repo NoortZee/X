@@ -64,6 +64,22 @@ const MEMORY_LAYOUT = {
         item_stride: 8,
         item_first_ptr: 8,
     },
+    catacombs: {
+        // Candidate profile supplied by static analysis, not runtime verified.
+        signatures: {
+            replay_update: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB E8 ?? ?? ?? ?? 48 8B 83 60 01 00 00',
+            skull_spawn: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 F3 0F 11 45 D4 48 89 FB E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B B3 B8 00 00 00 48 89 C7 F3 0F 10 45 D4',
+            skull_commit: '55 48 89 E5 41 57 41 56 41 55 41 54 53 50 41 89 F6 48 89 FB 48 8B 87 08 01 00 00 48 85 C0 75 1B',
+            collect_request: '55 48 89 E5 41 57 41 56 41 54 53 48 81 EC B0 04 00 00 41 89 D7 48 89 F3 49 89 FE 48 8D BD 30 FB FF FF E8 ?? ?? ?? ?? BF 20 00 00 00',
+            death_skull_update: '55 48 89 E5 53 50 48 89 FB E8 ?? ?? ?? ?? 48 85 C0 74 18 C6 83 A9 01 00 00 00 48 89 DF BE 01 00',
+        },
+        state: { skull_begin: 0x120, skull_end: 0x128, skull_objects: 0x138, level: 0x98 },
+        descriptor: { data: 0x18, active: 0x98 },
+        skull: { active: 0x1A9 },
+        result: { pointer: 0x290, count: 0x20 },
+        profile: { userinfo: 0x18, count: 0x148, cap: 0x4B0 },
+        limits: { descriptors: 512, events: 1000, skulls: 512, count: 100000, sample_ms: 1000 },
+    },
     platform: {
         libc: 'libc.so',
         clock_monotonic: 1,
