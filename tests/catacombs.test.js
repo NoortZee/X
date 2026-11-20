@@ -740,3 +740,23 @@ test('shipped configuration disables underground descent while preserving no-fal
     assert.equal(values.fall.enabled,true);
     assert.equal(values.mask,true);assert.equal(values.speed,5);assert.equal(values.auto,true);
 });
+
+test('manual above queues upward velocity and return-height uses original altitude without cumulative offset',()=>{
+    const f=noFallFixture();f.leave();f.force();f.tick();
+    assert.throws(()=>f.rpc.returnHeight(),/above/);
+    f.rpc.above();assert.equal(f.memory.get(0x20044),0);f.leave();
+    assert.equal(f.memory.get(0x20044),-8);assert.equal(f.rpc.status().no_fall.altitude.target_y,-168);
+    f.memory.set(0x5038,-168);f.tick();f.leave();
+    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.altitude.status,'reached');
+    f.rpc.above();f.leave();assert.equal(f.rpc.status().no_fall.altitude.target_y,-168);
+    f.rpc.returnHeight();f.leave();assert.equal(f.memory.get(0x20044),8);
+    assert.equal(f.rpc.status().no_fall.altitude.target_y,600);
+    f.memory.set(0x5038,600);f.tick();f.leave();assert.equal(f.memory.get(0x20044),0);
+});
+test('manual altitude timeout stops velocity, stop clears pending, no automatic rise',()=>{
+    const f=noFallFixture();f.leave();f.force();f.tick();
+    assert.equal(f.rpc.status().no_fall.altitude,undefined);
+    f.rpc.above();f.leave();f.c.testTime=4001;f.leave();
+    assert.equal(f.rpc.status().no_fall.altitude.status,'timed_out');assert.equal(f.memory.get(0x20044),0);
+    f.force();f.tick();f.rpc.above();f.rpc.stop();assert.equal(f.rpc.status().altitude_pending,null);
+});
