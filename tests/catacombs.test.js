@@ -154,12 +154,12 @@ test('method code is bounded, deduplicated, and report uses cached bytes only', 
 test('code probe refuses non-executable memory and caps distinct target records', () => {
     const f = fixture();
     f.c.Process.findRangeByAddress = () => ({ protection: 'rw-' });
-    for (let i = 0; i < 30; i++) {
+    for (let i = 0; i < 50; i++) {
         f.c.codeTarget = f.pointer(0x200000 + i * 16);
         vm.runInContext('captureMethodCode(codeTarget)', f.c);
     }
     const records = Object.values(f.rpc.report().method_code);
-    assert.equal(records.length, 24);
+    assert.equal(records.length, 40);
     assert.match(records[0].error, /not in readable executable/);
 });
 
@@ -296,4 +296,52 @@ test('physics sweep candidates do not replace the validated transform coordinate
     assert.equal(physics.extra_candidates.sweep_x_candidate,123);
     assert.equal(physics.extra_candidates.world_candidate.address,'0xa000');
     assert.equal(f.writes.length,0);
+});
+
+test('Candy Body +0x68 is resolved from current object vptr, not a fixed target', () => {
+    const f = fixture();
+    f.identity(0x6000, 0x8300, 0x9300, 0xA300, '20EndlessMazeCandyBody');
+    f.memory.set(0x3198, 0x6000); f.memory.set(0x8368, 0x240000);
+    f.rpc.install(); f.tick();
+    const method = f.rpc.report().latest.object_graph.candies[0].body_method_candidates.recreate_candidate;
+    assert.equal(method.vptr_byte_offset, 0x68);
+    assert.equal(method.target.address, '0x240000');
+    assert.ok(method.code_key);
+    assert.equal(f.writes.length, 0);
+});
+
+test('lifecycle has independent unique-callee budgets and stops at first return', () => {
+    const f = fixture();
+    vm.runInContext(`
+        captureMethodCode = function(target, bytes, instructions) {
+            const key = target.toString();
+            if (!methodCode.has(key)) methodCode.set(key, { instructions: [], requested_bytes: bytes, requested_instructions: instructions });
+            return key;
+        };
+    `, f.c);
+    for (const rva of [0x1618980, 0x1615CB0, 0x1617DE0]) {
+        f.c.root = f.pointer(0x100000 + rva);
+        vm.runInContext(`methodCode.set(root.toString(), { instructions: [
+            ...Array.from({length: 6}, (_, i) => ({mnemonic:'call', operands:'0x' + (0x200000 + Math.floor(i/2)).toString(16)})),
+            {mnemonic:'ret', operands:''}, {mnemonic:'call', operands:'0x299999'}
+        ] });`, f.c);
+    }
+    vm.runInContext('captureLifecycleCandidates()', f.c);
+    for (const record of Object.values(f.rpc.report().lifecycle_candidates)) {
+        assert.equal(record.calls.length, 3);
+        assert.ok(record.calls.every(c => c.target.address !== '0x299999'));
+    }
+    assert.equal(f.writes.length, 0);
+});
+
+test('create root requests extended bounded window', () => {
+    const f = fixture();
+    vm.runInContext(`captureMethodCode = function(target, bytes, instructions) {
+        methodCode.set(target.toString(), {instructions: [], requested_bytes: bytes, requested_instructions: instructions});
+        return target.toString();
+    }; captureLifecycleCandidates();`, f.c);
+    const report = f.rpc.report();
+    const code = report.method_code[report.lifecycle_candidates.create_candidate.code_key];
+    assert.equal(code.requested_bytes, 1536);
+    assert.equal(code.requested_instructions, 512);
 });

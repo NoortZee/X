@@ -55,7 +55,7 @@ function methods(p) {
             safe(() => ({ slot: i, target: address(vp.add(i * Process.pointerSize).readPointer()) })));
     });
 }
-function captureMethodCode(target) {
+function captureMethodCode(target, byteLimit = C.method_probe.bytes, instructionLimit = C.method_probe.instructions) {
     const key = target.toString();
     if (methodCode.has(key)) return key;
     if (methodCode.size >= C.method_probe.targets) return null;
@@ -70,13 +70,13 @@ function captureMethodCode(target) {
             throw new Error('target not in readable executable game module');
         const available = Number(range.base.add(range.size).sub(target).toString());
         const moduleAvailable = Number(m.base.add(m.size).sub(target).toString());
-        const length = Math.min(C.method_probe.bytes, available, moduleAvailable);
+        const length = Math.min(byteLimit, C.lifecycle_probe.create_bytes, available, moduleAvailable);
         if (!Number.isSafeInteger(length) || length <= 0) throw new Error('invalid code window');
         record.window_bytes = length;
         record.hex = Array.from(new Uint8Array(target.readByteArray(length)))
             .map(b => b.toString(16).padStart(2, '0')).join(' ');
         let offset = 0;
-        while (offset < length && record.instructions.length < C.method_probe.instructions) {
+        while (offset < length && record.instructions.length < Math.min(instructionLimit, C.lifecycle_probe.create_instructions)) {
             const ins = Instruction.parse(target.add(offset));
             if (ins.size <= 0 || ins.size > length - offset) break;
             record.instructions.push({ address: address(target.add(offset)), size: ins.size,
@@ -162,16 +162,22 @@ function captureLifecycleCandidates() {
             }
             const target = m.base.add(rva);
             records[role] = { candidate_only: true, target: address(target),
-                code_key: captureMethodCode(target), calls: [] };
+                code_key: role === 'create_candidate'
+                    ? captureMethodCode(target, C.lifecycle_probe.create_bytes, C.lifecycle_probe.create_instructions)
+                    : captureMethodCode(target), calls: [] };
         }
-        let budget = C.lifecycle_probe.direct_calls;
         for (const record of Object.values(records)) {
+            let budget = C.lifecycle_probe.direct_calls_per_root;
+            const seen = new Set();
+            record.call_scan_policy = 'linear prefix until first ret/int3; not full control-flow analysis';
             const code = methodCode.get(record.code_key);
             for (const ins of (code && code.instructions) || []) {
-                if (budget <= 0) break;
+                if (budget <= 0 || ins.mnemonic === 'ret' || ins.mnemonic === 'int3') break;
                 if (ins.mnemonic !== 'call' || !/^0x[0-9a-f]+$/i.test(ins.operands)) continue;
                 const delta = Number(ins.operands) - Number(m.base.toString());
                 if (!Number.isSafeInteger(delta) || delta < 0 || delta >= m.size) continue;
+                if (seen.has(delta)) continue;
+                seen.add(delta);
                 const target = m.base.add(delta);
                 record.calls.push({ callsite: ins.address, target: address(target), code_key: captureMethodCode(target) });
                 budget--;
