@@ -1,11 +1,8 @@
 # локальный конфиг с секретами
 config.yaml
 
-# python / окружение
-__pycache__/
-*.pyc
-venv-phantom/
-.pytest_cache/
+# rust build artifacts
+/target/
 
 # runtime-артефакты
 logs/

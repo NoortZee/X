@@ -79,13 +79,15 @@ let _sanity_checks_done = 0;
 let _sanity_suspect_count = 0;
 let _sanity_invalid_reported = false;
 
-function _readItem(addr) {
+function _readItem(addr, includeHex) {
     const out = { addr: addr.toString() };
-    try {
-        const raw = new Uint8Array(addr.readByteArray(ITEM_SIZE));
-        out.raw_hex = Array.from(raw).map(x =>
-        x.toString(16).padStart(2, '0')).join(' ');
-    } catch (_) { out.raw_hex = null; }
+    if (includeHex) {
+        try {
+            const raw = new Uint8Array(addr.readByteArray(ITEM_SIZE));
+            out.raw_hex = Array.from(raw).map(x =>
+            x.toString(16).padStart(2, '0')).join(' ');
+        } catch (_) { out.raw_hex = null; }
+    }
     try { out.rating = addr.add(ITEM_FIELDS.rating).readS32(); } catch (_) { out.rating = null; }
     try { out.slot   = addr.add(ITEM_FIELDS.slot).readS32();   } catch (_) { out.slot = null; }
     try { out.flag   = addr.add(ITEM_FIELDS.flag).readU8();    } catch (_) { out.flag = null; }
@@ -93,7 +95,7 @@ function _readItem(addr) {
     return out;
 }
 
-function _readRival(p) {
+function _readRival(p, includeHex) {
     const out = { addr: p.toString() };
     for (const [off, tag, t] of RIVAL_FIELDS) {
         try {
@@ -117,7 +119,7 @@ function _readRival(p) {
                         out.stones.push({ i, err: 'null' });
                         continue;
                     }
-                    out.stones.push(_readItem(it));
+                    out.stones.push(_readItem(it, !!includeHex));
                 } catch (e) {
                     out.stones.push({ i, err: String(e) });
                 }
@@ -241,7 +243,7 @@ function installHooks() {
                                      try {
                                          const p = this.self;
                                          if (!p || p.isNull()) return;
-                                         const snap = _readRival(p);
+                                         const snap = _readRival(p, false);
                                          _rival_seq++;
                                          snap.seq = _rival_seq;
                                          _last_rival_addr = p;
@@ -294,8 +296,14 @@ function getRivalsLog() {
         rivals: _rivals.slice() };
 }
 
+function getRivalsSince(sinceSeq) {
+    const from = Number(sinceSeq) || 0;
+    const rivals = _rivals.filter(r => r.seq > from);
+    return { ok: true, seq: _rival_seq, count: rivals.length, rivals };
+}
+
 function readAt(addrStr) {
-    return { ok: true, ..._readRival(ptr(addrStr)) };
+    return { ok: true, ..._readRival(ptr(addrStr), true) };
 }
 
 function resetLog() {
@@ -304,11 +312,12 @@ function resetLog() {
 }
 
 rpc.exports = {
-    moduleBase:    () => MODULE_BASE ? MODULE_BASE.toString() : null,
-    installHooks:  () => installHooks(),
-    unhookAll:     () => unhookAll(),
-    getLastRival:  () => getLastRival(),
-    getRivalsLog:  () => getRivalsLog(),
-    readAt:        (a) => readAt(a),
-    resetLog:      () => resetLog(),
+    moduleBase:     () => MODULE_BASE ? MODULE_BASE.toString() : null,
+    installHooks:   () => installHooks(),
+    unhookAll:      () => unhookAll(),
+    getLastRival:   () => getLastRival(),
+    getRivalsLog:   () => getRivalsLog(),
+    getRivalsSince: (s) => getRivalsSince(s),
+    readAt:         (a) => readAt(a),
+    resetLog:       () => resetLog(),
 };
