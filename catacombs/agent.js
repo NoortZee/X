@@ -1189,11 +1189,16 @@ function stopGoldCycle(reason = 'user') {
     if (pendingGold && pendingGold.cycle) pendingGold = null;
     return { spawn_cycle: goldCycle };
 }
-function startGoldCycle() {
+function startGoldCycle(reuseCollected = false) {
     if (!enabled) throw new Error('start module first');
     if (latest && latest.phase_raw===1 && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
     if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
-    goldCycle = { active: true, state: latest && latest.phase_raw===1 ? latest.state.address : null, armed_deadline: Date.now()+60000, attempted: 0, registered: 0,
+    if(reuseCollected) {
+        if(!latest || latest.phase_raw!==1 || Date.now()-latest.time>C.spawn_gold.expiry_ms)
+            throw new Error('enter active level and collect a natural gold first');
+        collectedGoldTemplate(ptr(latest.state.address)); // Read-only eligibility before enabling the series.
+    }
+    goldCycle = { active: true, reuse_collected_id: reuseCollected, state: latest && latest.phase_raw===1 ? latest.state.address : null, armed_deadline: Date.now()+60000, attempted: 0, registered: 0,
         limit: 100, interval_ms: 100, next: Date.now(), reason: null };
     event('spawn_cycle_started', { ...goldCycle });
     return { ...goldCycle, warning: 'Experimental: up to100 objects at a maximum10/sec; actual rate depends on update cost. HUD credit unconfirmed.' };
@@ -1209,7 +1214,7 @@ function tickGoldCycle(state) {
         stopGoldCycle('state/phase changed'); return;
     }
     if (state.add(C.state.paused).readU8() !== 0 || pendingGold || Date.now() < goldCycle.next) return;
-    pendingGold = { state: goldCycle.state, time: Date.now(), cycle: true, armed: true, deadline: Date.now()+5000 };
+    pendingGold = { state: goldCycle.state, time: Date.now(), cycle: true, reuseCollected: !!goldCycle.reuse_collected_id, armed: true, deadline: Date.now()+5000 };
     goldCycle.attempted++;
     goldCycle.next = Date.now() + goldCycle.interval_ms;
 }
@@ -1517,7 +1522,8 @@ function performGold(state) {
     } catch (e) {
         result.error = String(e);
         if(request.armed && !result.native_started && Date.now()<request.deadline &&
-            result.error.includes('no live uncollected gold with verified callback/column record')) {
+            (result.error.includes('no live uncollected gold with verified callback/column record') ||
+                (request.reuseCollected && result.error.includes('no verified collected natural gold record')))) {
             pendingGold=request;goldResult={...result,waiting_for_template:true};return;
         }
         if (result.native_started) result.warning = 'native spawn started; possible partial/orphan object. No guessed destructor, rollback or retry; restart game after failure.';
@@ -1641,7 +1647,7 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, spawnGoldCycle: startGoldCycle, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,

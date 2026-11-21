@@ -1250,3 +1250,18 @@ test('collected natural ID selector requires invalidated matching record and no 
     f.memory.set(0xA0020,-1);f.memory.set(0xA0048,46);
     assert.throws(()=>vm.runInContext('collectedGoldTemplate(testState)',f.c),/no verified collected/);
 });
+
+test('reuse cycle explicitly marks every queued attempt and retains pacing/cancellation',()=>{
+    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));
+    vm.runInContext('collectedGoldTemplate=()=>({reuseId:62});fullGoldPlan=(state,array,reuse)=>{if(!reuse)throw Error("reuse flag missing");return {id:62};}',f.c);
+    const start=f.rpc.spawnGoldReuseCycle();assert.equal(start.reuse_collected_id,true);assert.equal(start.limit,100);
+    f.leave();assert.equal(f.rpc.status().last_spawn_gold.reused_collected_id,true);
+    assert.equal(f.rpc.status().spawn_cycle.registered,1);
+    f.rpc.spawnGoldStop();f.leave();assert.equal(f.rpc.status().spawn_cycle.active,false);
+    assert.equal(f.calls.filter(c=>c==='factory').length,1);
+});
+test('reuse cycle refuses missing collected ID before enabling series or native calls',()=>{
+    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));
+    assert.throws(()=>f.rpc.spawnGoldReuseCycle(),/no verified collected/);
+    assert.equal(f.rpc.status().spawn_cycle,null);assert.equal(f.calls.length,0);
+});
