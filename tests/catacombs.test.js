@@ -1535,3 +1535,32 @@ test('manager location accepts the vtable header layout and keeps both probe res
     assert.equal(located.vtable_candidates[1].name,'N11EndlessMaze7ManagerE');
     assert.equal(f.writes.length,0);
 });
+
+test('manager location verifies during the scan and stops at the first confirmed object',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    const M=vm.runInContext('C.manager_survey',f.c);
+    f.identity(0x35000,0x100000+M.vtable,0x355000,0x356000,'N11EndlessMaze7ManagerE');
+    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
+    f.c.Process.enumerateRanges=()=>[
+        {base:f.pointer(0x34000),size:0x1000,protection:'rw-'},
+        {base:f.pointer(0x36000),size:0x100000,protection:'rw-'},
+        {base:f.pointer(0x400000),size:0x20000000,protection:'rw-'}];
+    let scans=0;
+    f.c.Memory.scanSync=(base)=>{
+        scans++;
+        if(base.n===0x34000)return [];                       // empty range: keep going
+        if(base.n===0x36000)return [{address:f.pointer(0x35000)}]; // confirmed here
+        throw new Error('scan should have stopped before the huge trailing range');
+    };
+    const located=f.rpc.locateManager();
+    assert.equal(located.status,'found');
+    assert.equal(scans,2);
+    assert.equal(located.stopped_by_budget,false);
+    assert.equal(located.scanned_bytes,0x101000);
+    // A candidate that does not verify must not be reported as found.
+    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
+    g.c.Process.enumerateRanges=()=>[{base:g.pointer(0x34000),size:0x1000,protection:'rw-'}];
+    g.c.Memory.scanSync=()=>[{address:g.pointer(0x99000)}];
+    const bad=g.rpc.locateManager();
+    assert.equal(bad.status,'unavailable');assert.match(bad.error,/no vptr layout|no verified/);
+});

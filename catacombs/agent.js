@@ -1834,32 +1834,34 @@ function locateManagerUnsafe() {
     let pattern=BigInt(vtable.toString()),patternText='';
     for(let i=0;i<Process.pointerSize;i++){patternText+=(i?' ':'')+(pattern&0xffn).toString(16).padStart(2,'0');pattern>>=8n;}
     const needle=patternText;
-    let scanned=0,matches=[];
+    let scanned=0,matches=[],stopped_by_budget=false;
+    const verified=[];
+    const verify=address=>{
+        const id=safe(()=>identity(address));
+        if(!id||id.error||!id.rtti)return null;
+        const name=String(id.rtti.name);
+        if(!name.includes(M.rtti_needle))return null;
+        const probe=safe(()=>managerDescriptor(address));
+        if(!probe||probe.error)return null;
+        return {object:address.toString(),rtti:name,count:probe.count,
+            gold:probe.gold_descriptors,total:probe.candy_total};
+    };
+    // Verify while scanning: stop as soon as one object is fully confirmed.
+    outer:
     for(const r of ranges) {
-        if(scanned>M.scan_max_bytes)throw new Error('manager scan byte budget exceeded');
+        if(scanned>M.scan_max_bytes) {stopped_by_budget=true;break;}
         if(!r.size||r.size>M.scan_max_range)continue;
         scanned+=r.size;
         for(const hit of Memory.scanSync(r.base,r.size,needle)) {
             matches.push(hit.address);
-            if(matches.length>=M.scan_matches)break;
+            const ok=verify(hit.address);
+            if(ok) {verified.push(ok);break outer;}
+            if(matches.length>=M.scan_matches)break outer;
         }
-        if(matches.length>=M.scan_matches)break;
-    }
-    // Classify candidates strictly; never use an unverified object.
-    const verified=[];
-    for(const p of matches) {
-        const id=safe(()=>identity(p));
-        if(!id||id.error||!id.rtti)continue;
-        const name=String(id.rtti.name);
-        if(!name.includes(M.rtti_needle))continue;
-        const probe=safe(()=>managerDescriptor(p));
-        if(!probe||probe.error)continue;
-        verified.push({object:p.toString(),rtti:name,count:probe.count,
-            gold:probe.gold_descriptors,total:probe.candy_total});
     }
     managerLocate={status:verified.length?'found':'unavailable',read_only:true,scanned_bytes:scanned,
         vtable:vtable.toString(),vtable_rva:vtableRva.toString(),vtable_candidates:checked,
-        candidates:matches.length,verified,time:Date.now()};
+        candidates:matches.length,verified,stopped_by_budget,time:Date.now()};
     if(!verified.length)managerLocate.error='no verified '+M.rtti_needle+' object with a readable descriptor vector';
     if(verified.length===1)managerLocate.chosen=verified[0].object;
     return managerLocate;
