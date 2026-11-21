@@ -407,3 +407,9 @@
 - Explicit up to10 full-registration spawns/2s, pre-level arm60s, current state binding, cancel via spawn-gold-stop/module stop. Fresh plan each attempt, missing-template preflight wait5s only; native errors never retried.
 - Auto Candy teleport temporarily suppressed during active series to preserve natural templates, automatically resumes after series; other working modes unchanged. HUD credit still unconfirmed, first report showed structural registration only.
 - 104 Node mock tests including actual exported cycle/pre-level timeout/temporary auto suppression, syntax/diff checks. JS-only, README unchanged.
+
+## Post-removal gold record diagnostics
+
+- Two live cycles registered3/1 objects, stopped at column spare-capacity guard; all objects left slots14–15ms after registration, credit unconfirmed.
+- New bounded record_watch observes current tree/ID/original descriptor slot after object disappearance, no historical object dereference. Detects ID invalidation/flags, checks descriptor identity (with ABA limitations), no claim of HUD credit.
+- Existing growth guards/spawn behavior unchanged.105 Node mock tests including post-removal invalidation/replacement/state cancellation, syntax/diff. README/Rust untouched.
