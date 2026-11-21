@@ -17,6 +17,8 @@ function fixture(matches = 1, production = false, underground = false, autoRise 
         readPointer() { return new P(this.value()); }
         readU8() { return this.value(); }
         readS32() { return this.value(); }
+        writeS32(n) { writes.push([this.n,n]); memory.set(this.n,n); }
+        writePointer(p) { writes.push([this.n,p.n]); memory.set(this.n,p.n); }
         readU64() { return { toString: () => String(this.value()) }; }
         readU16() { return this.value(); }
         readS16() { const n = this.value(); return n > 32767 ? n - 65536 : n; }
@@ -100,7 +102,9 @@ test('only one explicit native rebuild callsite, no patches or non-position writ
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
     assert.equal((s.match(/\.writeFloat\(/g) || []).length, 18);
-    assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
+    const core=s.replace(/function fullGoldPlan[\s\S]*?(?=function performGold)/,'')
+        .replace(/object\.add\(0x184\)\.writeS32\(fullPlan.id\);/,'');
+    assert.doesNotMatch(core, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
     const f = fixture();
@@ -965,6 +969,9 @@ function goldFixture() {
         };
         throw Error('unexpected native '+address);
     };
+    // Existing low-level spawn tests isolate the new registration helper; separate tests cover it below.
+    vm.runInContext(`originalFullGoldPlan=fullGoldPlan; originalCompleteGoldRegistration=completeGoldRegistration;
+        fullGoldPlan=()=>({id:42});completeGoldRegistration=()=>{};`,f.c);
     f.force();f.tick();return {...f,calls};
 }
 test('one gold spawn is queued and registers full native object in a verified free index',()=>{
@@ -1036,7 +1043,7 @@ test('signature refusal includes expected and actual bytes, no factory call',()=
 
 test('bounded gold cycle schedules spaced attempts, stops at ten and cannot be rearmed',()=>{
     const f=goldFixture();let time=vm.runInContext("Date.now()",f.c);f.c.Date={now:()=>time};
-    f.rpc.spawnGoldCycle();f.leave();
+    vm.runInContext("startGoldCycle=legacyStartGoldCycleDisabled;rpc.exports.spawnGoldCycle=startGoldCycle",f.c);f.rpc.spawnGoldCycle();f.leave();
     assert.equal(f.rpc.status().spawn_cycle.registered,1);
     f.leave();assert.equal(f.rpc.status().spawn_cycle.attempted,1);
     // Reuse the mock free slot; real runtime must find a fresh null slot each time.
@@ -1047,7 +1054,7 @@ test('bounded gold cycle schedules spaced attempts, stops at ten and cannot be r
 });
 test('cycle stops on native error, explicit cancellation, state/phase change and module stop',()=>{
     for(const mode of ['failure','cancel','phase','stop']){
-        const f=goldFixture();f.rpc.spawnGoldCycle();
+        const f=goldFixture();vm.runInContext('rpc.exports.spawnGoldCycle=legacyStartGoldCycleDisabled',f.c);f.rpc.spawnGoldCycle();
         if(mode==='failure')f.c.NativeFunction=function(){return ()=>{throw Error('fault');};};
         if(mode==='cancel')f.rpc.spawnGoldStop();
         if(mode==='phase')f.memory.set(0x1138,2);
@@ -1098,4 +1105,36 @@ test('contact diagnostics refuse unknown callback captures and bound cyclic tree
     assert.equal(vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c).captures,undefined);
     f.memory.set(0x80128,0x90000);f.memory.set(0x90020,9);f.memory.set(0x90000,0x90000);
     assert.throws(()=>vm.runInContext('diagnosticColumn(ptr(0x80000),0x128,7,0x50,42)',f.c),/tree cycle/);
+});
+
+test('full registration helper installs owned callback, clones record and adds secondary memberships',()=>{
+    const f=goldFixture();f.rpc.spawnGold();f.leave();f.c.ptr=f.pointer;
+    const base=0x100000;let alloc=0xE0000;const order=[];
+    f.c.Memory.alloc=n=>{const p=f.pointer(alloc);alloc+=n+0x100;return p;};
+    const plan={source:f.pointer(0x90000),recordNode:f.pointer(0x91000),recordEnd:f.pointer(0x92000),
+        objectNode:f.pointer(0x93000),objectEnd:f.pointer(0x94000),array58:f.pointer(0x95000),slot58:0,
+        counter:100,id:101,column:19,callbackVptr:f.pointer(0x96000),m:{base:f.pointer(base)}};
+    f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);
+    f.memory.set(0x95010,0x97000);f.memory.set(0x97000,0);f.memory.set(0x96020,base+0x123);
+    f.c.plan=plan;f.c.testState=f.pointer(0x1000);f.c.testObject=f.pointer(0x40000);f.c.testBody=f.pointer(0x50000);
+    f.c.testAssign=(a,o,i)=>{order.push('assign58');f.memory.set(0x97000,o.n);};
+    f.c.NativeFunction=function(p){
+        if(p.n===base+0x1618080)return (body,tmp)=>{order.push('callback');
+            f.memory.set(0x50070,0x98000);for(const off of [0,8,0x10,0x18])f.memory.set(0x98000+off,f.memory.get(tmp.n+off));};
+        if(p.n===base+0x123)return ()=>order.push('destroyTemporary');
+        if(p.n===base+0x105B020)return (dst,src)=>{order.push('copy');f.memory.set(dst.n+0x20,f.memory.get(src.n+0x20));};
+        if(p.n===base+0x105B0D0)return ()=>order.push('cleanup');
+        throw Error('unexpected native');
+    };
+    vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
+    assert.equal(order.join(','),'callback,destroyTemporary,copy,copy,cleanup,assign58');
+    assert.equal(f.memory.get(0x92020),101);assert.equal(f.memory.get(0x113C),101);
+    assert.equal(f.memory.get(0x91030),0x92050);assert.equal(f.memory.get(0x94000),0x40000);
+    assert.equal(f.memory.get(0x93030),0x94008);
+});
+test('full registration preflight refuses missing native signatures and cycle command stays disabled',()=>{
+    const f=goldFixture();f.c.testState=f.pointer(0x1000);f.c.testArray=f.pointer(0x2000);
+    const n=f.calls.length;
+    assert.throws(()=>vm.runInContext('originalFullGoldPlan(testState,testArray)',f.c),/full spawn signature/);
+    assert.equal(f.calls.length,n);assert.throws(()=>f.rpc.spawnGoldCycle(),/single-shot only/);
 });

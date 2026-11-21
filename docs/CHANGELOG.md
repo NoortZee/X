@@ -389,3 +389,9 @@
 - Ограниченная проверка записи ID в ctx128, поколоночного списка ctx110 и членства в ctx58/68, counter13C; mismatch/ошибки вместо произвольной интерпретации чужого closure.
 - Деревья с hop/cycle budget, векторы со span/stride/count guard. Никакого вызова/копирования callback, изменения ID/counter или новых native spawn шагов. Рабочий зачёт пока не реализован.
 - 98 Node mock-тестов, syntax/diff checks. Rust/README не менялись.
+
+## Experimental full-registration single gold
+
+- New guarded live-template registration: new monotonic ID before Body attach; copy current native lambda with fresh captures; native descriptor copy/cleanup into spare allocated column capacity; register both arrays and existing column pointer vector. Refuses missing template/capacity/signature/counter consistency; no whole-level rebuild or guessed growth.
+- Preserves template descriptor including original coordinates; physics spawn remains ahead of Hero. Preview initialization/optional Body association not reproduced; credit NOT yet confirmed. Native partial failure requires game restart, no retry/guessed rollback.
+- Cycle disabled for first full-registration live test.100 mock tests including isolated helper native-order/writeback; old low-level tests stub new registration helpers (not end-to-end native validation). Syntax/diff checks. No Rust toolchain/runtime here; JS-only update, README untouched.
