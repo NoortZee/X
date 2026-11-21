@@ -40,7 +40,11 @@ impl<'a> CatacombsModule<'a> {
     pub fn run(&mut self, argument: &str, aborted: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
         let argument = argument.trim();
         {
-            if argument.eq_ignore_ascii_case("stop") { self.stop(); println!("catacombs: stopped"); return Ok(()); }
+            if argument.eq_ignore_ascii_case("stop") {
+                match self.unload() { Some(s) => println!("catacombs: stopped ({s})"),
+                    None => println!("catacombs: not loaded") }
+                return Ok(());
+            }
             let mut words = argument.split_whitespace();
             let speed_text = words.next().unwrap_or("");
             if words.next().is_some() || (!speed_text.is_empty() && !speed_text.chars().all(|c| c.is_ascii_digit())) {
@@ -73,8 +77,18 @@ impl<'a> CatacombsModule<'a> {
         self.script = Some(script);
         Ok(())
     }
+    /// Restore what the agent patched, then drop the script.
+    /// Returns a one-line summary when a module was actually loaded.
+    pub fn unload(&mut self) -> Option<String> {
+        let mut script = self.script.take()?;
+        // Unloading alone would leave the speed patch applied: ask the agent to restore first.
+        let value = script.exports.call("stop", None).ok().flatten()
+            .unwrap_or(serde_json::Value::Null);
+        let _ = script.unload();
+        Some(summary(&value, None))
+    }
     pub fn stop(&mut self) {
-        if let Some(script) = self.script.take() { let _ = script.unload(); }
+        let _ = self.unload();
     }
 }
 impl Drop for CatacombsModule<'_> {
