@@ -1841,18 +1841,27 @@ function locateManagerUnsafe() {
         if(!id||id.error||!id.rtti)return null;
         const name=String(id.rtti.name);
         if(!name.includes(M.rtti_needle))return null;
+        // The vector can be freed concurrently; an unreadable candidate is simply not confirmed.
         const probe=safe(()=>managerDescriptor(address));
-        if(!probe||probe.error)return null;
+        if(!probe||probe.error||!probe.read_only)return null;
         return {object:address.toString(),rtti:name,count:probe.count,
             gold:probe.gold_descriptors,total:probe.candy_total};
     };
     // Verify while scanning: stop as soon as one object is fully confirmed.
+    const skipped_ranges=[];
     outer:
     for(const r of ranges) {
         if(scanned>M.scan_max_bytes) {stopped_by_budget=true;break;}
         if(!r.size||r.size>M.scan_max_range)continue;
         scanned+=r.size;
-        for(const hit of Memory.scanSync(r.base,r.size,needle)) {
+        // A heap range can be unmapped or resized between enumerate and scan; skip it, never abort.
+        let hits;
+        try { hits=Memory.scanSync(r.base,r.size,needle); }
+        catch(e) {
+            if(skipped_ranges.length<8)skipped_ranges.push({base:r.base.toString(),size:r.size,error:String(e)});
+            continue;
+        }
+        for(const hit of hits) {
             matches.push(hit.address);
             const ok=verify(hit.address);
             if(ok) {verified.push(ok);break outer;}
@@ -1861,7 +1870,8 @@ function locateManagerUnsafe() {
     }
     managerLocate={status:verified.length?'found':'unavailable',read_only:true,scanned_bytes:scanned,
         vtable:vtable.toString(),vtable_rva:vtableRva.toString(),vtable_candidates:checked,
-        candidates:matches.length,verified,stopped_by_budget,time:Date.now()};
+        candidates:matches.length,verified,stopped_by_budget,skipped_ranges:skipped_ranges.length,
+        skipped_range_samples:skipped_ranges,time:Date.now()};
     if(!verified.length)managerLocate.error='no verified '+M.rtti_needle+' object with a readable descriptor vector';
     if(verified.length===1)managerLocate.chosen=verified[0].object;
     return managerLocate;
