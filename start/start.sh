@@ -188,7 +188,7 @@ adb forward --list
 
 # Require real protocol replies, not merely accepting TCP connections behind adb forward.
 check_servers() {
-    timeout --kill-after=2 5 "$DATA/venv/bin/python" - "$FRIDA_PORT" "$PHANTOM_PORT" "$PACKAGE" "${1:-startup}" >&"$HEALTH_LOG_FD" 2>&1 <<'PY'
+    timeout --kill-after=3 12 "$DATA/venv/bin/python" - "$FRIDA_PORT" "$PHANTOM_PORT" "$PACKAGE" "${1:-startup}" >&"$HEALTH_LOG_FD" 2>&1 <<'PY'
 import frida, socket, sys
 # Closing an extra Phantom client invokes cancelAll: never probe during live TAS input.
 if sys.argv[4] == 'startup':
@@ -229,6 +229,9 @@ TAS_PID=$!
 trap 'if [[ -n "$TAS_PID" ]] && kill -0 "$TAS_PID" 2>/dev/null; then kill -INT "$TAS_PID" 2>/dev/null || true; else exit 130; fi' INT
 PARENT_PID=$$
 # Supervise both servers while TAS is running; renew sudo for reliable EXIT cleanup.
+HEALTH_MAX_FAILURES=3
+failures=0
+last_failure=''
 (
     trap - EXIT TERM HUP
     trap '' INT
@@ -257,10 +260,23 @@ PARENT_PID=$$
         " >&"$WATCH_LOG_FD" 2>&1; then
             failure='Android server PID check failed'
         fi
+        # One failed probe can be a slow device or a Frida hiccup; require consecutive failures.
         if [[ -n "$failure" ]]; then
-            echo "ERROR: $failure. Stopping TAS. Logs: $RUN" >&2
-            kill -TERM "$PARENT_PID"
-            exit 1
+            if [[ "$failure" == "$last_failure" ]]; then
+                failures=$((failures + 1))
+            else
+                failures=1
+                last_failure="$failure"
+            fi
+            echo "WARN: $failure (attempt $failures/$HEALTH_MAX_FAILURES)" >&2
+            if (( failures >= HEALTH_MAX_FAILURES )); then
+                echo "ERROR: $failure. Stopping TAS. Logs: $RUN" >&2
+                kill -TERM "$PARENT_PID"
+                exit 1
+            fi
+        else
+            failures=0
+            last_failure=''
         fi
     done
 ) &

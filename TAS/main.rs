@@ -105,10 +105,24 @@ fn wait_enter_or_abort(
     rx: &mpsc::Receiver<String>,
     aborted: &AtomicBool,
 ) -> Option<String> {
+    prompt_or_abort(prompt, rx, aborted, false)
+}
+
+/// Menu prompt: Ctrl+C cancels the waited action but keeps the session in the menu.
+fn prompt_or_abort(
+    prompt: &str,
+    rx: &mpsc::Receiver<String>,
+    aborted: &AtomicBool,
+    clear_on_abort: bool,
+) -> Option<String> {
     print!("{prompt}");
     let _ = io::stdout().flush();
     loop {
         if aborted.load(Ordering::SeqCst) {
+            // Consume the cancellation so the menu is usable again immediately.
+            if clear_on_abort {
+                aborted.store(false, Ordering::SeqCst);
+            }
             return None;
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
@@ -499,11 +513,12 @@ fn main() {
     {
         let aborted_c = aborted.clone();
         let in_cmd_c = in_cmd.clone();
+        // Ctrl+C cancels the running command; in the menu it must NOT end the session.
         let _ = ctrlc::set_handler(move || {
             if in_cmd_c.load(Ordering::SeqCst) {
                 aborted_c.store(true, Ordering::SeqCst);
             } else {
-                std::process::exit(0);
+                eprintln!("INFO main: Ctrl+C в меню — команда не выполняется; выход: exit");
             }
         });
     }
@@ -516,8 +531,10 @@ fn main() {
             break;
         }
         println!("{MENU}");
-        let Some(raw) = wait_enter_or_abort("> ", &stdin_rx, &aborted) else {
-            break;
+        let Some(raw) = prompt_or_abort("> ", &stdin_rx, &aborted, true) else {
+            // Ctrl+C in the menu cancels nothing; keep the session and show the menu again.
+            aborted.store(false, Ordering::SeqCst);
+            continue;
         };
         let cmd = raw.trim().to_ascii_lowercase();
 
