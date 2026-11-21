@@ -1439,7 +1439,7 @@ function surveyFixture() {
 test('manager survey reads authored descriptor rarity histogram by explicit address only',()=>{
     const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
     // Without an address the survey tries strict vtable location, and never guesses an object.
-    assert.match(f.rpc.managerSurvey().error,/vtable typeinfo/);
+    assert.match(f.rpc.managerSurvey().error,/no vptr layout/);
     const r=f.rpc.managerSurvey('0x30000');
     assert.equal(r.status,'found');assert.equal(r.last.count,4);
     assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
@@ -1476,9 +1476,9 @@ test('survey label without an address attempts location instead of being rejecte
     const r=f.rpc.mark('survey');
     assert.equal(r.requested,'locate');
     assert.equal(r.survey.status,'unavailable');
-    assert.match(r.survey.error,/vtable typeinfo|no verified/);
+    assert.match(r.survey.error,/no vptr layout|no verified/);
     const locate=f.rpc.report().manager_locate;
-    assert.equal(locate.status,'unavailable');assert.match(locate.error,/vtable typeinfo|no verified/);
+    assert.equal(locate.status,'unavailable');assert.match(locate.error,/no vptr layout|no verified/);
     assert.equal(f.rpc.report().events.some(e=>e.kind==='manager_survey_rejected'),false);
     // An explicit address in free wording still routes by address.
     const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
@@ -1515,5 +1515,23 @@ test('manager auto-locate finds the single verified Manager by vtable and refuse
     const r=f.rpc.managerSurvey();
     assert.equal(r.status,'found');assert.equal(r.located,true);
     assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
+    assert.equal(f.writes.length,0);
+});
+
+test('manager location accepts the vtable header layout and keeps both probe results',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    const M=vm.runInContext('C.manager_survey',f.c);
+    // Runtime vptr sits 16 bytes after the symbol RVA; object carries that vptr.
+    const runtime=0x100000+M.vtable+16;
+    f.identity(0x35000,runtime,0x355000,0x356000,'N11EndlessMaze7ManagerE');
+    f.c.Process.enumerateRanges=()=>[{base:f.pointer(0x34000),size:0x2000,protection:'rw-'}];
+    f.c.Memory.scanSync=()=>[{address:f.pointer(0x35000)}];
+    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
+    const located=f.rpc.locateManager();
+    assert.equal(located.status,'found');
+    assert.equal(located.vtable_rva,'0x2026fd8');
+    assert.equal(located.vtable_candidates.length,2);
+    assert.equal(located.vtable_candidates[1].layout,'runtime vptr after 16-byte vtable header');
+    assert.equal(located.vtable_candidates[1].name,'N11EndlessMaze7ManagerE');
     assert.equal(f.writes.length,0);
 });
