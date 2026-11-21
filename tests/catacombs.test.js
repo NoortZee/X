@@ -1464,3 +1464,19 @@ test('mark survey ADDRESS routes to the survey instead of a plain label mark',()
     assert.ok(f.rpc.mark('picked golden').events_retained>=1); // plain label still marks
     assert.equal(f.rpc.report().events.some(e=>e.kind==='user_mark'&&e.label==='picked golden'),true);
 });
+
+test('survey label tolerates free wording and rejects without silent fallback',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    // Bare address with a stray word, no strict prefix, still routes to the survey.
+    const r=f.rpc.mark('survey Manager: 0x30000');
+    assert.equal(r.mark,true);assert.equal(r.survey.last.gold_descriptors,1);
+    // A survey attempt without a parseable address is recorded, never silently a plain mark.
+    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
+    const bad=g.rpc.mark('survey Manager');
+    assert.equal(bad.mark,false);assert.equal(bad.survey.status,'unavailable');
+    assert.match(bad.survey.error,/hex address/);assert.equal(bad.survey.last_label,'survey Manager');
+    assert.equal(g.rpc.report().events.some(e=>e.kind==='manager_survey_rejected'),true);
+    // Plain labels stay plain marks.
+    assert.equal(g.rpc.mark('picked golden').sequence_probe !== undefined,true);
+    assert.equal(g.rpc.status().manager_survey.status,'unavailable');
+});

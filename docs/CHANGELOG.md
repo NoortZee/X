@@ -1,4 +1,10 @@
-## Без выпуска — read-only опись дескрипторов EndlessMaze::Manager
+## Без выпуска — опись Manager больше не может «промолчать»
+
+- Разбор метки устойчив: берётся любой адрес `0x...` в метке, содержащей `survey` (`mark "survey Manager 0x..."` тоже работает).
+- Если метка просит опись, но адреса нет — это не обычная метка: `manager_survey.status=unavailable`, явная ошибка, `last_label` и событие `manager_survey_rejected`. Дамп больше не покажет молчаливый `not_run` после попытки.
+- 1 новый mock-тест, всего128. Rust/README не менялись, пересборка не нужна.
+
+## Без выпуска## Без выпуска — read-only опись дескрипторов EndlessMaze::Manager
 
 - `catacombs mark "survey 0x<адрес>"` (или RPC `managerSurvey`) проверяет RTTI `N11EndlessMaze7Manager`, читает вектор дескрипторов `service+0x78..0x80` (шаг0x50, не более512) и отдаёт `rarity_histogram`, `candy_total`, `gold_descriptors` и до8 Candy-дескрипторов `{index,descriptor_id,rarity,type,flags,lookup_path}`. Результат сохраняется в обычном status/dump как `manager_survey`.
 - Адрес локатора не сканируется: без адреса `unavailable` с ошибкой, без догадок. Только чтение; дескрипторы/записи/счётчики/запрос не меняются.
