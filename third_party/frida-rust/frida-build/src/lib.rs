@@ -56,10 +56,9 @@ fn download_and_use_devkit_internal(
 
             let frida_url = format!("{cdn}/{version}/{devkit_name}.tar.xz",);
 
-            println!(
-                "cargo:warning=Frida {} devkit not found, downloading from {}...",
-                kind, frida_url,
-            );
+            // Progress goes to stderr: build-script stderr is shown to the user, while
+            // `cargo:warning=` would be reported as a compiler warning.
+            eprintln!("frida-build: {} devkit not found, downloading from {}", kind, frida_url);
             // Download devkit
             let mut resp =
                 reqwest::blocking::get(&frida_url).expect("devkit download request failed");
@@ -82,7 +81,7 @@ fn download_and_use_devkit_internal(
 pub fn download_and_use_devkit(kind: &str, version: &str) -> String {
     download_and_use_devkit_internal(kind, version, false)
         .or_else(|e| {
-            println!("cargo:warning=Failed to unpack devkit: {e}, retrying download...");
+            eprintln!("frida-build: failed to unpack devkit: {e}, retrying download...");
             download_and_use_devkit_internal(kind, version, true)
         })
         .expect("cannot extract the devkit tar.gz")

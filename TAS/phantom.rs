@@ -24,6 +24,9 @@ pub enum PhantomError {
     Connect(std::io::Error),
     #[error("phantom server closed connection on ping (not listening behind adb forward?)")]
     DeadServer,
+    // A failed tap is reported through `TapResult::error`, not as a Result error;
+    // keep the variant for callers that still surface it as a typed error.
+    #[allow(dead_code)]
     #[error("tap failed: {0}")]
     Tap(String),
 }
