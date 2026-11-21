@@ -1785,7 +1785,13 @@ function managerDescriptor(service) {
     return out;
 }
 function parseSurveyAddress(value) {
-    const m=/^\s*survey\s+(0x[0-9a-fA-F]{1,16})\s*$/.exec(String(value||''));
+    const text=String(value||'');
+    // Accept any hex address in the label; the intent prefix is recommended but not required.
+    if(!/survey/i.test(text))return null;
+    // Prefer an explicit 0x-prefixed address; otherwise accept a bare hex run outside the word "survey".
+    const prefixed=/0x([0-9a-fA-F]{1,16})/.exec(text);
+    const stripped=text.replace(/survey/gi,' ');
+    const m=prefixed||/([0-9a-fA-F]{6,16})/.exec(stripped);
     if(!m)return null;
     const address=ptr(parseInt(m[1],16));
     if(address.isNull())throw new Error('survey address must be non-null');
@@ -1926,8 +1932,19 @@ function install() {
 rpc.exports = {
     install, status, allGold: enableAllGold, allGoldOff: stopAllGold, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) {
+        const surveyRequested=/survey/i.test(String(label||''));
         const surveyAddress=safe(()=>parseSurveyAddress(label));
-        if(surveyAddress&&!surveyAddress.error) { const result=surveyManager(surveyAddress); return {mark:true,survey:result,status:status()}; }
+        const surveyFailed=!surveyAddress||surveyAddress.error;
+        if(surveyRequested&&surveyFailed) {
+            // Never fail silently: a survey attempt is always visible in the dump.
+            managerSurvey.status='unavailable';
+            managerSurvey.error=surveyAddress&&surveyAddress.error?String(surveyAddress.error):'survey label requires a hex address, e.g. survey 0x7fb13a055148';
+            managerSurvey.last_label=String(label||'').slice(0,160);
+            managerSurvey.time=Date.now();
+            event('manager_survey_rejected',{label:managerSurvey.last_label,error:managerSurvey.error});
+            return {mark:false,survey:managerSurvey,status:status()};
+        }
+        if(!surveyFailed) { const result=surveyManager(surveyAddress); return {mark:true,survey:result,status:status()}; }
         event('user_mark', { label: String(label).slice(0, 160) }); return status();
     },
     managerSurvey(address) { return surveyManager(address); },
