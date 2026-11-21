@@ -426,3 +426,9 @@
 - New spawn-gold-reuse CLI/RPC: same-state natural gold snapshot + current descriptor ID=-1 + unchanged non-ID/flag bytes + no active matching Candy in either array. No historical pointer deref/guessed IDs; refusal before native if unavailable.
 - New record/callback/containers with old collected ID, restores original descriptor flags, ID counter untouched. Normal cycle/new-ID commands unchanged. One native attempt, no reuse cycle.
 - Completion/server error remains unresolved. Duplicate accounting risk explicitly documented; no network/error bypass.109 mock tests including selector guards/unchanged counter, syntax/diff checks. Rust toolchain absent here; rebuild required. README unchanged.
+
+## Explicit collected-ID reuse cycle
+
+- New spawn-gold-reuse-cycle CLI/RPC selects existing100max/100ms scheduler with reuse mode. Requires active level and confirmed collected template before enabling; each attempt rechecks descriptor/ID inactivity and never increments ID counter.
+- Existing stop/capacity/world/phase/state guards and native-no-retry preserved. Missing eligible collected candidate can wait5s pre-native. Normal new-ID cycle unchanged. Server error/finish correctness NOT confirmed, repeat accounting remains experimental.
+- 111 Node mock tests including explicit reuse flag per iteration and refusal before series/native start; syntax/diff. Rust toolchain unavailable, rebuild needed; README untouched.
