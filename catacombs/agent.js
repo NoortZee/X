@@ -1159,24 +1159,26 @@ function stopGoldCycle(reason = 'user') {
     return { spawn_cycle: goldCycle };
 }
 function startGoldCycle() {
-    throw new Error('Full registration experiment is single-shot only; use spawn-gold. Cycle disabled until live credit confirmed.');
-}
-function legacyStartGoldCycleDisabled() {
-    if (!enabled || !latest || latest.phase_raw !== 1 || Date.now()-latest.time > C.spawn_gold.expiry_ms)
-        throw new Error('enter active Catacombs first');
+    if (!enabled) throw new Error('start module first');
+    if (latest && latest.phase_raw===1 && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
     if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
-    goldCycle = { active: true, state: latest.state.address, attempted: 0, registered: 0,
+    goldCycle = { active: true, state: latest && latest.phase_raw===1 ? latest.state.address : null, armed_deadline: Date.now()+60000, attempted: 0, registered: 0,
         limit: 10, interval_ms: 2000, next: Date.now(), reason: null };
     event('spawn_cycle_started', { ...goldCycle });
     return { ...goldCycle, warning: 'Experimental: at most ten objects, no proof of visible spawn or credit.' };
 }
 function tickGoldCycle(state) {
     if (!goldCycle || !goldCycle.active) return;
+    if (!goldCycle.state) {
+        if(Date.now()>goldCycle.armed_deadline) {stopGoldCycle('level wait expired');return;}
+        if(state.add(C.state.phase).readS32()!==1 || state.add(C.state.paused).readU8()!==0) return;
+        goldCycle.state=state.toString();
+    }
     if (state.toString() !== goldCycle.state || state.add(C.state.phase).readS32() !== 1) {
         stopGoldCycle('state/phase changed'); return;
     }
     if (state.add(C.state.paused).readU8() !== 0 || pendingGold || Date.now() < goldCycle.next) return;
-    pendingGold = { state: goldCycle.state, time: Date.now(), cycle: true };
+    pendingGold = { state: goldCycle.state, time: Date.now(), cycle: true, armed: true, deadline: Date.now()+5000 };
     goldCycle.attempted++;
     goldCycle.next = Date.now() + goldCycle.interval_ms;
 }
@@ -1394,6 +1396,7 @@ function performGold(state) {
         if (!result.success) stopGoldCycle('spawn failed; inspect last_spawn_gold');
         else {
             goldCycle.registered++;
+            goldCycle.next=Date.now()+goldCycle.interval_ms;
             if (goldCycle.attempted >= goldCycle.limit) stopGoldCycle('limit reached');
         }
     }
@@ -1499,7 +1502,7 @@ function install() {
             tickGoldCycle(this.updateState);
             if (pendingGold) performGold(this.updateState);
             else if (pendingMove) performMove(this.updateState);
-            else autoTeleport(this.updateState);
+            else if (!(goldCycle && goldCycle.active)) autoTeleport(this.updateState);
         } });
         installAttachObserver(m);
         enabled = true; event('enabled', { diagnostic_only: true });

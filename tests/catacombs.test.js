@@ -1043,7 +1043,7 @@ test('signature refusal includes expected and actual bytes, no factory call',()=
 
 test('bounded gold cycle schedules spaced attempts, stops at ten and cannot be rearmed',()=>{
     const f=goldFixture();let time=vm.runInContext("Date.now()",f.c);f.c.Date={now:()=>time};
-    vm.runInContext("startGoldCycle=legacyStartGoldCycleDisabled;rpc.exports.spawnGoldCycle=startGoldCycle",f.c);f.rpc.spawnGoldCycle();f.leave();
+    f.rpc.spawnGoldCycle();f.leave();
     assert.equal(f.rpc.status().spawn_cycle.registered,1);
     f.leave();assert.equal(f.rpc.status().spawn_cycle.attempted,1);
     // Reuse the mock free slot; real runtime must find a fresh null slot each time.
@@ -1054,7 +1054,7 @@ test('bounded gold cycle schedules spaced attempts, stops at ten and cannot be r
 });
 test('cycle stops on native error, explicit cancellation, state/phase change and module stop',()=>{
     for(const mode of ['failure','cancel','phase','stop']){
-        const f=goldFixture();vm.runInContext('rpc.exports.spawnGoldCycle=legacyStartGoldCycleDisabled',f.c);f.rpc.spawnGoldCycle();
+        const f=goldFixture();f.rpc.spawnGoldCycle();
         if(mode==='failure')f.c.NativeFunction=function(){return ()=>{throw Error('fault');};};
         if(mode==='cancel')f.rpc.spawnGoldStop();
         if(mode==='phase')f.memory.set(0x1138,2);
@@ -1136,7 +1136,7 @@ test('full registration preflight refuses missing native signatures and cycle co
     const f=goldFixture();f.c.testState=f.pointer(0x1000);f.c.testArray=f.pointer(0x2000);
     const n=f.calls.length;
     assert.throws(()=>vm.runInContext('originalFullGoldPlan(testState,testArray)',f.c),/full spawn signature/);
-    assert.equal(f.calls.length,n);assert.throws(()=>f.rpc.spawnGoldCycle(),/single-shot only/);
+    assert.equal(f.calls.length,n);assert.equal(f.rpc.spawnGoldCycle().limit,10);
 });
 
 test('gold may be armed before a level and waits for active phase before one native attempt',()=>{
@@ -1155,4 +1155,21 @@ test('armed spawn waits only for absent template, expires or cancels without fac
     assert.equal(f.rpc.status().last_spawn_gold.waiting_for_template,true);assert.equal(f.calls.length,0);
     vm.runInContext('pendingGold.deadline=0',f.c);f.leave();
     assert.equal(f.rpc.status().spawn_gold_pending,null);assert.equal(f.calls.length,0);
+});
+
+test('full registration cycle can be armed before level and expires without any native attempt',()=>{
+    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();
+    f.rpc.spawnGoldCycle();assert.equal(f.rpc.status().spawn_cycle.state,null);
+    f.leave();assert.equal(f.calls.length,0);
+    vm.runInContext('goldCycle.armed_deadline=0',f.c);f.leave();
+    assert.equal(f.rpc.status().spawn_cycle.active,false);
+    assert.equal(f.rpc.status().spawn_cycle.reason,'level wait expired');assert.equal(f.calls.length,0);
+});
+test('armed cycle binds active level and blocks auto teleport only while series is active',()=>{
+    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();f.rpc.spawnGoldCycle();
+    let auto=0;f.c.testAuto=()=>auto++;vm.runInContext('autoTeleport=testAuto',f.c);
+    f.leave();assert.equal(auto,0);
+    f.memory.set(0x1138,1);f.force();f.tick();f.leave();
+    assert.equal(f.rpc.status().spawn_cycle.registered,1);f.leave();assert.equal(auto,0);
+    f.rpc.spawnGoldStop();f.leave();assert.equal(auto,1);
 });

@@ -401,3 +401,9 @@
 - New report shows five missing-template refusals/native_started=false; no full-registration native attempt occurred.
 - Explicit spawn-gold before level entry can wait60s for active state/template, ahead of auto collection. Bounded250ms checks retry ONLY missing-template preflight, no native retries. State/timeout/stop/other failure cancels. Active-level behavior retained.
 - 102 Node mock tests, syntax/diff checks. No Rust/README changes; full native registration still requires live test.
+
+## Re-enable bounded full-registration cycle for HUD test
+
+- Explicit up to10 full-registration spawns/2s, pre-level arm60s, current state binding, cancel via spawn-gold-stop/module stop. Fresh plan each attempt, missing-template preflight wait5s only; native errors never retried.
+- Auto Candy teleport temporarily suppressed during active series to preserve natural templates, automatically resumes after series; other working modes unchanged. HUD credit still unconfirmed, first report showed structural registration only.
+- 104 Node mock tests including actual exported cycle/pre-level timeout/temporary auto suppression, syntax/diff checks. JS-only, README unchanged.
