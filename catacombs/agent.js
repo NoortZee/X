@@ -580,6 +580,7 @@ function sample(state) {
         lastTime = Date.now(); samples++;
         safe(() => captureEarlySpawnArray(state));
         safe(() => captureFixtureReport(state));
+        safe(() => levelCensus(state));
         latest = { time: lastTime, state: { address: state.toString() },
             phase_raw: safe(() => state.add(C.state.phase).readS32()),
             paused_raw: safe(() => state.add(C.state.paused).readU8()) };
@@ -591,6 +592,7 @@ function sample(state) {
     lastTime = now;
     safe(() => captureEarlySpawnArray(state));
     safe(() => captureFixtureReport(state));
+    safe(() => levelCensus(state));
     captureLifecycleCandidates();
     const snap = { time: now, state: identity(state),
         phase_raw: safe(() => state.add(C.state.phase).readS32()),
@@ -1665,6 +1667,8 @@ function requestMove(mode = 'visual') {
 }
 let sequenceProbeHook=null;
 let sequenceSummaryCache=null;
+let levelCensuses=[];
+let levelCensusError=null;
 let sequenceProbe={status:'not_installed',read_only:true,calls:0,skipped:0,snapshots:[]};
 function sequenceCounts(container) {
     const S=C.sequence_probe,declared=safeU64(container.add(0x10));
@@ -1716,6 +1720,26 @@ function levelInventory(state) {
     out.note='Read-only census of Candy-by-rarity in the pickup record column; not a server-authoritative level manifest.';
     return out;
 }
+function levelCensus(state) {
+    // Read-only periodic census: how many Candy of each rarity existed in this level at first observation.
+    const S=C.sequence_probe,now=Date.now();
+    if(state.add(C.state.phase).readS32()!==1)return {note:'census only during active level phase'};
+    if(levelCensuses.length && levelCensuses[levelCensuses.length-1].state===state.toString() &&
+        now-levelCensuses[levelCensuses.length-1].time<S.level_sample_ms)return levelCensuses[levelCensuses.length-1];
+    const inventory=safe(()=>levelInventory(state));
+    const entry={time:now,state:state.toString(),surviving_total:inventory.candy_total,
+        surviving_by_rarity:inventory.rarity_by_key};
+    if(inventory.error){entry.error=inventory.error;levelCensusError=entry;return entry;}
+    if(levelCensuses.length>=S.level_samples)levelCensuses.shift();
+    levelCensuses.push(entry);
+    return entry;
+}
+function levelTrend() {
+    const out={samples:levelCensuses.slice(),note:'Read-only census during active phase; counts shrink as items are collected. No generation accounting is claimed.'};
+    if(levelCensuses.length)out.first=levelCensuses[0];
+    if(levelCensusError)out.last_error=levelCensusError;
+    return out;
+}
 function levelSummary(state) {
     const S=C.sequence_probe,before=sequenceSummaryCache&&sequenceSummaryCache.get(state.toString()),now=Date.now();
     if(before && !before.error && now-before.time<S.level_scan_ms)return before;
@@ -1762,6 +1786,8 @@ function installSequenceProbe(m) {
     const S=C.sequence_probe;
     sequenceProbe={status:'checking',read_only:true,calls:0,skipped:0,snapshots:[]};
     sequenceSummaryCache=null;
+    levelCensuses=[];
+    levelCensusError=null;
     try {
         if(S.builder<0 || S.builder+S.signature.length>m.size)throw new Error('sequence builder outside module');
         const target=m.base.add(S.builder),range=Process.findRangeByAddress(target);
@@ -1783,7 +1809,7 @@ function installSequenceProbe(m) {
     } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
 }
 function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { sequence_probe: sequenceProbe, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();

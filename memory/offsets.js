@@ -70,7 +70,8 @@ const MEMORY_LAYOUT = {
             // Read-only level inventory: same record column used by pickup accounting.
             record_root: 0x128, record_stride: 0x50, record_type: 0x48, record_id: 0x20,
             record_rarity: 0x44, record_limit: 4096, record_ids: 64, candy_type: 0x2D,
-            level_columns: [0x128, 0x148], level_scan_ms: 250,
+            level_columns: [0x128, 0x148], level_scan_ms: 250, level_samples: 8,
+            level_sample_ms: 5000,
             signature: [0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xd8,0x04,0x00,0x00] },
         all_gold: { descriptor_factory: 0x1604540, caller: 0x14DA4A4, rarity_map: 0x2183AA0,
             key: 4, value: 4, type: 0x2D, flags: 0x10, lookup_flag: 0x800, rarity_key: 0x44,
