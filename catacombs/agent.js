@@ -1222,7 +1222,47 @@ function requestGold() {
         deadline: Date.now() + (armed ? 60000 : C.spawn_gold.expiry_ms) };
     return { queued: true, armed_for_next_level: armed, timeout_ms: armed ? 60000 : C.spawn_gold.expiry_ms, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
 }
-function fullGoldPlan(state, array68) {
+function requestGoldReuse() {
+    if(!enabled || !latest || latest.phase_raw!==1 || Date.now()-latest.time>C.spawn_gold.expiry_ms)
+        throw new Error('enter active level and collect a natural gold first');
+    if(goldCycle || goldAttempted || pendingGold) throw new Error('fresh module required for single reuse-ID test');
+    pendingGold={state:latest.state.address,time:Date.now(),deadline:Date.now()+C.spawn_gold.expiry_ms,reuseCollected:true};
+    return {queued:true,reuse_collected_id:true,continuous:false,warning:'Duplicate accounting/server error possible; one test only.'};
+}
+function collectedGoldTemplate(state) {
+    const a=goldArrayContext(state),m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    for(const sample of goldDiagnostics.natural) {
+        const o=sample.object,c=o && o.contact,r=c && c.records && c.records.matches && c.records.matches[0];
+        if(sample.state!==state.toString() || o.rarity!==4 || !Number.isInteger(o.id) || o.id<0 ||
+            !r || r.id!==o.id || !c.captures || !c.captures.candy_matches || c.captures.context!==state.toString()) continue;
+        // Reacquire current nodes from the current state's tree, never the historical Candy pointer.
+        const records=diagnosticColumn(state,0x128,c.captures.column,0x50,o.id);
+        if(!records.node || records.matches.length || r.index>=records.count) continue;
+        const node=ptr(records.node),entry=node.add(0x28).readPointer().add(r.index*0x50);
+        if(entry.add(0x20).readS32()!==-1) continue;
+        const original=r.raw_hex.split(' ').map(b=>parseInt(b,16));
+        const actual=Array.from(new Uint8Array(entry.readByteArray(0x50)));
+        if(original.length!==0x50 || !actual.every((v,i)=>(i>=0x10&&i<0x14)||(i>=0x20&&i<0x24)||v===original[i])) continue;
+        let active=false;
+        const secondary=state.add(0x58).readPointer();requireClass(secondary,C.spawn_probe.array_name);
+        const count=safeU64(secondary.add(C.array.slots));if(count>C.limits.slots)throw new Error('reuse secondary array budget');
+        for(const scan of [a,{capacity:count,data:secondary.add(C.array.data).readPointer()}]) {
+            for(let i=0;i<scan.capacity;i++) {
+                const current=scan.data.add(i*8).readPointer();if(current.isNull())continue;
+                const id=identity(current);
+                if(id.rtti && id.rtti.name===C.candy.name && current.add(0x184).readS32()===o.id){active=true;break;}
+            }
+        }
+        if(active) continue;
+        const objects=diagnosticColumn(state,0x110,c.captures.column,8,'not-an-address');
+        if(!objects.node)continue;
+        const callbackVptr=m.base.add(0x202C8E0);
+        if(callbackVptr.add(0x30).readPointer().toString()!==m.base.add(0x14DB600).toString()) throw new Error('reuse callback vtable mismatch');
+        return {reuseId:o.id,recordFlags:r.flags,callbackVptr,e:{captures:c.captures,records:{node:records.node,matches:[{index:r.index}]},column_objects:objects}};
+    }
+    throw new Error('no verified collected natural gold record in current level; no ID guessed');
+}
+function fullGoldPlan(state, array68, reuseCollected = false) {
     const a=goldArrayContext(state),m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
     if(!m) throw new Error('game module missing');
     // Verify the additional native entry points independently before mutation.
@@ -1234,8 +1274,8 @@ function fullGoldPlan(state, array68) {
         const actual=new Uint8Array(code.readByteArray(bytes.length));
         if(!bytes.every((v,i)=>actual[i]===v)) throw new Error('full spawn signature mismatch '+rva.toString(16));
     }
-    let template=null;
-    for(let i=0;i<a.capacity;i++) {
+    let template=reuseCollected ? collectedGoldTemplate(state) : null;
+    for(let i=0;!template && i<a.capacity;i++) {
         const o=a.data.add(i*8).readPointer();if(o.isNull()) continue;
         const id=identity(o);if(!id.rtti || id.rtti.name!==C.candy.name || o.add(C.candy.rarity).readS32()!==4) continue;
         const e=safe(()=>goldContactEvidence(o));
@@ -1270,6 +1310,7 @@ function fullGoldPlan(state, array68) {
     }
     const counter=state.add(0x13C).readS32();
     if(counter<0||counter>=0x7ffffffe) throw new Error('invalid ID counter');
+    if(reuseCollected && template.reuseId>counter) throw new Error('collected ID exceeds current counter');
     // Counter monotonicity is corroborated against every bounded tree record.
     const stack=[state.add(0x128).readPointer()],seen=new Set();let records=0;
     while(stack.length) {
@@ -1280,7 +1321,7 @@ function fullGoldPlan(state, array68) {
         if(!Number.isSafeInteger(size)||size<0||size%0x50||size/0x50>1024) throw new Error('ID vector bounds');
         for(let off=0;off<size;off+=0x50) {if(++records>4096)throw new Error('ID scan budget');if(b.add(off+0x20).readS32()>counter)throw new Error('ID counter below existing record');}
     }
-    const callbackVptr=template.o.add(C.object.body).readPointer().add(0x70).readPointer().readPointer();
+    const callbackVptr=template.callbackVptr || template.o.add(C.object.body).readPointer().add(0x70).readPointer().readPointer();
     const destroyTarget=callbackVptr.add(0x20).readPointer(),destroyModule=Process.findModuleByAddress(destroyTarget),destroyRange=Process.findRangeByAddress(destroyTarget);
     if(!destroyModule || destroyModule.name!==MEMORY_LAYOUT.module_name || !destroyRange || !destroyRange.protection.includes('x')) throw new Error('lambda inline destructor outside game code');
     const recordGrow=recordEnd.toString()===recordNode.add(0x38).readPointer().toString();
@@ -1295,7 +1336,7 @@ function fullGoldPlan(state, array68) {
             if(![0x55,0x48,0x89,0xe5].every((v,i)=>prefix[i]===v)) throw new Error('record push_back prefix mismatch');
         }
     }
-    return {source,recordNode,recordEnd,objectNode,objectEnd,recordGrow,objectGrow,array58,slot58,counter,id:counter+1,
+    return {source,recordNode,recordEnd,objectNode,objectEnd,recordGrow,objectGrow,array58,slot58,counter,reuseCollected,recordFlags:template.recordFlags,id:reuseCollected ? template.reuseId : counter+1,
         column:e.captures.column,callbackVptr,m};
 }
 function growGoldPointerVector(node,object,m,result) {
@@ -1342,6 +1383,7 @@ function completeGoldRegistration(plan,state,object,body,assign,result) {
     result.registration_stage='callback_installed';
     const local=Memory.alloc(0x50);copy(local,P.source);
     local.add(0x20).writeS32(P.id);
+    if(P.reuseCollected) local.add(0x10).writeS32(P.recordFlags);
     // Preserve the template descriptor/key/flags. Its original position belongs to this column.
     if(P.recordGrow) {
         const push=new NativeFunction(P.m.base.add(0x14BCB80),'pointer',['pointer','pointer']);
@@ -1353,7 +1395,7 @@ function completeGoldRegistration(plan,state,object,body,assign,result) {
         copy(P.recordEnd,local);P.recordNode.add(0x30).writePointer(P.recordEnd.add(0x50));
     }
     cleanup(local);
-    state.add(0x13C).writeS32(P.id);
+    if(!P.reuseCollected) state.add(0x13C).writeS32(P.id);
     result.registration_stage='column_record_added';
     assign(P.array58,object,P.slot58);
     if(P.objectGrow) {
@@ -1397,7 +1439,8 @@ function performGold(state) {
             if(capacity+safeU64(array.add(0x30))+1>C.limits.slots) throw new Error('primary array growth budget exceeded');
             slot=capacity;
         }
-        const fullPlan = fullGoldPlan(state,array);
+        const fullPlan = fullGoldPlan(state,array,!!request.reuseCollected);
+        result.reused_collected_id=!!request.reuseCollected;
         result.full_registration = true;
         result.attach_observer_detached = detachAttachObserverForSpawn();
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
@@ -1598,7 +1641,7 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, spawnGoldCycle: startGoldCycle, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, spawnGoldCycle: startGoldCycle, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,

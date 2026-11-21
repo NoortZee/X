@@ -1140,6 +1140,11 @@ test('full registration helper installs owned callback, clones record and adds s
     vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
     assert.equal(order.join(','),'callback,destroyTemporary,copy,pushRecord,cleanup,assign58');
     assert.equal(f.memory.get(0xB0020),101);assert.equal(f.c.helperResult.record_vector_grew,true);
+    f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);f.memory.set(0x97000,0);
+    plan.reuseCollected=true;plan.id=62;plan.recordFlags=7;
+    vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
+    assert.equal(f.memory.get(0xB0020),62);assert.equal(f.memory.get(0x113C),100);
+
 });
 test('full registration preflight refuses missing native signatures and cycle command stays disabled',()=>{
     const f=goldFixture();f.c.testState=f.pointer(0x1000);f.c.testArray=f.pointer(0x2000);
@@ -1225,4 +1230,23 @@ test('100ms cycle has no burst catchup after delayed update',()=>{
     time+=99;f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,1);
     time+=1;f.memory.set(0x2808,0);f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,2);
     time+=1000;f.memory.set(0x2808,0);f.leave();f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,3);
+});
+
+test('reuse ID command is explicit, queued, bounded and does not change the normal cycle',()=>{
+    const f=goldFixture();const r=f.rpc.spawnGoldReuse();assert.equal(r.reuse_collected_id,true);
+    assert.equal(f.rpc.status().spawn_gold_pending.reuseCollected,true);assert.equal(f.calls.length,0);
+    assert.throws(()=>f.rpc.spawnGoldReuse(),/fresh module/);f.rpc.stop();assert.equal(f.rpc.status().spawn_gold_pending,null);
+});
+test('collected natural ID selector requires invalidated matching record and no active Candy',()=>{
+    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));f.c.testState=f.pointer(0x1000);
+    for(const [p,v]of [[0x3184,10],[0x1058,0x2000],[0x1128,0x90000],[0x90020,19],[0x90028,0xA0000],[0x90030,0xA0050],
+        [0xA0010,7],[0xA0020,-1],[0xA0048,45],[0x1110,0xB0000],[0xB0020,19],[0xB0028,0],[0xB0030,0],
+        [0x100000+0x202C8E0+0x30,0x100000+0x14DB600]])f.memory.set(p,v);
+    const raw=Array.from(new Uint8Array(f.pointer(0xA0000).readByteArray(0x50))).map(v=>v.toString(16).padStart(2,'0')).join(' ');
+    f.c.testRaw=raw;
+    vm.runInContext(`goldDiagnostics.natural=[{state:'0x1000',object:{rarity:4,id:62,contact:{captures:{context:'0x1000',column:19,candy_matches:true},records:{matches:[{id:62,index:0,flags:7,raw_hex:testRaw}]}}}}]`,f.c);
+    assert.equal(vm.runInContext('collectedGoldTemplate(testState).reuseId',f.c),62);
+    f.memory.set(0xA0020,62);assert.throws(()=>vm.runInContext('collectedGoldTemplate(testState)',f.c),/no verified collected/);
+    f.memory.set(0xA0020,-1);f.memory.set(0xA0048,46);
+    assert.throws(()=>vm.runInContext('collectedGoldTemplate(testState)',f.c),/no verified collected/);
 });
