@@ -80,7 +80,7 @@ const MEMORY_LAYOUT = {
             rarity: 0x44, type: 0x48, record_id: 0x20, flags: 0x11, lookup_bit: 0x08, candy_type: 0x2D,
             rtti_needle: 'EndlessMaze7Manager',
             // Manager vtable RVA (live dump). Used only to locate the object read-only.
-            vtable: 0x2026FC8, scan_max_range: 0x4000000, scan_max_bytes: 0x20000000,
+            vtable: 0x2026FC8, scan_max_range: 0x4000000, scan_max_bytes: 0x300000000,
             scan_max_ranges: 65536, scan_matches: 16 },
         all_gold: { descriptor_factory: 0x1604540, caller: 0x14DA4A4, rarity_map: 0x2183AA0,
             key: 4, value: 4, type: 0x2D, flags: 0x10, lookup_flag: 0x800, rarity_key: 0x44,
