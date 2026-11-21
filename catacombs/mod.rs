@@ -48,11 +48,11 @@ impl<'a> CatacombsModule<'a> {
                 }
             }
             "stop" => { self.stop(); println!("catacombs: stopped"); }
-            "status" | "dump" | "mark" | "move-white" | "teleport-white" | "above" | "return-height" | "spawn-probe" | "spawn-gold" | "spawn-gold-cycle" | "spawn-gold-stop" | "spawn-gold-reuse" | "spawn-gold-reuse-cycle" => {
+            "status" | "dump" | "mark" | "move-white" | "teleport-white" | "above" | "return-height" | "spawn-probe" | "spawn-gold" | "spawn-gold-cycle" | "spawn-gold-stop" | "spawn-gold-reuse" | "spawn-gold-reuse-cycle" | "all-gold" | "all-gold-off" => {
                 let Some(script) = self.script.as_mut() else {
                     println!("catacombs: start first"); return Ok(());
                 };
-                let method = match action { "dump" => "report", "move-white" => "moveWhite", "teleport-white" => "teleportWhite", "return-height" => "returnHeight", "spawn-probe" => "spawnProbe", "spawn-gold-cycle" => "spawnGoldCycle", "spawn-gold-stop" => "spawnGoldStop", "spawn-gold-reuse-cycle" => "spawnGoldReuseCycle", "spawn-gold-reuse" => "spawnGoldReuse", "spawn-gold" => "spawnGold", _ => action };
+                let method = match action { "all-gold" => "allGold", "all-gold-off" => "allGoldOff", "dump" => "report", "move-white" => "moveWhite", "teleport-white" => "teleportWhite", "return-height" => "returnHeight", "spawn-probe" => "spawnProbe", "spawn-gold-cycle" => "spawnGoldCycle", "spawn-gold-stop" => "spawnGoldStop", "spawn-gold-reuse-cycle" => "spawnGoldReuseCycle", "spawn-gold-reuse" => "spawnGoldReuse", "spawn-gold" => "spawnGold", _ => action };
                 let args = if action == "mark" { Some(serde_json::json!([label])) } else { None };
                 let value = script.exports.call_cancellable(method, args, Duration::from_secs(5),
                     || aborted.load(Ordering::SeqCst))?;
@@ -68,7 +68,7 @@ impl<'a> CatacombsModule<'a> {
                     println!("catacombs: {}", path.display());
                 } else { println!("catacombs: {value:?}"); }
             }
-            _ => println!("catacombs start | status | dump | mark <label> | move-white | teleport-white | above | return-height | spawn-probe | spawn-gold | spawn-gold-cycle | spawn-gold-stop | spawn-gold-reuse | spawn-gold-reuse-cycle | stop"),
+            _ => println!("catacombs start | status | dump | mark <label> | move-white | teleport-white | above | return-height | spawn-probe | spawn-gold | spawn-gold-cycle | spawn-gold-stop | spawn-gold-reuse | spawn-gold-reuse-cycle | all-gold | all-gold-off | stop"),
         }
         Ok(())
     }

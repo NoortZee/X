@@ -432,3 +432,9 @@
 - New spawn-gold-reuse-cycle CLI/RPC selects existing100max/100ms scheduler with reuse mode. Requires active level and confirmed collected template before enabling; each attempt rechecks descriptor/ID inactivity and never increments ID counter.
 - Existing stop/capacity/world/phase/state guards and native-no-retry preserved. Missing eligible collected candidate can wait5s pre-native. Normal new-ID cycle unchanged. Server error/finish correctness NOT confirmed, repeat accounting remains experimental.
 - 111 Node mock tests including explicit reuse flag per iteration and refusal before series/native start; syntax/diff. Rust toolchain unavailable, rebuild needed; README untouched.
+
+## Explicit all-gold native factory mode
+
+- New all-gold/all-gold-off commands: guarded64byte Candy factory hook changes rarity arg4 only from verified wrapper return15FB8BB; native game initializes appearance/body. No extra object/ID/record/reward writes; unknown callers/types untouched.
+- Applies only to future collectible Candy, enable before fresh level. Already-existing objects/traps/DeathSkulls unchanged. stop/off detach+flush, not rollback. Explicit spawn experiments cannot mix.
+- Original level rarity keys remain unchanged; server error and completion correctness NOT fixed/confirmed.113 mock tests, syntax/diff; new Rust CLI requires rebuild, compiler absent here. README unchanged.
