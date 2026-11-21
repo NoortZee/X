@@ -293,7 +293,7 @@ function fixtureChain(body) {
 }
 function speedBlockMatches(base) {
     return Math.abs(base.readFloat() - C.wall_pass.original) <= C.wall_pass.tolerance &&
-        C.wall_pass.neighbours.every(([offset, value, required]) => offset === C.speed_test.offset || required === false ||
+        C.wall_pass.neighbours.every(([offset, value, required]) => offset === C.speed.offset || required === false ||
             Math.abs(numberAt(base, offset) - value) <= C.wall_pass.tolerance);
 }
 function restoreSpeed(reason) {
@@ -310,7 +310,7 @@ function restoreSpeed(reason) {
     event('speed_restore', { result: speedTest });
 }
 function applySpeed(state) {
-    if (!C.speed_test.enabled) return;
+    if (!C.speed.enabled) return;
     try {
         if (state.add(C.state.phase).readS32() !== 1) {
             restoreSpeed('level inactive'); if (speedTest) speedTest.active = false; return;
@@ -319,7 +319,7 @@ function applySpeed(state) {
         requireClass(state, C.move_white.state_name);
         if (speedTest && speedTest.state === state.toString() && speedTest.active !== false) return;
         if (speedBackup) { restoreSpeed('new state'); if (speedBackup) return; }
-        speedTest = { state: state.toString(), active: true, status: 'searching', multiplier: C.speed_test.multiplier };
+        speedTest = { state: state.toString(), active: true, status: 'searching', multiplier: speedMultiplier };
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         if (!m) throw new Error('game module missing');
         let scanned = 0, matches = 0; const candidates = new Map();
@@ -329,16 +329,16 @@ function applySpeed(state) {
                 if (++matches > C.wall_pass.max_matches) throw new Error('speed scan match budget');
                 const base = match.address;
                 const delta = Number(base.sub(m.base).toString());
-                if (delta < 0 || delta + C.speed_test.offset + 4 > m.size) continue;
-                if (safe(() => speedBlockMatches(base) && Math.abs(numberAt(base, C.speed_test.offset) - C.speed_test.baseline) <= C.wall_pass.tolerance) === true)
+                if (delta < 0 || delta + C.speed.offset + 4 > m.size) continue;
+                if (safe(() => speedBlockMatches(base) && Math.abs(numberAt(base, C.speed.offset) - C.speed.baseline) <= C.wall_pass.tolerance) === true)
                     candidates.set(base.toString(), base);
             }
         }
         speedTest.matches = candidates.size;
         if (candidates.size !== 1) throw new Error('speed block not unique/found: ' + candidates.size);
-        const base = candidates.values().next().value, pointer = base.add(C.speed_test.offset);
+        const base = candidates.values().next().value, pointer = base.add(C.speed.offset);
         writableFloat(pointer);
-        const original = pointer.readFloat(), patched = original * C.speed_test.multiplier;
+        const original = pointer.readFloat(), patched = original * speedMultiplier;
         if (!Number.isFinite(patched) || patched <= 0) throw new Error('invalid speed multiplier');
         speedBackup = { base, pointer, original, patched }; mutationAttempted = true;
         pointer.writeFloat(patched);
@@ -2035,9 +2035,37 @@ function installSequenceProbe(m) {
     } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
 }
 function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), stages: stageStatus(), manager_survey: managerSurvey, manager_locate: managerLocate, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), stages: stageStatus(), manager_survey: managerSurvey, manager_locate: managerLocate, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed: {...speedTest, requested: sessionSpeed, multiplier: speedMultiplier}, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
-function install() {
+function mark(label) {
+    const text=String(label||'');
+    if(!/survey/i.test(text)) { event('user_mark', { label: text.slice(0, 160) }); return status(); }
+    const parsed=safe(()=>parseSurveyAddress(text));
+    const parsedAddress=parsed&&!parsed.error?parsed:null;
+    const result=surveyManager(parsedAddress||undefined);
+    return {mark:!!parsedAddress,survey:result,requested:parsedAddress?'address':'locate',status:status()};
+}
+let speedMultiplier=1, sessionSpeed=null;
+function clampSpeed(value) {
+    const S=C.speed;
+    if(value===undefined||value===null||value==='')return S.default_speed;
+    const n=Number(value);
+    if(!Number.isInteger(n))throw new Error('speed must be an integer '+S.min+'..'+S.max);
+    if(n<S.min||n>S.max)throw new Error('speed must be '+S.min+'..'+S.max+', got '+n);
+    return n;
+}
+function start(speed) {
+    // The single user-facing command: load the module and apply the requested character speed.
+    const requested=clampSpeed(speed);
+    if(enabled && sessionSpeed===requested) return {...status(), speed:{requested, unchanged:true}};
+    if(enabled) stop();
+    speedMultiplier=requested;sessionSpeed=requested;
+    installModule();
+    return {...status(), speed:{requested, multiplier:speedMultiplier,
+        applied:speedTest?speedTest.status:null,
+        note:'Multiplier applies from the next active level. Speed1 leaves the value untouched.'}};
+}
+function installModule() {
     if (enabled) return status();
     pendingGold = null; goldResult = null; goldAttempted = false; goldCycle = null;
     goldDiagnostics = { natural: [], spawned: [], note: 'Read-only bounded snapshots; removal is not proof of reward.' };
@@ -2088,16 +2116,10 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, allGold: enableAllGold, allGoldOff: stopAllGold, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
-    mark(label) {
-        const text=String(label||'');
-        if(!/survey/i.test(text)) { event('user_mark', { label: text.slice(0, 160) }); return status(); }
-        // A survey label always attempts the survey. Address is optional: none means bounded location.
-        const parsed=safe(()=>parseSurveyAddress(text));
-        const parsedAddress=parsed&&!parsed.error?parsed:null;
-        const result=surveyManager(parsedAddress||undefined);
-        return {mark:!!parsedAddress,survey:result,requested:parsedAddress?'address':'locate',status:status()};
-    },
+    // Single user-facing command surface: start(<speed 1..10>).
+    start(speed) { return start(speed); },
+    // Inspection/support only (no gameplay modes).
+    status, mark(label) { return mark(label); },
     managerSurvey(address) { return surveyManager(address); },
     locateManager() { return locateManager(); },
     report() {
@@ -2110,4 +2132,5 @@ rpc.exports = {
             module: moduleInfo, candidate_profile: C.profile, offsets: C,
             warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
         spawn_probe: spawnInspection, lifecycle_candidates: lifecycleCode, method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
+    stop() { stop(); return status(); },
 };

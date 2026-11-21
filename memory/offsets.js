@@ -90,7 +90,8 @@ const MEMORY_LAYOUT = {
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
             // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.
             neighbours: [[0x8, 2.20000004768], [0x20, 31300], [0x64, 40], [0x68, 35.21099853516], [0x108, 12, false]] },
-        speed_test: { enabled: true, offset: 0x8, multiplier: 1, baseline: 2.20000004768 },
+        // Single user-facing knob: character speed 1..10 (1 = untouched baseline).
+        speed: { enabled: true, offset: 0x8, baseline: 2.20000004768, min: 1, max: 10, default_speed: 1 },
         // Initial underground descent disabled: finish regression reported; keep prior no-fall mode.
         altitude_test: { auto_rise: true, up: 1920, velocity: 8, timeout_ms: 6000, expiry_ms: 5000, tolerance: 4 },
         no_fall: { enabled: true, underground: false, down: 64, descent_vy: 2, descent_timeout_ms: 2000 },
