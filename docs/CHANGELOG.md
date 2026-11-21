@@ -382,3 +382,10 @@
 - gold_diagnostics в status/dump: штатные Candy, три стадии factory/attach/registered, ID/bodyID/image/flags/refcount/raw object/body/physics/world.
 - До10с bounded follow-up по текущему слоту с остановкой при removal/reuse/body/state/phase change; удаление не трактуется как credit. До4 natural/10 spawned/11 samples; отдельно от events. Ошибки чтения сохраняются.
 - Никаких новых native-вызовов/пишущих полей, автоматического spawn или изменений рабочего core. Для нового dump rebuild не нужен.96 Node mock-тестов, syntax/diff checks; live evidence ещё требуется. README не менялся.
+
+## Контакт/замыкание/колоночная регистрация gold: автоматический dump
+
+- Добавлены read-only contact flag/callback identity/invoke и guarded захваты ctx/column/Candy штатной lambda14DB600.
+- Ограниченная проверка записи ID в ctx128, поколоночного списка ctx110 и членства в ctx58/68, counter13C; mismatch/ошибки вместо произвольной интерпретации чужого closure.
+- Деревья с hop/cycle budget, векторы со span/stride/count guard. Никакого вызова/копирования callback, изменения ID/counter или новых native spawn шагов. Рабочий зачёт пока не реализован.
+- 98 Node mock-тестов, syntax/diff checks. Rust/README не менялись.

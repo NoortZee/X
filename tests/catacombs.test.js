@@ -1075,3 +1075,27 @@ test('gold diagnostic stops following historical objects on phase transition',()
     const t=f.rpc.report().gold_diagnostics.spawned[0];
     assert.equal(t.done,true);assert.match(t.end,/old pointers not read/);
 });
+
+test('contact diagnostics capture verified lambda, column record and both containers without native calls',()=>{
+    const f=goldFixture();f.rpc.spawnGold();f.leave();const before=f.calls.length;f.c.ptr=f.pointer;f.memory.set(0x50041,0);
+    f.identity(0x70000,0x71000,0x72000,0x73000,'EndlessMazePlayState20addObstaclesInColumn');
+    for(const [p,v] of [[0x50070,0x70000],[0x71030,0x100000+0x14DB600],
+        [0x70008,0x80000],[0x70010,7],[0x70018,0x40000],[0x80058,0x2000],[0x80068,0x2000],
+        [0x80128,0x90000],[0x90020,7],[0x90028,0xA0000],[0x90030,0xA0050],
+        [0xA0010,7],[0xA0048,45],[0xA0020,42],[0x40184,42],[0x80110,0xB0000],[0xB0020,7],
+        [0xB0028,0xC0000],[0xB0030,0xC0008],[0xC0000,0x40000]]) f.memory.set(p,v);
+    const e=vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c);
+    assert.equal(e.captures.candy_matches,true);assert.equal(e.records.matches[0].id,42);
+    assert.equal(e.column_objects.matches[0].object,'0x40000');
+    assert.equal(e.container_58.slots[0],1);assert.equal(e.container_68.slots[0],1);
+    assert.equal(f.calls.length,before);
+});
+test('contact diagnostics refuse unknown callback captures and bound cyclic trees',()=>{
+    const f=goldFixture();f.c.ptr=f.pointer;f.rpc.spawnGold();f.leave();f.memory.set(0x50041,0);f.memory.set(0x50070,0);
+    assert.equal(vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c).callback_missing,true);
+    f.identity(0x70000,0x71000,0x72000,0x73000,'OtherCallback');f.memory.set(0x50070,0x70000);
+    f.memory.set(0x71030,0x100000+0x14DB600);
+    assert.equal(vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c).captures,undefined);
+    f.memory.set(0x80128,0x90000);f.memory.set(0x90020,9);f.memory.set(0x90000,0x90000);
+    assert.throws(()=>vm.runInContext('diagnosticColumn(ptr(0x80000),0x128,7,0x50,42)',f.c),/tree cycle/);
+});
