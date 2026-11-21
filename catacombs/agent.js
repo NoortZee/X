@@ -1159,6 +1159,9 @@ function stopGoldCycle(reason = 'user') {
     return { spawn_cycle: goldCycle };
 }
 function startGoldCycle() {
+    throw new Error('Full registration experiment is single-shot only; use spawn-gold. Cycle disabled until live credit confirmed.');
+}
+function legacyStartGoldCycleDisabled() {
     if (!enabled || !latest || latest.phase_raw !== 1 || Date.now()-latest.time > C.spawn_gold.expiry_ms)
         throw new Error('enter active Catacombs first');
     if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
@@ -1184,6 +1187,99 @@ function requestGold() {
     pendingGold = { state: latest.state.address, time: Date.now() };
     return { queued: true, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
 }
+function fullGoldPlan(state, array68) {
+    const a=goldArrayContext(state),m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    if(!m) throw new Error('game module missing');
+    // Verify the additional native entry points independently before mutation.
+    for(const [rva,bytes] of [[0x105B020,[0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53]],
+        [0x105B0D0,[0x55,0x48,0x89,0xe5,0x41,0x56,0x53]],
+        [0x1618080,[0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50]]]) {
+        const code=m.base.add(rva),r=Process.findRangeByAddress(code);
+        if(!r || !r.protection.includes('x') || !r.protection.includes('r')) throw new Error('full spawn code protection');
+        const actual=new Uint8Array(code.readByteArray(bytes.length));
+        if(!bytes.every((v,i)=>actual[i]===v)) throw new Error('full spawn signature mismatch '+rva.toString(16));
+    }
+    let template=null;
+    for(let i=0;i<a.capacity;i++) {
+        const o=a.data.add(i*8).readPointer();if(o.isNull()) continue;
+        const id=identity(o);if(!id.rtti || id.rtti.name!==C.candy.name || o.add(C.candy.rarity).readS32()!==4) continue;
+        const e=safe(()=>goldContactEvidence(o));
+        if(e.captures && e.captures.context===state.toString() && e.captures.candy_matches &&
+            e.records && e.records.matches && e.records.matches.length===1 &&
+            e.column_objects && e.column_objects.node && e.contact_flag===0) {template={o,e};break;}
+    }
+    if(!template) throw new Error('no live uncollected gold with verified callback/column record; spawn before auto collection');
+    const e=template.e,recordNode=ptr(e.records.node),objectNode=ptr(e.column_objects.node);
+    function tail(node,stride) {
+        const begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer(),cap=node.add(0x38).readPointer();
+        const used=Number(end.sub(begin).toString()),free=Number(cap.sub(end).toString());
+        if(!Number.isSafeInteger(used)||used<0||used%stride||used/stride>1024||!Number.isSafeInteger(free)||free<stride||free%stride||free/stride>1024)
+            throw new Error('column has no verified allocated spare capacity; refusing growth');
+        return end;
+    }
+    const recordEnd=tail(recordNode,0x50),objectEnd=tail(objectNode,8);
+    const source=recordNode.add(0x28).readPointer().add(e.records.matches[0].index*0x50);
+    if(source.add(0x48).readS32()!==0x2D) throw new Error('gold record type mismatch');
+    const array58=state.add(0x58).readPointer();requireClass(array58,C.spawn_probe.array_name);
+    if(array58.toString()===array68.toString()) throw new Error('gold containers unexpectedly alias');
+    const capacity=safeU64(array58.add(C.array.slots)),data=array58.add(C.array.data).readPointer();
+    if(capacity<1||capacity>C.limits.slots||data.isNull()) throw new Error('secondary container invalid');
+    let slot58=-1;for(let i=0;i<capacity;i++) if(data.add(i*8).readPointer().isNull()){slot58=i;break;}
+    if(slot58<0) throw new Error('secondary container full');
+    const counter=state.add(0x13C).readS32();
+    if(counter<0||counter>=0x7ffffffe) throw new Error('invalid ID counter');
+    // Counter monotonicity is corroborated against every bounded tree record.
+    const stack=[state.add(0x128).readPointer()],seen=new Set();let records=0;
+    while(stack.length) {
+        const n=stack.pop();if(n.isNull()) continue;
+        if(seen.has(n.toString())||seen.size>=128) throw new Error('ID tree cycle/budget');seen.add(n.toString());
+        stack.push(n.readPointer(),n.add(8).readPointer());
+        const b=n.add(0x28).readPointer(),end=n.add(0x30).readPointer(),size=Number(end.sub(b).toString());
+        if(!Number.isSafeInteger(size)||size<0||size%0x50||size/0x50>1024) throw new Error('ID vector bounds');
+        for(let off=0;off<size;off+=0x50) {if(++records>4096)throw new Error('ID scan budget');if(b.add(off+0x20).readS32()>counter)throw new Error('ID counter below existing record');}
+    }
+    const callbackVptr=template.o.add(C.object.body).readPointer().add(0x70).readPointer().readPointer();
+    const destroyTarget=callbackVptr.add(0x20).readPointer(),destroyModule=Process.findModuleByAddress(destroyTarget),destroyRange=Process.findRangeByAddress(destroyTarget);
+    if(!destroyModule || destroyModule.name!==MEMORY_LAYOUT.module_name || !destroyRange || !destroyRange.protection.includes('x')) throw new Error('lambda inline destructor outside game code');
+    return {source,recordNode,recordEnd,objectNode,objectEnd,array58,slot58,counter,id:counter+1,
+        column:e.captures.column,callbackVptr,m};
+}
+function completeGoldRegistration(plan,state,object,body,assign,result) {
+    const P=plan;
+    if(state.add(0x13C).readS32()!==P.counter ||
+        P.recordNode.add(0x30).readPointer().toString()!==P.recordEnd.toString() ||
+        P.objectNode.add(0x30).readPointer().toString()!==P.objectEnd.toString() ||
+        !P.array58.add(C.array.data).readPointer().add(P.slot58*8).readPointer().isNull()) throw new Error('full registration reservations changed');
+    const copy=new NativeFunction(P.m.base.add(0x105B020),'void',['pointer','pointer']);
+    const cleanup=new NativeFunction(P.m.base.add(0x105B0D0),'void',['pointer']);
+    const installCallback=new NativeFunction(P.m.base.add(0x1618080),'void',['pointer','pointer']);
+    // Build a libc++ inline std::function exactly as the observed addObstaclesInColumn path.
+    const temporary=Memory.alloc(0x30);
+    temporary.writePointer(P.callbackVptr);temporary.add(8).writePointer(state);
+    temporary.add(0x10).writeS32(P.column);temporary.add(0x18).writePointer(object);
+    temporary.add(0x20).writePointer(temporary);
+    installCallback(body,temporary);
+    const installed=body.add(0x70).readPointer();
+    if(installed.isNull() || installed.toString()===temporary.toString() ||
+        installed.readPointer().toString()!==P.callbackVptr.toString() ||
+        installed.add(8).readPointer().toString()!==state.toString() ||
+        installed.add(0x10).readS32()!==P.column || installed.add(0x18).readPointer().toString()!==object.toString()) throw new Error('callback copy readback mismatch');
+    // Match the original temporary-function disposal branch (inline destroy, not delete).
+    const destroy=new NativeFunction(P.callbackVptr.add(0x20).readPointer(),'void',['pointer']);
+    destroy(temporary);
+    result.registration_stage='callback_installed';
+    const local=Memory.alloc(0x50);copy(local,P.source);
+    local.add(0x20).writeS32(P.id);
+    // Preserve the template descriptor/key/flags. Its original position belongs to this column.
+    copy(P.recordEnd,local);cleanup(local);
+    state.add(0x13C).writeS32(P.id);
+    P.recordNode.add(0x30).writePointer(P.recordEnd.add(0x50));
+    result.registration_stage='column_record_added';
+    assign(P.array58,object,P.slot58);
+    P.objectEnd.writePointer(object);P.objectNode.add(0x30).writePointer(P.objectEnd.add(8));
+    result.secondary_slot=P.slot58;result.column=P.column;result.id=P.id;
+    result.registration_stage='all_containers_added';
+}
 function performGold(state) {
     if (!pendingGold) return;
     const request = pendingGold; pendingGold = null;
@@ -1207,6 +1303,8 @@ function performGold(state) {
         let slot = -1;
         for (let i = 0; i < capacity; i++) if (data.add(i * Process.pointerSize).readPointer().isNull()) { slot = i; break; }
         if (slot < 0) throw new Error('no allocated free slot; refusing array growth/replacement');
+        const fullPlan = fullGoldPlan(state,array);
+        result.full_registration = true;
         result.attach_observer_detached = detachAttachObserverForSpawn();
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         for (const sig of G.signatures) {
@@ -1245,6 +1343,7 @@ function performGold(state) {
         if (setter.toString() !== m.base.add(G.object_setter).toString()) throw new Error('unexpected object position setter');
         const setterBytes = new Uint8Array(setter.readByteArray(C.move_white.setter_bytes.length));
         if (!C.move_white.setter_bytes.every((b,i)=>setterBytes[i]===b)) throw new Error('object position setter changed');
+        object.add(0x184).writeS32(fullPlan.id); // Body receives the ID during attach.
         attach(object,parent,[target.x,target.y]);
         result.attach_evidence = safe(() => goldObjectEvidence(object));
         result.parent_check = inspectCandyParent(object);
@@ -1260,6 +1359,7 @@ function performGold(state) {
         const currentCapacity = safeU64(array.add(C.array.slots));
         const currentData = array.add(C.array.data).readPointer();
         if (slot >= currentCapacity || !currentData.add(slot*Process.pointerSize).readPointer().isNull()) throw new Error('reserved slot no longer free');
+        completeGoldRegistration(fullPlan,state,object,body,assign,result);
         assign(array,object,slot); // Indexed assignment, NOT capacity+1 or an assumed append helper.
         const registered = array.add(C.array.data).readPointer().add(slot*Process.pointerSize).readPointer();
         if (registered.toString() !== object.toString()) throw new Error('array registration readback failed');
@@ -1269,7 +1369,7 @@ function performGold(state) {
             state:state.toString(),time:Date.now(),object:object.toString(),slot,
             body:body.toString(),next:Date.now(),done:false,timeline:[],
             stages:{factory:result.factory_evidence,attach:result.attach_evidence,registered:result.registered_evidence} });
-        result.note = 'One new rarity4 object registered; check HUD. No manual refcount release or reward mutation.';
+        result.note = 'Full registration experiment: new ID, column record, copied lambda and both containers. HUD credit still unconfirmed.';
     } catch (e) {
         result.error = String(e);
         if (result.native_started) result.warning = 'native spawn started; possible partial/orphan object. No guessed destructor, rollback or retry; restart game after failure.';
