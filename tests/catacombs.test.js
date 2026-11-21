@@ -1386,3 +1386,24 @@ test('sequence probe census fails closed on malformed record vectors without bre
     assert.deepEqual({...f.rpc.report().sequence_probe.snapshots.at(-1).level.inventory.rarity_by_key},{});
     f.rpc.stop();assert.equal(f.rpc.report().sequence_probe.snapshots.length,2);
 });
+
+test('level census records surviving Candy by rarity during active phase without writes',()=>{
+    const f=sequenceFixture(); // fixture default phase_raw=1, diagnostics off
+    vm.runInContext('install()',f.c); // attach observer through the normal graph scan path
+    for(const [p,v]of [[0x1128,0x92000],[0x92000,0],[0x92008,0],[0x92020,0x128],[0x92028,0xA0000],[0x92030,0xA00A0],
+        [0xA0010,7],[0xA0020,11],[0xA0044,1],[0xA0048,0x2D],
+        [0xA0060,7],[0xA0070,12],[0xA0094,4],[0xA0098,0x2D]])f.memory.set(p,v);
+    const before=f.writes.length;
+    f.force();f.tick();
+    let t=f.rpc.status().level_census;
+    assert.equal(t.samples.length,1);assert.deepEqual({...t.samples[0].surviving_by_rarity},{1:1,4:1});
+    assert.equal(t.samples[0].surviving_total,2);
+    f.force();f.tick();assert.equal(f.rpc.status().level_census.samples.length,1); // 5s throttle
+    f.memory.set(0xA0034,1);vm.runInContext('levelCensuses[levelCensuses.length-1].time-=6000',f.c);
+    f.force();f.tick();t=f.rpc.status().level_census;
+    assert.equal(t.samples.length,2);assert.equal(t.samples[1].surviving_total,2);
+    // Phase change is not censused.
+    f.memory.set(0x1138,2);f.force();f.tick();
+    assert.equal(f.rpc.status().level_census.samples.length,2);
+    assert.equal(f.writes.length,before);
+});
