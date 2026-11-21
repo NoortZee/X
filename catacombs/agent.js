@@ -1664,6 +1664,7 @@ function requestMove(mode = 'visual') {
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
 let sequenceProbeHook=null;
+let sequenceSummaryCache=null;
 let sequenceProbe={status:'not_installed',read_only:true,calls:0,skipped:0,snapshots:[]};
 function sequenceCounts(container) {
     const S=C.sequence_probe,declared=safeU64(container.add(0x10));
@@ -1683,6 +1684,57 @@ function sequenceCounts(container) {
         entries,positive_count_sum:entries.filter(e=>e.builder_includes).reduce((n,e)=>n+e.count,0),
         note:'Input counters before builder type mapping, not serialized wire bytes or server validation.'};
 }
+function levelInventory(state) {
+    // Read-only census of the record column that pickup accounting increments (14DAA30 -> state+128).
+    const S=C.sequence_probe,root=state.add(S.record_root).readPointer(),stack=[root],seen=new Set();
+    const byKey=new Map(),ids=[],out={rarity_by_key:{},records:0,scanned:0};
+    while(stack.length) {
+        const node=stack.pop();if(node.isNull())continue;
+        if(seen.has(node.toString()))throw new Error('level record tree cycle');
+        if(seen.size>=64)throw new Error('level record tree node budget exceeded');
+        seen.add(node.toString());
+        const key=node.add(S.record_id).readS32(),begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer();
+        const bytes=Number(end.sub(begin).toString());
+        if(!Number.isSafeInteger(bytes)||bytes<0||bytes%S.record_stride)throw new Error('level record vector bounds');
+        const count=bytes/S.record_stride;
+        if(count>1024)throw new Error('level record vector budget exceeded');
+        out.records+=count;out.scanned+=1;
+        for(let i=0;i<count;i++) {
+            const e=begin.add(i*S.record_stride);
+            const type=e.add(S.record_type).readS32(),entryKey=e.add(S.record_id).readS32();
+            if(type!==S.candy_type)continue;
+            const rarity=e.add(S.record_rarity).readS32();
+            const bucket=String(rarity);
+            byKey.set(bucket,(byKey.get(bucket)||0)+1);
+            if(ids.length<S.record_ids)ids.push({key,type,rarity,id:entryKey});
+        }
+        stack.push(node.readPointer(),node.add(8).readPointer());
+    }
+    for(const k of [...byKey.keys()].sort((a,b)=>a-b))out.rarity_by_key[k]=byKey.get(k);
+    out.candy_total=[...byKey.values()].reduce((n,v)=>n+v,0);
+    out.sample_records=ids;
+    out.note='Read-only census of Candy-by-rarity in the pickup record column; not a server-authoritative level manifest.';
+    return out;
+}
+function levelSummary(state) {
+    const S=C.sequence_probe,before=sequenceSummaryCache&&sequenceSummaryCache.get(state.toString()),now=Date.now();
+    if(before && !before.error && now-before.time<S.level_scan_ms)return before;
+    const out={time:now,state:state.toString(),columns:{}};
+    try {
+        for(const column of S.level_columns) {
+            const root=state.add(S.record_root).readPointer(),found=safe(()=>diagnosticColumn(state,S.record_root,column,S.record_stride,null));
+            out.columns['0x'+(column).toString(16)]={root:root.toString(),present:!!(found&&found.node),entries:found&&Number.isInteger(found.count)?found.count:null,
+                error:found&&found.error?found.error:undefined};
+        }
+        const inventory=safe(()=>levelInventory(state));
+        out.inventory=inventory.error?{error:inventory.error,rarity_by_key:{},sample_records:[]}:inventory;
+    } catch(e) { out.error=String(e); }
+    if(!sequenceSummaryCache)sequenceSummaryCache=new Map();
+    // Cache only complete scans; an error is retried on the next request instead of being pinned.
+    if(!out.error && out.inventory && !out.inventory.error)sequenceSummaryCache.set(state.toString(),out);
+    if(sequenceSummaryCache.size>8)sequenceSummaryCache.delete(sequenceSummaryCache.keys().next().value);
+    return out;
+}
 function captureSequenceInput(args,caller) {
     const S=C.sequence_probe;
     const lowS32=p=>Number(BigInt(p.toString())&0xffffffffn)|0;
@@ -1698,6 +1750,8 @@ function captureSequenceInput(args,caller) {
     out.owner=owner;
     if(owner.error) {out.counts_skipped='builder arguments not corroborated as current state fields';return out;}
     out.counts=safe(()=>sequenceCounts(args[3]));
+    // Same read-only census at request time, to compare against the builder input counts.
+    out.level=safe(()=>levelSummary(state));
     return out;
 }
 function stopSequenceProbe() {
@@ -1707,6 +1761,7 @@ function stopSequenceProbe() {
 function installSequenceProbe(m) {
     const S=C.sequence_probe;
     sequenceProbe={status:'checking',read_only:true,calls:0,skipped:0,snapshots:[]};
+    sequenceSummaryCache=null;
     try {
         if(S.builder<0 || S.builder+S.signature.length>m.size)throw new Error('sequence builder outside module');
         const target=m.base.add(S.builder),range=Process.findRangeByAddress(target);
