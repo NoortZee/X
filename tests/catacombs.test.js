@@ -1438,7 +1438,8 @@ function surveyFixture() {
 }
 test('manager survey reads authored descriptor rarity histogram by explicit address only',()=>{
     const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    assert.match(f.rpc.managerSurvey().error,/address required/);
+    // Without an address the survey tries strict vtable location, and never guesses an object.
+    assert.match(f.rpc.managerSurvey().error,/vtable typeinfo/);
     const r=f.rpc.managerSurvey('0x30000');
     assert.equal(r.status,'found');assert.equal(r.last.count,4);
     assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
@@ -1479,4 +1480,32 @@ test('survey label tolerates free wording and rejects without silent fallback',(
     // Plain labels stay plain marks.
     assert.equal(g.rpc.mark('picked golden').sequence_probe !== undefined,true);
     assert.equal(g.rpc.status().manager_survey.status,'unavailable');
+});
+
+test('manager auto-locate finds the single verified Manager by vtable and refuses ambiguity',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    const M=vm.runInContext('C.manager_survey',f.c);
+    // The candidate object is classifiable: vptr -> vtable, vtable-8 -> typeinfo -> name.
+    f.identity(0x35000,0x100000+M.vtable,0x355000,0x356000,'N11EndlessMaze7ManagerE');
+    f.memory.set(0x35100,0x777000); // decoy with an unrelated vptr
+    // Itanium ABI: vtable-8 holds the typeinfo pointer, typeinfo+8 the name pointer.
+    f.memory.set(0x100000+M.vtable-8,0x359000);f.memory.set(0x359000+8,0x35A000);
+    [...Buffer.from('N11EndlessMaze7ManagerE\0')].forEach((b,i)=>f.memory.set(0x35A000+i,b));
+    f.c.Process.enumerateRanges=()=>[{base:f.pointer(0x34000),size:0x2000,protection:'rw-'}];
+    const seenPatterns=[];
+    f.c.Memory.scanSync=(base,size,pattern)=>{
+        seenPatterns.push(pattern);
+        // The fixture heap holds only the candidate below; the pattern itself is checked separately.
+        return [{address:f.pointer(0x35000)}];
+    };
+    // Manager object 0x35000 must carry its own descriptor vector.
+    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
+    const located=f.rpc.locateManager();
+    assert.equal(located.status,'found');assert.equal(located.verified.length,1);
+    assert.equal(located.chosen,'0x35000');assert.equal(located.read_only,true);
+    assert.match(seenPatterns[0],/^([0-9a-f]{2} ){7}[0-9a-f]{2}$/); // little-endian pointer bytes
+    const r=f.rpc.managerSurvey();
+    assert.equal(r.status,'found');assert.equal(r.located,true);
+    assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
+    assert.equal(f.writes.length,0);
 });
