@@ -1190,6 +1190,7 @@ function stopGoldCycle(reason = 'user') {
     return { spawn_cycle: goldCycle };
 }
 function startGoldCycle(reuseCollected = false) {
+    if(allGoldStatus.active) throw new Error('disable all-gold before experimental spawning');
     if (!enabled) throw new Error('start module first');
     if (latest && latest.phase_raw===1 && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
     if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
@@ -1219,6 +1220,7 @@ function tickGoldCycle(state) {
     goldCycle.next = Date.now() + goldCycle.interval_ms;
 }
 function requestGold() {
+    if(allGoldStatus.active) throw new Error('disable all-gold before experimental spawning');
     if (!enabled) throw new Error('start module first');
     if (goldCycle || goldAttempted || pendingGold) throw new Error('one spawn attempt per module; inspect dump before restarting');
     const armed = !latest || latest.phase_raw !== 1;
@@ -1227,7 +1229,42 @@ function requestGold() {
         deadline: Date.now() + (armed ? 60000 : C.spawn_gold.expiry_ms) };
     return { queued: true, armed_for_next_level: armed, timeout_ms: armed ? 60000 : C.spawn_gold.expiry_ms, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
 }
+let allGoldHook = null;
+let allGoldStatus = {active:false,converted:0,seen:0,skipped_caller:0};
+function stopAllGold() {
+    allGoldStatus.active=false;
+    if(allGoldHook) {allGoldHook.detach();allGoldHook=null;Interceptor.flush();}
+    return { ...allGoldStatus, note:'Only future factory calls restored; existing Candy unchanged.' };
+}
+function enableAllGold() {
+    if(!enabled) throw new Error('start module first');
+    if(allGoldHook) return {...allGoldStatus};
+    if(pendingGold || (goldCycle && goldCycle.active)) throw new Error('stop experimental spawn series first');
+    const m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    if(!m) throw new Error('game module missing');
+    const sig=C.spawn_gold.signatures.find(s=>s.rva===C.spawn_gold.factory);
+    const target=m.base.add(C.spawn_gold.factory),range=Process.findRangeByAddress(target);
+    if(!sig || !range || !range.protection.includes('x') || !range.protection.includes('r')) throw new Error('Candy factory unavailable');
+    const bytes=new Uint8Array(target.readByteArray(sig.bytes.length));
+    if(!sig.bytes.every((v,i)=>bytes[i]===v)) throw new Error('all-gold factory signature mismatch');
+    allGoldStatus={active:true,converted:0,seen:0,skipped_caller:0,
+        note:'Future native Candy only. Original IDs/records/counts untouched; finish validity unconfirmed.'};
+    try {
+        allGoldHook=Interceptor.attach(target,{onEnter(args) {
+            if(!enabled || !allGoldStatus.active) return;
+            // Only the observed CandyPreview wrapper, not arbitrary calls/scenes or our explicit spawn.
+            if(this.returnAddress.toString()!==m.base.add(0x15FB8BB).toString()) {allGoldStatus.skipped_caller++;return;}
+            allGoldStatus.seen++;
+            const rarity=Number(args[0].toString());
+            if(!Number.isInteger(rarity) || rarity<0 || rarity>4) {allGoldStatus.error='unexpected rarity argument';return;}
+            if(rarity!==4) {args[0]=ptr(4);allGoldStatus.converted++;mutationAttempted=true;}
+        }});
+        Interceptor.flush();
+    } catch(e) {stopAllGold();allGoldStatus.error=String(e);throw e;}
+    event('all_gold_enabled',{...allGoldStatus});return {...allGoldStatus};
+}
 function requestGoldReuse() {
+    if(allGoldStatus.active) throw new Error('disable all-gold before experimental spawning');
     if(!enabled || !latest || latest.phase_raw!==1 || Date.now()-latest.time>C.spawn_gold.expiry_ms)
         throw new Error('enter active level and collect a natural gold first');
     if(goldCycle || goldAttempted || pendingGold) throw new Error('fresh module required for single reuse-ID test');
@@ -1594,8 +1631,8 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function stop() { stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
@@ -1647,7 +1684,7 @@ function install() {
     return status();
 }
 rpc.exports = {
-    install, status, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
+    install, status, allGold: enableAllGold, allGoldOff: stopAllGold, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,

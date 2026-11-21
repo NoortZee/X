@@ -1265,3 +1265,23 @@ test('reuse cycle refuses missing collected ID before enabling series or native 
     assert.throws(()=>f.rpc.spawnGoldReuseCycle(),/no verified collected/);
     assert.equal(f.rpc.status().spawn_cycle,null);assert.equal(f.calls.length,0);
 });
+
+test('all-gold changes only native wrapper factory argument and restores hook on off',()=>{
+    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));let callback,detached=0,flushed=0;
+    f.c.Interceptor.attach=(p,cb)=>{assert.equal(p.n,0x100000+0x15EEA70);callback=cb;return {detach(){detached++;}};};
+    f.c.Interceptor.flush=()=>{flushed++;};
+    assert.equal(f.rpc.allGold().active,true);
+    let args=[f.pointer(1)];callback.onEnter.call({returnAddress:f.pointer(0x100000+0x15FB8BB)},args);
+    assert.equal(args[0].n,4);assert.equal(f.rpc.status().all_gold.converted,1);
+    args=[f.pointer(4)];callback.onEnter.call({returnAddress:f.pointer(0x100000+0x15FB8BB)},args);
+    assert.equal(f.rpc.status().all_gold.seen,2);assert.equal(f.rpc.status().all_gold.converted,1);
+    args=[f.pointer(2)];callback.onEnter.call({returnAddress:f.pointer(0x100000+0x123)},args);
+    assert.equal(args[0].n,2);assert.equal(f.rpc.status().all_gold.skipped_caller,1);
+    assert.throws(()=>f.rpc.spawnGold(),/disable all-gold/);assert.throws(()=>f.rpc.spawnGoldCycle(),/disable all-gold/);
+    assert.equal(f.rpc.allGoldOff().active,false);assert.equal(detached,1);assert.equal(flushed,2);
+    assert.equal(f.calls.length,0);
+});
+test('all-gold rejects changed factory bytes without installing a hook',()=>{
+    const f=goldFixture();f.memory.set(0x100000+0x15EEA70,0x90);
+    assert.throws(()=>f.rpc.allGold(),/signature mismatch/);assert.equal(f.rpc.status().all_gold.active,false);
+});
