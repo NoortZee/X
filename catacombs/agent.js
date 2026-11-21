@@ -581,6 +581,7 @@ function sample(state) {
         safe(() => captureEarlySpawnArray(state));
         safe(() => captureFixtureReport(state));
         safe(() => levelCensus(state));
+        safe(() => recordStage(state));
         latest = { time: lastTime, state: { address: state.toString() },
             phase_raw: safe(() => state.add(C.state.phase).readS32()),
             paused_raw: safe(() => state.add(C.state.paused).readU8()) };
@@ -593,6 +594,7 @@ function sample(state) {
     safe(() => captureEarlySpawnArray(state));
     safe(() => captureFixtureReport(state));
     safe(() => levelCensus(state));
+    safe(() => recordStage(state));
     captureLifecycleCandidates();
     const snap = { time: now, state: identity(state),
         phase_raw: safe(() => state.add(C.state.phase).readS32()),
@@ -1957,6 +1959,35 @@ function captureSequenceInput(args,caller) {
     out.level=safe(()=>levelSummary(state));
     return out;
 }
+function stageSnapshot(state) {
+    // Read-only view of the checkpoint/stage fields that decide "next stage" vs "finish".
+    const S=C.state;
+    return {time:Date.now(),state:state.toString(),
+        phase:safe(()=>state.add(S.phase).readS32()),
+        current:safe(()=>Math.trunc(numberAt(state,S.stage_current))),
+        lower:safe(()=>state.add(S.stage_lower).readS32()),
+        upper:safe(()=>state.add(S.stage_upper).readS32()),
+        max:safe(()=>state.add(S.stage_max).readS32()),
+        goal_object:safe(()=>state.add(S.stage_goal_object).readPointer().toString()),
+        continue_flag:safe(()=>state.add(S.stage_continue_flag).readU8()),
+        field_190:safe(()=>state.add(S.stage_unknown_190).readS32()),
+        read_only:true,
+        note:'Client-side stage fields only. Server support for a further stage is not implied.'};
+}
+let stageHistory=[];
+function recordStage(state) {
+    const snap=stageSnapshot(state);
+    const key=JSON.stringify([snap.phase,snap.current,snap.lower,snap.upper,snap.max,snap.continue_flag]);
+    const last=stageHistory[stageHistory.length-1];
+    if(last && last.key===key) {last.time=snap.time;return;}
+    if(stageHistory.length>=24)stageHistory.shift();
+    stageHistory.push({key,...snap});
+}
+function stageStatus() {
+    const latestStage=stageHistory[stageHistory.length-1]||null;
+    return {latest:latestStage,history:stageHistory.slice(),
+        note:'Observation only: upper boundary, continue flag and phase as the client sees them. Nothing is modified.'};
+}
 function stopSequenceProbe() {
     if(sequenceProbeHook) {sequenceProbeHook.detach();sequenceProbeHook=null;Interceptor.flush();}
     if(sequenceProbe.status==='listening')sequenceProbe.status='stopped';
@@ -1967,6 +1998,7 @@ function installSequenceProbe(m) {
     sequenceSummaryCache=null;
     levelCensuses=[];
     levelCensusError=null;
+    stageHistory=[];
     managerSurvey.status='not_run';delete managerSurvey.last;delete managerSurvey.error;delete managerSurvey.service;delete managerSurvey.located;
     managerLocate={status:'not_run',read_only:true};
     sequenceProbe.last_payload=null;
@@ -1991,7 +2023,7 @@ function installSequenceProbe(m) {
     } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
 }
 function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), manager_survey: managerSurvey, manager_locate: managerLocate, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), stages: stageStatus(), manager_survey: managerSurvey, manager_locate: managerLocate, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();

@@ -1626,3 +1626,24 @@ test('all-gold default cap follows the authored gold count and refuses when unkn
     assert.throws(()=>vm.runInContext('allGoldLimit(undefined)',g.c),/authored gold count unknown/);
     assert.equal(vm.runInContext('allGoldLimit(0)',g.c),0); // explicit override still allowed
 });
+
+test('stage snapshot exposes boundary/continue fields read-only and records changes',()=>{
+    const f=fixture();f.rpc.install();
+    // current=18 (float), lower1, upper21, max20, goal object, continue flag0, phase1
+    f.memory.set(0x10F0,18);f.memory.set(0x1178,1);f.memory.set(0x117C,21);
+    f.memory.set(0x1180,20);f.memory.set(0x1188,0x7000);f.memory.set(0x1194,0);f.memory.set(0x1190,0);
+    const before=f.writes.length;
+    f.force();f.tick();
+    let st=f.rpc.status().stages.latest;
+    assert.equal(st.phase,1);assert.equal(st.current,18);assert.equal(st.upper,21);
+    assert.equal(st.max,20);assert.equal(st.goal_object,'0x7000');assert.equal(st.continue_flag,0);
+    assert.equal(st.read_only,true);
+    // unchanged fields are coalesced; a boundary/flag change is a new history entry
+    f.force();f.tick();assert.equal(f.rpc.status().stages.history.length,1);
+    f.memory.set(0x117C,22);f.memory.set(0x1194,1);
+    f.force();f.tick();
+    const s=f.rpc.status().stages;
+    assert.equal(s.history.length,2);assert.equal(s.latest.upper,22);assert.equal(s.latest.continue_flag,1);
+    assert.equal(s.note.includes('Nothing is modified'),true);
+    assert.equal(f.writes.length,before); // observation performs no writes
+});

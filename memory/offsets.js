@@ -114,7 +114,12 @@ const MEMORY_LAYOUT = {
         auto_teleport: { enabled: true, delay_ms: 300, interval_ms: 20, rarities: [1, 2, 3, 4], events: 80 },
         profile: '2.84.2 live candidates; not automatic game version detection',
         signature: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 18 48 89 FB F3 0F 11 45 D4 E8 ?? ?? ?? ?? 48 8B 7B 50 48 85 FF 74 0B 48 8B 07 F3 0F 10 45 D4 FF 50 78',
-        state: { world: 0x40, objects: 0x68, paused: 0x88, phase: 0x138 },
+        state: { world: 0x40, objects: 0x68, paused: 0x88, phase: 0x138,
+            // Stage/checkpoint fields (read-only observation).
+            stage_current: 0xF0, stage_lower: 0x178, stage_upper: 0x17C, stage_max: 0x180,
+            stage_goal_object: 0x188, stage_continue_flag: 0x194, stage_unknown_190: 0x190,
+            stage_transition: 0x14D77E0, stage_finish: 0x14D79D0, stage_decide: 0x14D746B,
+            stage_hud: 0x1497B80 },
         world: { hero: 0x18 },
         object: { x: 0x34, y: 0x38, body: 0x198, image: 0x1A0, flag_a: 0x1A8, flag_b: 0x1A9 },
         hero_body: { physics: 0x20 },
