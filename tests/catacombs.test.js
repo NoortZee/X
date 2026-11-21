@@ -1407,3 +1407,19 @@ test('level census records surviving Candy by rarity during active phase without
     assert.equal(f.rpc.status().level_census.samples.length,2);
     assert.equal(f.writes.length,before);
 });
+
+test('sequence probe captures bounded payload prefix read-only and survives unreadable payload',()=>{
+    const f=sequenceFixture();f.install();
+    f.memory.set(0x10D8,0xAA);f.memory.set(0x10D9,0xBB);
+    const before=f.writes.length;f.invoke();
+    const s=f.rpc.report().sequence_probe.snapshots[0];
+    assert.equal(s.payload_prefix.length,128);
+    assert.ok(s.payload_prefix.bytes.startsWith('aa bb 00'));
+    assert.equal(f.writes.length,before);
+    // Payload outside any mapped range: capture still succeeds, prefix reports the error only.
+    f.c.Process.findRangeByAddress=()=>null;
+    f.force();f.invoke(0x9999);
+    const last=f.rpc.report().sequence_probe.snapshots.at(-1);
+    assert.match(last.payload_prefix.error,/not readable/);
+    assert.ok(last.owner.error); // payload prefix is captured even when ownership is not corroborated
+});

@@ -1759,12 +1759,23 @@ function levelSummary(state) {
     if(sequenceSummaryCache.size>8)sequenceSummaryCache.delete(sequenceSummaryCache.keys().next().value);
     return out;
 }
+function sequencePayloadPrefix(payload) {
+    // Bounded read-only prefix; the payload layout itself is not interpreted here.
+    const S=C.sequence_probe,r=Process.findRangeByAddress(payload);
+    if(!r || !r.protection.includes('r'))throw new Error('payload not readable');
+    const available=Number(r.base.add(r.size).sub(payload).toString()),length=Math.min(S.payload_bytes,available);
+    if(!Number.isSafeInteger(length)||length<S.payload_bytes)throw new Error('payload range shorter than requested prefix');
+    const bytes=Array.from(new Uint8Array(payload.readByteArray(length)));
+    return {length,read_only:true,bytes:bytes.map(b=>b.toString(16).padStart(2,'0')).join(' '),
+        note:'Raw payload prefix at builder entry; field meanings are not inferred. Compare ordinary vs modified runs byte by byte.'};
+}
 function captureSequenceInput(args,caller) {
     const S=C.sequence_probe;
     const lowS32=p=>Number(BigInt(p.toString())&0xffffffffn)|0;
     const out={time:Date.now(),caller:address(caller),action_arg:lowS32(args[2]),
         separate_int_arg:lowS32(args[4]),payload:args[1].toString(),counts_container:args[3].toString(),
-        read_only:true,all_gold:{active:allGoldStatus.active,mode:allGoldStatus.mode||null,converted:allGoldStatus.converted},
+        read_only:true,payload_prefix:safe(()=>sequencePayloadPrefix(args[1])),
+        all_gold:{active:allGoldStatus.active,mode:allGoldStatus.mode||null,converted:allGoldStatus.converted},
         spawn_mode:goldCycle?{active:goldCycle.active,reuse_collected_id:!!goldCycle.reuse_collected_id,registered:goldCycle.registered}:null};
     // Derive ownership only from the actual builder argument, never cached latest-state pointers.
     const state=args[3].add(-S.state_counts);
