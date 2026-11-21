@@ -8,6 +8,11 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(improper_ctypes)]
+// bindgen declares libc entry points with u64 sizes on all targets; the ABI matches
+// size_t on the 64-bit targets we build for. Allow the lint, and the lint's own
+// unknown-ness on compilers older than the lint itself.
+#![allow(unknown_lints)]
+#![allow(suspicious_runtime_symbol_definitions)]
 
 #[allow(clippy::all)]
 mod bindings {

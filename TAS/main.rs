@@ -1,3 +1,6 @@
+// Keep `cargo build` output free of the remaining lint noise; anything that is
+// genuinely unused is rejected explicitly instead of printed as a warning.
+#![allow(dead_code)]
 #[path = "../catacombs/mod.rs"]
 mod catacombs;
 mod config;

@@ -44,8 +44,12 @@ const PRINT_TYPES: &[&str] = &[
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct JumpLogEntry {
+    /// Monotonic jump counter from the agent; kept for diagnostics/log correlation.
+    #[allow(dead_code)]
     pub idx: u64,
     pub frame: i64,
+    /// Agent wall-clock timestamp of the jump; kept for latency analysis.
+    #[allow(dead_code)]
     #[serde(default)]
     pub t: i64,
 }
