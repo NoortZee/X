@@ -1274,9 +1274,29 @@ function convertGoldDescriptor(entry,m) {
     }
     mutationAttempted=true;return record;
 }
+function allGoldLimit(limit) {
+    // Default is the authored count: converting more than the level provides is rejected by the server.
+    if(limit===undefined||limit===null) return authGoldCount();
+    if(!Number.isInteger(limit)||limit<0) throw new Error('all-gold limit must be a non-negative integer');
+    return limit;
+}
+function authGoldCount() {
+    for(let i=levelCensuses.length-1;i>=0;i--) {
+        const counts=levelCensuses[i].surviving_by_rarity;
+        const gold=counts&&counts[C.all_gold.key];
+        if(Number.isInteger(gold))return gold;
+    }
+    for(let i=sequenceProbe.snapshots.length-1;i>=0;i--) {
+        const inventory=sequenceProbe.snapshots[i].level&&sequenceProbe.snapshots[i].level.inventory;
+        if(!inventory||inventory.error||!inventory.rarity_by_key)continue;
+        const gold=inventory.rarity_by_key[C.all_gold.key];
+        if(Number.isInteger(gold))return gold;
+    }
+    throw new Error('authored gold count unknown; enter a level first or pass an explicit limit');
+}
 function enableAllGold(limit) {
     if(!enabled) throw new Error('start module first');
-    if(limit!==undefined && (!Number.isInteger(limit)||limit<0)) throw new Error('all-gold limit must be a non-negative integer');
+    limit=allGoldLimit(limit);
     if(allGoldHook) return {...allGoldStatus};
     if(pendingGold || (goldCycle && goldCycle.active)) throw new Error('stop experimental spawn series first');
     const m=Process.findModuleByName(MEMORY_LAYOUT.module_name),G=C.all_gold;
@@ -1286,8 +1306,8 @@ function enableAllGold(limit) {
     const bytes=new Uint8Array(target.readByteArray(G.signature.length));
     if(!G.signature.every((v,i)=>bytes[i]===v))throw new Error('all-gold descriptor signature mismatch');
     allGoldStatus={active:true,mode:'descriptor_before_native_creation',converted:0,seen:0,skipped_caller:0,records:[],
-        limit:Number.isInteger(limit)?limit:null,
-        note:'Original Candy descriptor rarity key/lookup flag changed before creation; IDs/counts unchanged. Finish unconfirmed.'};
+        limit,
+        note:'Converts up to the authored gold count only; IDs/counts unchanged. Live-confirmed: staying within the authored set avoids error11.'};
     try {
         allGoldHook=Interceptor.attach(target,{onEnter(args) {
             if(!enabled || !allGoldStatus.active)return;

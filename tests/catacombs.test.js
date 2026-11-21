@@ -1266,8 +1266,10 @@ test('reuse cycle refuses missing collected ID before enabling series or native 
     assert.equal(f.rpc.status().spawn_cycle,null);assert.equal(f.calls.length,0);
 });
 
-function descriptorGoldFixture() {
+function descriptorGoldFixture(authoredGold=3) {
     const f=goldFixture();const G=vm.runInContext('C.all_gold',f.c);
+    // Authored gold count is now the default cap; seed it like a live census would.
+    vm.runInContext(`levelCensuses=[{time:Date.now(),state:'0x1000',surviving_total:10,surviving_by_rarity:{1:5,2:1,3:1,4:${authoredGold}}}]`,f.c);
     G.signature.forEach((v,i)=>f.memory.set(0x100000+G.descriptor_factory+i,v));
     f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'rwx'});
     for(const [p,v] of [[0x100000+G.rarity_map+8,0x80000],[0x8001C,4],[0x80020,4],
@@ -1604,5 +1606,23 @@ test('all-gold accepts an explicit conversion cap and stops converting at it',()
     assert.equal(f.memory.get(0x90044),1); // untouched beyond the cap
     assert.equal(f.rpc.status().all_gold.active,true); // mode stays on, just stops converting
     assert.throws(()=>f.rpc.allGold(-1),/non-negative/);
-    const g=descriptorGoldFixture();assert.equal(g.rpc.allGold().limit,null); // uncapped by default
+    // Default cap is the authored gold count from the census, not unlimited.
+    const g=descriptorGoldFixture(5);assert.equal(g.rpc.allGold().limit,5);
+});
+
+test('all-gold default cap follows the authored gold count and refuses when unknown',()=>{
+    const f=descriptorGoldFixture(3);
+    assert.equal(f.rpc.allGold().limit,3);
+    // Census wins over nothing; snapshots are the fallback when no census sample exists.
+    const g=goldFixture();
+    vm.runInContext(`levelCensuses=[];sequenceProbe.snapshots=[{level:{inventory:{rarity_by_key:{'4':7}}}}]`,g.c);
+    g.c.Process.findRangeByAddress=()=>({base:g.pointer(0),size:0x4000000,protection:'rwx'});
+    const G=vm.runInContext('C.all_gold',g.c);
+    G.signature.forEach((v,i)=>g.memory.set(0x100000+G.descriptor_factory+i,v));
+    g.c.Interceptor.attach=()=>({detach(){}});g.c.Interceptor.flush=()=>{};
+    assert.equal(vm.runInContext('allGoldLimit(undefined)',g.c),7);
+    // Unknown authored count must fail closed instead of silently converting everything.
+    vm.runInContext('sequenceProbe.snapshots=[]',g.c);
+    assert.throws(()=>vm.runInContext('allGoldLimit(undefined)',g.c),/authored gold count unknown/);
+    assert.equal(vm.runInContext('allGoldLimit(0)',g.c),0); // explicit override still allowed
 });
