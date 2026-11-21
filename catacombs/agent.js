@@ -1252,6 +1252,9 @@ function allGoldRarityValue(m) {
 function convertGoldDescriptor(entry,m) {
     const G=C.all_gold;
     if(entry.isNull() || entry.add(0x48).readS32()!==G.type) return null;
+    // Bounded experiment: stop converting once the explicit cap is reached.
+    const cap=allGoldStatus.limit;
+    if(Number.isInteger(cap) && cap>=0 && allGoldStatus.converted>=cap) return null;
     const id=entry.add(0x20).readS32();if(id<0)return null;
     allGoldRarityValue(m); // Resolve actual runtime map entry, never assume key==value or use sentinel.
     const flags=entry.add(G.flags).readS32(),key=entry.add(G.rarity_key).readS32();
@@ -1271,8 +1274,9 @@ function convertGoldDescriptor(entry,m) {
     }
     mutationAttempted=true;return record;
 }
-function enableAllGold() {
+function enableAllGold(limit) {
     if(!enabled) throw new Error('start module first');
+    if(limit!==undefined && (!Number.isInteger(limit)||limit<0)) throw new Error('all-gold limit must be a non-negative integer');
     if(allGoldHook) return {...allGoldStatus};
     if(pendingGold || (goldCycle && goldCycle.active)) throw new Error('stop experimental spawn series first');
     const m=Process.findModuleByName(MEMORY_LAYOUT.module_name),G=C.all_gold;
@@ -1282,6 +1286,7 @@ function enableAllGold() {
     const bytes=new Uint8Array(target.readByteArray(G.signature.length));
     if(!G.signature.every((v,i)=>bytes[i]===v))throw new Error('all-gold descriptor signature mismatch');
     allGoldStatus={active:true,mode:'descriptor_before_native_creation',converted:0,seen:0,skipped_caller:0,records:[],
+        limit:Number.isInteger(limit)?limit:null,
         note:'Original Candy descriptor rarity key/lookup flag changed before creation; IDs/counts unchanged. Finish unconfirmed.'};
     try {
         allGoldHook=Interceptor.attach(target,{onEnter(args) {

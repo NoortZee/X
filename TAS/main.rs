@@ -32,7 +32,7 @@ const MENU: &str = r#"
   play                only play
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
-  catacombs start|status|dump|mark <label>|move-white|teleport-white|above|return-height|spawn-probe|spawn-gold|spawn-gold-cycle|spawn-gold-stop|spawn-gold-reuse|spawn-gold-reuse-cycle|all-gold|all-gold-off|stop
+  catacombs start|status|dump|mark <label>|move-white|teleport-white|above|return-height|spawn-probe|spawn-gold|spawn-gold-cycle|spawn-gold-stop|spawn-gold-reuse|spawn-gold-reuse-cycle|all-gold [limit]|all-gold-off|stop
   stones <filter>     rival stones live + burst-skip (см. help)
   help                справка по stones
   clear               wipe console + delete replay.json
