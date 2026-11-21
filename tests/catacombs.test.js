@@ -1317,3 +1317,40 @@ test('all-gold rejects readonly descriptor without mutation',()=>{
     assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
     assert.match(f.rpc.status().all_gold.error,/not writable/);
 });
+
+function sequenceFixture() {
+    const f=goldFixture();const S=vm.runInContext('C.sequence_probe',f.c);
+    S.signature.forEach((v,i)=>f.memory.set(0x100000+S.builder+i,v));
+    for(const [p,v]of [[0x1150,0x90000],[0x1158,2],[0x90000,0],[0x90008,0x91000],[0x9001C,1],[0x90020,11],
+        [0x91000,0],[0x91008,0],[0x9101C,4],[0x91020,3]])f.memory.set(p,v);
+    let callback,detached=0;
+    f.c.Interceptor.attach=(address,cb)=>{assert.equal(address.n,0x100000+S.builder);callback=cb;return {detach(){detached++;}};};
+    f.c.Interceptor.flush=()=>{};f.c.sequenceModule={base:f.pointer(0x100000),size:0x3000000};
+    return {...f,S,install(){vm.runInContext('installSequenceProbe(sequenceModule)',f.c);},
+        invoke(payload=0x10D8){callback.onEnter.call({returnAddress:f.pointer(0x100000+0x14D78E9)},
+            [f.pointer(0x80000),f.pointer(payload),f.pointer(1),f.pointer(0x1148),f.pointer(7),f.pointer(0)]);},detached:()=>detached};
+}
+test('sequence probe captures read-only builder input type/count pairs and actual argument ownership',()=>{
+    const f=sequenceFixture();f.install();const before=f.writes.length;f.invoke();
+    const p=f.rpc.report().sequence_probe;assert.equal(p.status,'listening');assert.equal(p.calls,1);
+    const s=p.snapshots[0];assert.equal(s.owner.state,'0x1000');assert.equal(s.action_arg,1);
+    assert.equal(s.separate_int_arg,7);assert.equal(s.counts.positive_count_sum,14);
+    assert.equal(s.counts.entries[0].key,1);assert.equal(s.counts.entries[0].count,11);
+    assert.equal(s.counts.entries[1].key,4);assert.equal(s.counts.entries[1].count,3);
+    assert.equal(f.writes.length,before);assert.equal(f.calls.length,0);
+});
+test('sequence probe bounds snapshots, skips mismatched payload, retains evidence on stop',()=>{
+    const f=sequenceFixture();f.install();for(let i=0;i<40;i++)f.invoke();
+    f.invoke(0x9999);let p=f.rpc.status().sequence_probe;
+    assert.equal(p.snapshots.length,32);assert.equal(p.skipped,1);
+    assert.equal(p.snapshots.at(-1).counts,undefined);f.rpc.stop();
+    p=f.rpc.report().sequence_probe;assert.equal(p.status,'stopped');assert.equal(f.detached(),1);
+    assert.equal(p.snapshots.length,32);
+});
+test('sequence probe rejects signature mismatch and safely reports cyclic count tree',()=>{
+    const f=sequenceFixture();f.memory.set(0x100000+f.S.builder,0x90);f.install();
+    assert.equal(f.rpc.status().sequence_probe.status,'unavailable');
+    const g=sequenceFixture();g.install();g.memory.set(0x91008,0x90000);g.invoke();
+    assert.match(g.rpc.report().sequence_probe.snapshots[0].counts.error,/cycle/);
+    g.memory.set(0x1158,65);g.invoke();assert.match(g.rpc.report().sequence_probe.snapshots.at(-1).counts.error,/budget/);
+});

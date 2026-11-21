@@ -1663,8 +1663,72 @@ function requestMove(mode = 'visual') {
     event('move_white_queued', pendingMove);
     return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
 }
-function stop() { stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+let sequenceProbeHook=null;
+let sequenceProbe={status:'not_installed',read_only:true,calls:0,skipped:0,snapshots:[]};
+function sequenceCounts(container) {
+    const S=C.sequence_probe,declared=safeU64(container.add(0x10));
+    if(declared>S.nodes)throw new Error('sequence count tree node budget exceeded');
+    const root=container.add(8).readPointer(),stack=[root],seen=new Set(),entries=[];
+    while(stack.length) {
+        const node=stack.pop();if(node.isNull())continue;
+        if(seen.has(node.toString()))throw new Error('sequence count tree cycle/shared node');
+        if(seen.size>=S.nodes)throw new Error('sequence count tree traversal budget exceeded');
+        seen.add(node.toString());
+        const key=node.add(0x1C).readS32(),count=node.add(0x20).readS32();
+        entries.push({key,count,builder_includes:key!==0&&count>0});
+        stack.push(node.readPointer(),node.add(8).readPointer());
+    }
+    entries.sort((a,b)=>a.key-b.key);
+    return {declared_nodes:declared,observed_nodes:entries.length,node_count_matches:declared===entries.length,
+        entries,positive_count_sum:entries.filter(e=>e.builder_includes).reduce((n,e)=>n+e.count,0),
+        note:'Input counters before builder type mapping, not serialized wire bytes or server validation.'};
+}
+function captureSequenceInput(args,caller) {
+    const S=C.sequence_probe;
+    const lowS32=p=>Number(BigInt(p.toString())&0xffffffffn)|0;
+    const out={time:Date.now(),caller:address(caller),action_arg:lowS32(args[2]),
+        separate_int_arg:lowS32(args[4]),payload:args[1].toString(),counts_container:args[3].toString(),
+        read_only:true,all_gold:{active:allGoldStatus.active,mode:allGoldStatus.mode||null,converted:allGoldStatus.converted},
+        spawn_mode:goldCycle?{active:goldCycle.active,reuse_collected_id:!!goldCycle.reuse_collected_id,registered:goldCycle.registered}:null};
+    // Derive ownership only from the actual builder argument, never cached latest-state pointers.
+    const state=args[3].add(-S.state_counts);
+    const owner=safe(()=>{requireClass(state,C.move_white.state_name);
+        if(state.add(S.state_payload).toString()!==args[1].toString())throw new Error('payload/counts state mismatch');
+        return {state:state.toString(),phase:state.add(S.state_phase).readS32(),paused:state.add(C.state.paused).readU8()};});
+    out.owner=owner;
+    if(owner.error) {out.counts_skipped='builder arguments not corroborated as current state fields';return out;}
+    out.counts=safe(()=>sequenceCounts(args[3]));
+    return out;
+}
+function stopSequenceProbe() {
+    if(sequenceProbeHook) {sequenceProbeHook.detach();sequenceProbeHook=null;Interceptor.flush();}
+    if(sequenceProbe.status==='listening')sequenceProbe.status='stopped';
+}
+function installSequenceProbe(m) {
+    const S=C.sequence_probe;
+    sequenceProbe={status:'checking',read_only:true,calls:0,skipped:0,snapshots:[]};
+    try {
+        if(S.builder<0 || S.builder+S.signature.length>m.size)throw new Error('sequence builder outside module');
+        const target=m.base.add(S.builder),range=Process.findRangeByAddress(target);
+        if(!range || !range.protection.includes('r') || !range.protection.includes('x') ||
+            Number(range.base.add(range.size).sub(target).toString())<S.signature.length)throw new Error('sequence builder not readable executable');
+        const bytes=new Uint8Array(target.readByteArray(S.signature.length));
+        if(!S.signature.every((v,i)=>bytes[i]===v))throw new Error('sequence builder signature mismatch');
+        sequenceProbeHook=Interceptor.attach(target,{onEnter(args) {
+            if(!enabled)return;
+            sequenceProbe.calls++;
+            try {
+                const snapshot=captureSequenceInput(args,this.returnAddress);
+                if(snapshot.owner.error)sequenceProbe.skipped++;
+                sequenceProbe.snapshots.push(snapshot);
+                if(sequenceProbe.snapshots.length>S.snapshots)sequenceProbe.snapshots.shift();
+            } catch(e) {sequenceProbe.last_error={time:Date.now(),error:String(e)};}
+        }});
+        sequenceProbe.status='listening';
+    } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
+}
+function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { sequence_probe: sequenceProbe, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
@@ -1711,6 +1775,7 @@ function install() {
             else if (!(goldCycle && goldCycle.active)) autoTeleport(this.updateState);
         } });
         installAttachObserver(m);
+        installSequenceProbe(m);
         enabled = true; event('enabled', { diagnostic_only: true });
     } catch (e) { stop(); error = String(e); throw e; }
     return status();

@@ -445,3 +445,9 @@
 - Original IDs/counts/positions and unrelated flags preserved, no extra items/direct reward or network writes. Bounded runtime lookup, writable/readback guards, immediate field rollback on interrupted write; failure disables conversion.
 - Bounded dump old/new key/flags and mode. Stop/off detach but do not undo run; finish/server error still unconfirmed. JS/map-only, no Rust rebuild, README unchanged.
 -117 Node mock tests including correct descriptor changes, mapping failures, non-Candy/retired skip, unknown caller, write rollback/read-only refusal; syntax/diff checks. No live runtime here.
+
+## Read-only sequence builder input probe
+
+- Automatic guarded E54DA0 onEnter capture: actual action/int args, verified state ownership/phase, all-gold/spawn mode and input count-tree {key,count}. No request/response/counter writes, native calls or error suppression.
+- Root/container offsets corrected, bounded64-node traversal/cycle detection and32 retained snapshots independently of events. Unavailable signatures/read errors visible without breaking ordinary mode. Stop retains evidence, next install resets.
+- A/B finish dumps documented, counters explicitly before protocol mapping (not full payload/wire/server response).120 Node mock tests incl read-only capture, ownership mismatch, bounds/cycles/signature refusal/retention and stop; syntax/diff checks. JS/map-only, Rust/README untouched.
