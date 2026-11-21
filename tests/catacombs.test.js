@@ -1423,3 +1423,44 @@ test('sequence probe captures bounded payload prefix read-only and survives unre
     assert.match(last.payload_prefix.error,/not readable/);
     assert.ok(last.owner.error); // payload prefix is captured even when ownership is not corroborated
 });
+
+function surveyFixture() {
+    const f=sequenceFixture();
+    const M=vm.runInContext('C.manager_survey',f.c);
+    f.identity(0x30000,0x31000,0x32000,0x33000,'N11EndlessMaze7ManagerE');
+    const d=i=>0x40000+i*0x50;
+    f.memory.set(0x30078,0x40000);f.memory.set(0x30080,0x40000+4*0x50);
+    for(let i=0;i<4;i++)for(const [off,v] of [[0x11,0],[0x20,0],[0x44,1],[0x48,0x2D]])f.memory.set(d(i)+off,v);
+    f.memory.set(d(0)+0x11,0x3F);f.memory.set(d(0)+0x20,7);
+    f.memory.set(d(2)+0x44,4);f.memory.set(d(2)+0x20,9);
+    f.memory.set(d(3)+0x44,2);
+    return {...f,M};
+}
+test('manager survey reads authored descriptor rarity histogram by explicit address only',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    assert.match(f.rpc.managerSurvey().error,/address required/);
+    const r=f.rpc.managerSurvey('0x30000');
+    assert.equal(r.status,'found');assert.equal(r.last.count,4);
+    assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
+    assert.equal(r.last.gold_descriptors,1);assert.equal(r.last.candy_total,4);
+    assert.equal(r.last.candies.find(c=>c.rarity===4).descriptor_id,9);
+    assert.equal(r.last.read_only,true);
+    assert.equal(f.writes.length,0); // survey never writes
+});
+test('manager survey refuses wrong class, bad vector bounds and budget without writes',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    f.identity(0x30000,0x31000,0x32000,0x33000,'20EndlessMazePlayState');
+    assert.match(f.rpc.managerSurvey('0x30000').error,/unexpected class/);
+    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));g.memory.set(0x30080,0x40000+0x50*3+8);
+    assert.match(g.rpc.managerSurvey('0x30000').error,/bounds/);
+    const h=surveyFixture();h.c.ptr=n=>h.pointer(Number(n));h.memory.set(0x30080,0x40000+h.M.stride*(h.M.max_descriptors+1));
+    assert.match(h.rpc.managerSurvey('0x30000').error,/budget/);
+    for(const x of [f,g,h])assert.equal(x.writes.length,0);
+});
+test('mark survey ADDRESS routes to the survey instead of a plain label mark',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    const r=f.rpc.mark('survey 0x30000');
+    assert.equal(r.mark,true);assert.equal(r.survey.last.gold_descriptors,1);
+    assert.ok(f.rpc.mark('picked golden').events_retained>=1); // plain label still marks
+    assert.equal(f.rpc.report().events.some(e=>e.kind==='user_mark'&&e.label==='picked golden'),true);
+});
