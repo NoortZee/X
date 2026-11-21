@@ -1354,3 +1354,35 @@ test('sequence probe rejects signature mismatch and safely reports cyclic count 
     assert.match(g.rpc.report().sequence_probe.snapshots[0].counts.error,/cycle/);
     g.memory.set(0x1158,65);g.invoke();assert.match(g.rpc.report().sequence_probe.snapshots.at(-1).counts.error,/budget/);
 });
+
+test('sequence probe census lists Candy by rarity from the pickup record column read-only',()=>{
+    const f=sequenceFixture();f.install();
+    // state+0x128 column tree: node key0x20=0x128, vector at 0x28/0x30, stride0x50.
+    for(const [p,v]of [[0x1128,0x92000],[0x92000,0],[0x92008,0],[0x92020,0x128],[0x92028,0xA0000],[0x92030,0xA0190],
+        [0xA0010,7],[0xA0020,11],[0xA0044,1],[0xA0048,0x2D],
+        [0xA0060,7],[0xA0070,12],[0xA0094,1],[0xA0098,0x2E],
+        [0xA00B0,7],[0xA00C0,13],[0xA00E4,4],[0xA00E8,0x2D],
+        [0xA0100,7],[0xA0110,14],[0xA0134,4],[0xA0138,0x2D],
+        [0xA0150,7],[0xA0160,15],[0xA0184,4],[0xA0188,0x2D]])f.memory.set(p,v);
+    const before=f.writes.length;f.invoke();
+    const s=f.rpc.report().sequence_probe.snapshots[0];
+    assert.equal(s.level.columns['0x128'].present,true);
+    assert.deepEqual({...s.level.inventory.rarity_by_key},{1:1,4:3});
+    assert.equal(s.level.inventory.candy_total,4);
+    assert.equal(s.level.inventory.sample_records.length,4);
+    assert.equal(s.level.inventory.sample_records[0].key,0x128);
+    assert.equal(s.level.inventory.note.includes('not a server-authoritative'),true);
+    assert.equal(f.writes.length,before); // census performs no writes
+    f.invoke();assert.equal(f.rpc.status().sequence_probe.snapshots.length,2);
+    const t=f.rpc.status().sequence_probe.snapshots;
+    assert.equal(t[0].level.inventory.time,t[1].level.inventory.time); // bounded rescan cache, no extra reads
+});
+test('sequence probe census fails closed on malformed record vectors without breaking capture',()=>{
+    const f=sequenceFixture();f.install();
+    for(const [p,v]of [[0x1128,0x92000],[0x92000,0],[0x92008,0],[0x92020,0x128],[0x92028,0xA0000],[0x92030,0xA0010]])f.memory.set(p,v);
+    f.invoke();assert.match(f.rpc.report().sequence_probe.snapshots[0].level.inventory.error,/vector bounds/);
+    f.memory.set(0x92028,0xA0000);f.memory.set(0x92030,0xA0000+0x50*1025);
+    f.invoke();assert.match(f.rpc.report().sequence_probe.snapshots.at(-1).level.inventory.error,/budget/);
+    assert.deepEqual({...f.rpc.report().sequence_probe.snapshots.at(-1).level.inventory.rarity_by_key},{});
+    f.rpc.stop();assert.equal(f.rpc.report().sequence_probe.snapshots.length,2);
+});
