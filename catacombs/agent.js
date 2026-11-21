@@ -1809,12 +1809,25 @@ function locateManagerUnsafe() {
     // Bounded read-only search: heap objects whose vptr is the EndlessMaze::Manager vtable.
     const M=C.manager_survey,m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
     if(!m)throw new Error('game module missing');
-    const vtable=m.base.add(M.vtable);
-    // The vtable is not an object: its typeinfo pointer sits at vtable-8 (Itanium ABI).
-    const vtableName=safe(()=>nameAt(vtable.add(-Process.pointerSize).readPointer().add(C.rtti.name).readPointer()));
-    if(!vtableName||vtableName.error)throw new Error('manager vtable typeinfo not readable');
-    if(!String(vtableName).includes(M.rtti_needle))
-        throw new Error('vtable RVA does not belong to '+M.rtti_needle+' (found '+vtableName+')');
+    const symbol=m.base.add(M.vtable);
+    // Itanium ABI: the symbol RVA may point at the vtable header (offset-to-top, typeinfo).
+    // The runtime vptr then equals symbol+2 pointers, where typeinfo sits at vptr-8.
+    const candidates=[{offset:0,label:'runtime vptr at RVA'},
+                      {offset:2*Process.pointerSize,label:'runtime vptr after 16-byte vtable header'}];
+    const checked=[];
+    let vtable=null,vtableRva=null;
+    for(const candidate of candidates) {
+        const pointer=symbol.add(candidate.offset);
+        const name=safe(()=>nameAt(pointer.add(-Process.pointerSize).readPointer().add(C.rtti.name).readPointer()));
+        checked.push({rva:pointer.sub(m.base).toString(),layout:candidate.label,
+            typeinfo:safe(()=>pointer.add(-Process.pointerSize).readPointer().toString()),
+            name:name&&name.error?undefined:name,error:name&&name.error?String(name.error):undefined});
+        if(name&&!name.error&&String(name).includes(M.rtti_needle)) {vtable=pointer;vtableRva=pointer.sub(m.base);break;}
+    }
+    managerLocate.vtable_candidates=checked;
+    if(!vtable)throw new Error('no vptr layout at RVA '+M.vtable.toString(16)+' belongs to '+M.rtti_needle+
+        ' (checked: '+checked.map(c=>c.layout+' -> '+(c.name||c.error)).join('; ')+')');
+    managerLocate.vtable_rva=vtableRva.toString();
     const ranges=Process.enumerateRanges('rw-');
     if(ranges.length>M.scan_max_ranges)throw new Error('too many memory ranges to scan');
     // Scan pattern is the little-endian pointer bytes, not a text address.
@@ -1845,8 +1858,8 @@ function locateManagerUnsafe() {
             gold:probe.gold_descriptors,total:probe.candy_total});
     }
     managerLocate={status:verified.length?'found':'unavailable',read_only:true,scanned_bytes:scanned,
-        vtable:vtable.toString(),candidates:matches.length,verified,
-        time:Date.now()};
+        vtable:vtable.toString(),vtable_rva:vtableRva.toString(),vtable_candidates:checked,
+        candidates:matches.length,verified,time:Date.now()};
     if(!verified.length)managerLocate.error='no verified '+M.rtti_needle+' object with a readable descriptor vector';
     if(verified.length===1)managerLocate.chosen=verified[0].object;
     return managerLocate;
