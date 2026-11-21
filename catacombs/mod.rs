@@ -46,18 +46,18 @@ impl<'a> CatacombsModule<'a> {
             if words.next().is_some() || (!speed_text.is_empty() && !speed_text.chars().all(|c| c.is_ascii_digit())) {
                 return Err(format!("only a speed 1..10 is accepted, got {argument:?}").into());
             }
-            {
-                let speed: u32 = if speed_text.is_empty() { 1 }
-                    else { speed_text.parse().map_err(|_| format!("speed must be an integer 1..10, got {speed_text:?}"))? };
-                if !(1..=10).contains(&speed) { return Err(format!("speed must be 1..10, got {speed}").into()); }
-                self.ensure_loaded()?;
-                let Some(script) = self.script.as_mut() else {
-                    println!("catacombs: start first"); return Ok(());
-                };
-                let value = script.exports.call_cancellable("start", Some(serde_json::json!([speed])),
-                    Duration::from_secs(30), || aborted.load(Ordering::SeqCst))?;
-                println!("catacombs: {}", summary(&value, Some(speed)));
-            }
+            let speed: u32 = if speed_text.is_empty() { 1 }
+                else { speed_text.parse().map_err(|_| format!("speed must be an integer 1..10, got {speed_text:?}"))? };
+            if !(1..=10).contains(&speed) { return Err(format!("speed must be 1..10, got {speed}").into()); }
+            self.ensure_loaded()?;
+            let Some(script) = self.script.as_mut() else {
+                println!("catacombs: not loaded"); return Ok(());
+            };
+            let value: serde_json::Value = script.exports
+                .call_cancellable("start", Some(serde_json::json!([speed])),
+                    Duration::from_secs(30), || aborted.load(Ordering::SeqCst))?
+                .unwrap_or(serde_json::Value::Null);
+            println!("catacombs: {}", summary(&value, Some(speed)));
         }
         Ok(())
     }
@@ -79,4 +79,23 @@ impl<'a> CatacombsModule<'a> {
 }
 impl Drop for CatacombsModule<'_> {
     fn drop(&mut self) { self.stop(); }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summary;
+
+    #[test]
+    fn summary_reports_requested_speed_and_phase() {
+        let value = serde_json::json!({"enabled": true, "speed": {"requested": 5, "status": "applied"},
+            "latest": {"phase_raw": 1}});
+        assert_eq!(summary(&value, None), "speed=5 (applied) enabled=true phase=1");
+    }
+
+    #[test]
+    fn summary_falls_back_to_the_requested_value_and_tolerates_missing_payload() {
+        // A null RPC reply must not panic, and the requested speed is still shown.
+        assert_eq!(summary(&serde_json::Value::Null, Some(7)),
+            "speed=7 enabled=false phase=null");
+    }
 }
