@@ -1138,3 +1138,21 @@ test('full registration preflight refuses missing native signatures and cycle co
     assert.throws(()=>vm.runInContext('originalFullGoldPlan(testState,testArray)',f.c),/full spawn signature/);
     assert.equal(f.calls.length,n);assert.throws(()=>f.rpc.spawnGoldCycle(),/single-shot only/);
 });
+
+test('gold may be armed before a level and waits for active phase before one native attempt',()=>{
+    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();
+    const r=f.rpc.spawnGold();assert.equal(r.armed_for_next_level,true);
+    f.leave();assert.equal(f.calls.length,0);assert.ok(f.rpc.status().spawn_gold_pending);
+    f.memory.set(0x1138,1);f.force();f.tick();f.leave();
+    assert.equal(f.rpc.status().last_spawn_gold.success,true);
+    assert.equal(f.calls.filter(x=>x==='factory').length,1);
+    assert.equal(f.rpc.status().spawn_gold_pending,null);
+});
+test('armed spawn waits only for absent template, expires or cancels without factory',()=>{
+    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();f.rpc.spawnGold();
+    vm.runInContext("fullGoldPlan=()=>{throw Error('no live uncollected gold with verified callback/column record');}",f.c);
+    f.memory.set(0x1138,1);f.force();f.tick();f.leave();
+    assert.equal(f.rpc.status().last_spawn_gold.waiting_for_template,true);assert.equal(f.calls.length,0);
+    vm.runInContext('pendingGold.deadline=0',f.c);f.leave();
+    assert.equal(f.rpc.status().spawn_gold_pending,null);assert.equal(f.calls.length,0);
+});

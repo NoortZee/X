@@ -1181,11 +1181,13 @@ function tickGoldCycle(state) {
     goldCycle.next = Date.now() + goldCycle.interval_ms;
 }
 function requestGold() {
-    if (!enabled || !latest || latest.phase_raw !== 1 || Date.now() - latest.time > C.spawn_gold.expiry_ms)
-        throw new Error('enter active Catacombs first');
+    if (!enabled) throw new Error('start module first');
     if (goldCycle || goldAttempted || pendingGold) throw new Error('one spawn attempt per module; inspect dump before restarting');
-    pendingGold = { state: latest.state.address, time: Date.now() };
-    return { queued: true, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
+    const armed = !latest || latest.phase_raw !== 1;
+    if (!armed && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
+    pendingGold = { state: armed ? null : latest.state.address, time: Date.now(), armed,
+        deadline: Date.now() + (armed ? 60000 : C.spawn_gold.expiry_ms) };
+    return { queued: true, armed_for_next_level: armed, timeout_ms: armed ? 60000 : C.spawn_gold.expiry_ms, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
 }
 function fullGoldPlan(state, array68) {
     const a=goldArrayContext(state),m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
@@ -1282,10 +1284,19 @@ function completeGoldRegistration(plan,state,object,body,assign,result) {
 }
 function performGold(state) {
     if (!pendingGold) return;
-    const request = pendingGold; pendingGold = null;
+    const request = pendingGold;
+    if(request.armed && Date.now()<=request.deadline) {
+        if(request.state && request.state!==state.toString()) {
+            pendingGold=null;goldResult={success:false,native_started:false,error:'armed spawn state changed'};return;
+        }
+        if(state.add(C.state.phase).readS32()!==1 || state.add(C.state.paused).readU8()!==0) return;
+        if(request.next_check && Date.now()<request.next_check) return;
+        request.state=state.toString();request.next_check=Date.now()+250;
+    }
+    pendingGold = null;
     const result = { time: Date.now(), success: false, collection_confirmed: false, rarity: 4, native_started: false };
     try {
-        if (request.state !== state.toString() || Date.now() - request.time > C.spawn_gold.expiry_ms) throw new Error('spawn request stale/state changed');
+        if (request.state !== state.toString() || Date.now() > (request.deadline || request.time+C.spawn_gold.expiry_ms)) throw new Error('spawn request stale/state changed');
         requireClass(state, C.move_white.state_name);
         if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0) throw new Error('run not active');
         const context = heroMaskContext(state), S = C.spawn_probe, G = C.spawn_gold;
@@ -1372,6 +1383,10 @@ function performGold(state) {
         result.note = 'Full registration experiment: new ID, column record, copied lambda and both containers. HUD credit still unconfirmed.';
     } catch (e) {
         result.error = String(e);
+        if(request.armed && !result.native_started && Date.now()<request.deadline &&
+            result.error.includes('no live uncollected gold with verified callback/column record')) {
+            pendingGold=request;goldResult={...result,waiting_for_template:true};return;
+        }
         if (result.native_started) result.warning = 'native spawn started; possible partial/orphan object. No guessed destructor, rollback or retry; restart game after failure.';
     }
     goldResult = result; event('spawn_gold_result',result);
