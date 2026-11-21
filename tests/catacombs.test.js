@@ -1592,3 +1592,17 @@ test('manager location skips vanished heap ranges and still confirms the manager
     const bad=g.rpc.locateManager();
     assert.equal(bad.status,'unavailable');assert.ok(bad.error);
 });
+
+test('all-gold accepts an explicit conversion cap and stops converting at it',()=>{
+    const f=descriptorGoldFixture();
+    const r=f.rpc.allGold(2);
+    assert.equal(r.active,true);assert.equal(r.limit,2);
+    // Same descriptor converted repeatedly still counts once; the cap gates further conversions.
+    f.enter();assert.equal(f.rpc.status().all_gold.converted,1);assert.equal(f.rpc.status().all_gold.limit,2);
+    f.memory.set(0x90044,1);f.enter(undefined);assert.equal(f.rpc.status().all_gold.converted,2);
+    f.memory.set(0x90044,1);f.enter();assert.equal(f.rpc.status().all_gold.converted,2); // cap reached
+    assert.equal(f.memory.get(0x90044),1); // untouched beyond the cap
+    assert.equal(f.rpc.status().all_gold.active,true); // mode stays on, just stops converting
+    assert.throws(()=>f.rpc.allGold(-1),/non-negative/);
+    const g=descriptorGoldFixture();assert.equal(g.rpc.allGold().limit,null); // uncapped by default
+});
