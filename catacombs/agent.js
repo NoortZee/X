@@ -1798,11 +1798,14 @@ function managerDescriptor(service) {
     if(count>M.max_descriptors)throw new Error('descriptor vector budget exceeded');
     const range=Process.findRangeByAddress(begin);
     if(count&&(!range||!range.protection.includes('r')))throw new Error('descriptor vector not readable');
-    const by_rarity={},candies=[],out={time:Date.now(),read_only:true,count,
+    const by_rarity={},candies=[],sets=[],out={time:Date.now(),read_only:true,count,
         note:'Manager descriptors are authored level data; +44 is the authored rarity and no separate expected field exists.'};
     for(let i=0;i<count;i++) {
         const d=begin.add(i*M.stride);
         const rarity=d.add(M.rarity).readS32(),type=d.add(M.type).readS32();
+        // Recorded verbatim for later comparison; the meaning of these fields is NOT assumed.
+        if(sets.length<64)sets.push({index:i,set:d.add(M.set_field).readS32(),
+            extra_c:d.add(0xC).readS32(),extra_14:d.add(0x14).readS32(),type,rarity});
         by_rarity[String(rarity)]=(by_rarity[String(rarity)]||0)+1;
         if(type===M.candy_type&&candies.length<8)
             candies.push({index:i,descriptor_id:d.add(M.record_id).readS32(),rarity,type,
@@ -1810,6 +1813,15 @@ function managerDescriptor(service) {
     }
     out.rarity_histogram=by_rarity;out.candy_total=Object.values(by_rarity).reduce((n,v)=>n+v,0);
     out.gold_descriptors=by_rarity['4']||0;out.candies=candies;
+    // Stage capacity: how many distinct authored sets the Manager can serve, and per-set sizes.
+    const per_set={};
+    for(const entry of sets) {
+        const key=String(entry.set);
+        per_set[key]=(per_set[key]||0)+1;
+    }
+    out.sets={distinct:Object.keys(per_set).length,sizes:per_set,
+        note:'Distinct set/column values seen in descriptor +0x11 low bits and +0xC/+0x14 fields are not interpreted here.'};
+    out.set_field_samples=sets.slice(0,16);
     return out;
 }
 function parseSurveyAddress(value) {
