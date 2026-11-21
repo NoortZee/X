@@ -420,3 +420,9 @@
 - Full descriptor vector delegates growth/copy to native14BCB80; non-owning pointer vector uses game new/delete with doubled bounded capacity. Full ZArrays may grow via indexed setter within1024 budget. No owning-record memcpy/manual refcounts.
 - First live test of native growth paths, risk of crash/partial mutation; no native retry/guessed rollback. Existing world/ID/template/closure checks retained. Detailed histories limited to first10 objects.
 - 107 Node mock tests including native record push delegation, pointer allocation/copy/free and100ms pacing/no catchup; syntax/diff checks. No live runtime available, Rust/README unchanged.
+
+## Explicit single collected-ID reuse experiment
+
+- New spawn-gold-reuse CLI/RPC: same-state natural gold snapshot + current descriptor ID=-1 + unchanged non-ID/flag bytes + no active matching Candy in either array. No historical pointer deref/guessed IDs; refusal before native if unavailable.
+- New record/callback/containers with old collected ID, restores original descriptor flags, ID counter untouched. Normal cycle/new-ID commands unchanged. One native attempt, no reuse cycle.
+- Completion/server error remains unresolved. Duplicate accounting risk explicitly documented; no network/error bypass.109 mock tests including selector guards/unchanged counter, syntax/diff checks. Rust toolchain absent here; rebuild required. README unchanged.
