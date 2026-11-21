@@ -1234,30 +1234,62 @@ let allGoldStatus = {active:false,converted:0,seen:0,skipped_caller:0};
 function stopAllGold() {
     allGoldStatus.active=false;
     if(allGoldHook) {allGoldHook.detach();allGoldHook=null;Interceptor.flush();}
-    return { ...allGoldStatus, note:'Only future factory calls restored; existing Candy unchanged.' };
+    return { ...allGoldStatus, note:'Future descriptor conversion disabled; already-modified level records/Candy are not restored.' };
+}
+function allGoldRarityValue(m) {
+    const G=C.all_gold,seen=new Set();
+    let node=m.base.add(G.rarity_map).add(8).readPointer();
+    for(let i=0;!node.isNull() && i<64;i++) {
+        if(seen.has(node.toString()))throw new Error('rarity map cycle');seen.add(node.toString());
+        const key=node.add(0x1C).readS32();
+        if(key===G.key) {const value=node.add(0x20).readS32();if(value!==G.value)throw new Error('gold rarity mapping differs');return value;}
+        node=node.add(key>G.key?0:8).readPointer();
+    }
+    throw new Error('gold rarity key not found within budget; fallback not used');
+}
+function convertGoldDescriptor(entry,m) {
+    const G=C.all_gold;
+    if(entry.isNull() || entry.add(0x48).readS32()!==G.type) return null;
+    const id=entry.add(0x20).readS32();if(id<0)return null;
+    allGoldRarityValue(m); // Resolve actual runtime map entry, never assume key==value or use sentinel.
+    const flags=entry.add(G.flags).readS32(),key=entry.add(G.rarity_key).readS32();
+    const next=flags|G.lookup_flag;
+    const record={id,old_key:key,new_key:G.key,old_flags:flags,new_flags:next,mapped_rarity:G.value,changed:key!==G.key||next!==flags};
+    if(!record.changed)return record;
+    for(const offset of [G.flags,G.rarity_key]) {
+        const field=entry.add(offset),r=Process.findRangeByAddress(field);
+        if(!r || !r.protection.includes('w') || Number(r.base.add(r.size).sub(field).toString())<4)throw new Error('descriptor field not writable');
+    }
+    try {
+        entry.add(G.rarity_key).writeS32(G.key);entry.add(G.flags).writeS32(next);
+        if(entry.add(G.rarity_key).readS32()!==G.key || entry.add(G.flags).readS32()!==next)throw new Error('descriptor rarity readback mismatch');
+    } catch(e) {
+        record.rollback=safe(()=>{entry.add(G.rarity_key).writeS32(key);entry.add(G.flags).writeS32(flags);return true;});
+        allGoldStatus.last_failed_record=record;throw e;
+    }
+    mutationAttempted=true;return record;
 }
 function enableAllGold() {
     if(!enabled) throw new Error('start module first');
     if(allGoldHook) return {...allGoldStatus};
     if(pendingGold || (goldCycle && goldCycle.active)) throw new Error('stop experimental spawn series first');
-    const m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    const m=Process.findModuleByName(MEMORY_LAYOUT.module_name),G=C.all_gold;
     if(!m) throw new Error('game module missing');
-    const sig=C.spawn_gold.signatures.find(s=>s.rva===C.spawn_gold.factory);
-    const target=m.base.add(C.spawn_gold.factory),range=Process.findRangeByAddress(target);
-    if(!sig || !range || !range.protection.includes('x') || !range.protection.includes('r')) throw new Error('Candy factory unavailable');
-    const bytes=new Uint8Array(target.readByteArray(sig.bytes.length));
-    if(!sig.bytes.every((v,i)=>bytes[i]===v)) throw new Error('all-gold factory signature mismatch');
-    allGoldStatus={active:true,converted:0,seen:0,skipped_caller:0,
-        note:'Future native Candy only. Original IDs/records/counts untouched; finish validity unconfirmed.'};
+    const target=m.base.add(G.descriptor_factory),range=Process.findRangeByAddress(target);
+    if(!range || !range.protection.includes('x') || !range.protection.includes('r'))throw new Error('descriptor factory unavailable');
+    const bytes=new Uint8Array(target.readByteArray(G.signature.length));
+    if(!G.signature.every((v,i)=>bytes[i]===v))throw new Error('all-gold descriptor signature mismatch');
+    allGoldStatus={active:true,mode:'descriptor_before_native_creation',converted:0,seen:0,skipped_caller:0,records:[],
+        note:'Original Candy descriptor rarity key/lookup flag changed before creation; IDs/counts unchanged. Finish unconfirmed.'};
     try {
         allGoldHook=Interceptor.attach(target,{onEnter(args) {
-            if(!enabled || !allGoldStatus.active) return;
-            // Only the observed CandyPreview wrapper, not arbitrary calls/scenes or our explicit spawn.
-            if(this.returnAddress.toString()!==m.base.add(0x15FB8BB).toString()) {allGoldStatus.skipped_caller++;return;}
-            allGoldStatus.seen++;
-            const rarity=Number(args[0].toString());
-            if(!Number.isInteger(rarity) || rarity<0 || rarity>4) {allGoldStatus.error='unexpected rarity argument';return;}
-            if(rarity!==4) {args[0]=ptr(4);allGoldStatus.converted++;mutationAttempted=true;}
+            if(!enabled || !allGoldStatus.active)return;
+            if(this.returnAddress.toString()!==m.base.add(G.caller).toString()){allGoldStatus.skipped_caller++;return;}
+            try {
+                const record=convertGoldDescriptor(args[0],m);if(!record)return;
+                allGoldStatus.seen++;if(record.changed)allGoldStatus.converted++;
+                if(allGoldStatus.records.length<20)allGoldStatus.records.push(record);
+            } catch(e) {allGoldStatus.error=String(e);allGoldStatus.active=false;event('all_gold_error',{error:String(e)});}
         }});
         Interceptor.flush();
     } catch(e) {stopAllGold();allGoldStatus.error=String(e);throw e;}

@@ -438,3 +438,10 @@
 - New all-gold/all-gold-off commands: guarded64byte Candy factory hook changes rarity arg4 only from verified wrapper return15FB8BB; native game initializes appearance/body. No extra object/ID/record/reward writes; unknown callers/types untouched.
 - Applies only to future collectible Candy, enable before fresh level. Already-existing objects/traps/DeathSkulls unchanged. stop/off detach+flush, not rollback. Explicit spawn experiments cannot mix.
 - Original level rarity keys remain unchanged; server error and completion correctness NOT fixed/confirmed.113 mock tests, syntax/diff; new Rust CLI requires rebuild, compiler absent here. README unchanged.
+
+## all-gold v2 — synchronized instantiated descriptor rarity
+
+- Replaces visual-only factory-arg override with guarded descriptor-factory onEnter for verified addObstaclesInColumn caller/type2D/live ID. Resolves current map key4→value4, changes record rarity key44/lookup flag800 before native construction.
+- Original IDs/counts/positions and unrelated flags preserved, no extra items/direct reward or network writes. Bounded runtime lookup, writable/readback guards, immediate field rollback on interrupted write; failure disables conversion.
+- Bounded dump old/new key/flags and mode. Stop/off detach but do not undo run; finish/server error still unconfirmed. JS/map-only, no Rust rebuild, README unchanged.
+-117 Node mock tests including correct descriptor changes, mapping failures, non-Candy/retired skip, unknown caller, write rollback/read-only refusal; syntax/diff checks. No live runtime here.

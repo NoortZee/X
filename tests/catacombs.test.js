@@ -102,7 +102,7 @@ test('only one explicit native rebuild callsite, no patches or non-position writ
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
     assert.equal((s.match(/\.writeFloat\(/g) || []).length, 18);
-    const core=s.replace(/function fullGoldPlan[\s\S]*?(?=function performGold)/,'')
+    const core=s.replace(/function convertGoldDescriptor[\s\S]*?(?=function enableAllGold)/,'').replace(/function fullGoldPlan[\s\S]*?(?=function performGold)/,'')
         .replace(/object\.add\(0x184\)\.writeS32\(fullPlan.id\);/,'');
     assert.doesNotMatch(core, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
@@ -1266,22 +1266,54 @@ test('reuse cycle refuses missing collected ID before enabling series or native 
     assert.equal(f.rpc.status().spawn_cycle,null);assert.equal(f.calls.length,0);
 });
 
-test('all-gold changes only native wrapper factory argument and restores hook on off',()=>{
-    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));let callback,detached=0,flushed=0;
-    f.c.Interceptor.attach=(p,cb)=>{assert.equal(p.n,0x100000+0x15EEA70);callback=cb;return {detach(){detached++;}};};
+function descriptorGoldFixture() {
+    const f=goldFixture();const G=vm.runInContext('C.all_gold',f.c);
+    G.signature.forEach((v,i)=>f.memory.set(0x100000+G.descriptor_factory+i,v));
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'rwx'});
+    for(const [p,v] of [[0x100000+G.rarity_map+8,0x80000],[0x8001C,4],[0x80020,4],
+        [0x90048,45],[0x90020,62],[0x90010,7],[0x90044,1]])f.memory.set(p,v);
+    let callback,detached=0,flushed=0;
+    f.c.Interceptor.attach=(p,cb)=>{assert.equal(p.n,0x100000+G.descriptor_factory);callback=cb;return {detach(){detached++;}};};
     f.c.Interceptor.flush=()=>{flushed++;};
-    assert.equal(f.rpc.allGold().active,true);
-    let args=[f.pointer(1)];callback.onEnter.call({returnAddress:f.pointer(0x100000+0x15FB8BB)},args);
-    assert.equal(args[0].n,4);assert.equal(f.rpc.status().all_gold.converted,1);
-    args=[f.pointer(4)];callback.onEnter.call({returnAddress:f.pointer(0x100000+0x15FB8BB)},args);
-    assert.equal(f.rpc.status().all_gold.seen,2);assert.equal(f.rpc.status().all_gold.converted,1);
-    args=[f.pointer(2)];callback.onEnter.call({returnAddress:f.pointer(0x100000+0x123)},args);
-    assert.equal(args[0].n,2);assert.equal(f.rpc.status().all_gold.skipped_caller,1);
-    assert.throws(()=>f.rpc.spawnGold(),/disable all-gold/);assert.throws(()=>f.rpc.spawnGoldCycle(),/disable all-gold/);
-    assert.equal(f.rpc.allGoldOff().active,false);assert.equal(detached,1);assert.equal(flushed,2);
+    return {...f,G,enter(caller=G.caller){callback.onEnter.call({returnAddress:f.pointer(0x100000+caller)},[f.pointer(0x90000)]);},detached:()=>detached,flushed:()=>flushed};
+}
+test('all-gold changes descriptor rarity key/flag before native creation, not IDs or counts',()=>{
+    const f=descriptorGoldFixture();assert.equal(f.rpc.allGold().active,true);f.enter();
+    assert.equal(f.memory.get(0x90044),4);assert.equal(f.memory.get(0x90010),0x807);assert.equal(f.memory.get(0x90020),62);
+    assert.equal(f.rpc.status().all_gold.converted,1);f.enter();assert.equal(f.rpc.status().all_gold.converted,1);
+    assert.equal(f.rpc.status().all_gold.seen,2);f.enter(0x123);assert.equal(f.rpc.status().all_gold.skipped_caller,1);
+    assert.throws(()=>f.rpc.spawnGold(),/disable all-gold/);
+    assert.equal(f.rpc.allGoldOff().active,false);assert.equal(f.detached(),1);assert.equal(f.flushed(),2);
     assert.equal(f.calls.length,0);
 });
-test('all-gold rejects changed factory bytes without installing a hook',()=>{
-    const f=goldFixture();f.memory.set(0x100000+0x15EEA70,0x90);
+test('all-gold rejects descriptor signature mismatch before installing hook',()=>{
+    const f=descriptorGoldFixture();f.memory.set(0x100000+f.G.descriptor_factory,0x90);
     assert.throws(()=>f.rpc.allGold(),/signature mismatch/);assert.equal(f.rpc.status().all_gold.active,false);
+});
+test('all-gold fails closed on missing/wrong runtime rarity mapping and does not change record',()=>{
+    for(const value of [2,null]) {
+        const f=descriptorGoldFixture();if(value===null)f.memory.set(0x100000+f.G.rarity_map+8,0);else f.memory.set(0x80020,value);
+        f.rpc.allGold();f.enter();assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
+        assert.equal(f.rpc.status().all_gold.active,false);assert.ok(f.rpc.status().all_gold.error);
+    }
+});
+test('all-gold leaves non-Candy and retired records unchanged',()=>{
+    const f=descriptorGoldFixture();f.rpc.allGold();f.memory.set(0x90048,46);f.enter();
+    assert.equal(f.memory.get(0x90044),1);f.memory.set(0x90048,45);f.memory.set(0x90020,-1);f.enter();
+    assert.equal(f.memory.get(0x90044),1);assert.equal(f.rpc.status().all_gold.converted,0);
+});
+
+test('all-gold restores both descriptor fields on interrupted write/readback',()=>{
+    const f=descriptorGoldFixture(),prototype=Object.getPrototypeOf(f.pointer(0)),write=prototype.writeS32;
+    let failed=false;
+    prototype.writeS32=function(n){if(this.n===0x90010&&!failed){failed=true;throw Error('simulated write failure');}return write.call(this,n);};
+    f.rpc.allGold();f.enter();assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
+    assert.equal(f.rpc.status().all_gold.last_failed_record.rollback,true);
+    assert.equal(f.rpc.status().all_gold.active,false);
+});
+test('all-gold rejects readonly descriptor without mutation',()=>{
+    const f=descriptorGoldFixture();f.rpc.allGold();
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'r--'});f.enter();
+    assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
+    assert.match(f.rpc.status().all_gold.error,/not writable/);
 });

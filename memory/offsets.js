@@ -65,6 +65,9 @@ const MEMORY_LAYOUT = {
         item_first_ptr: 8,
     },
     catacombs: {
+        all_gold: { descriptor_factory: 0x1604540, caller: 0x14DA4A4, rarity_map: 0x2183AA0,
+            key: 4, value: 4, type: 0x2D, flags: 0x10, lookup_flag: 0x800, rarity_key: 0x44,
+            signature: [0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xec,0x28,0x8b,0x47,0x48] },
         wall_pass: { enabled: false, pattern: '66 66 d5 41', original: 26.67499923706,
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
             // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.
