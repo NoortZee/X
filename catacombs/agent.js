@@ -1759,6 +1759,56 @@ function levelSummary(state) {
     if(sequenceSummaryCache.size>8)sequenceSummaryCache.delete(sequenceSummaryCache.keys().next().value);
     return out;
 }
+const managerSurvey={status:'not_run',read_only:true};
+function managerDescriptor(service) {
+    // Read-only survey of the EndlessMaze::Manager descriptor vector; nothing is modified.
+    const M=C.manager_survey,begin=service.add(M.descriptor_begin).readPointer();
+    const end=service.add(M.descriptor_end).readPointer();
+    const bytes=Number(end.sub(begin).toString());
+    if(!Number.isSafeInteger(bytes)||bytes<0||bytes%M.stride)throw new Error('descriptor vector bounds invalid');
+    const count=bytes/M.stride;
+    if(count>M.max_descriptors)throw new Error('descriptor vector budget exceeded');
+    const range=Process.findRangeByAddress(begin);
+    if(count&&(!range||!range.protection.includes('r')))throw new Error('descriptor vector not readable');
+    const by_rarity={},candies=[],out={time:Date.now(),read_only:true,count,
+        note:'Manager descriptors are authored level data; +44 is the authored rarity and no separate expected field exists.'};
+    for(let i=0;i<count;i++) {
+        const d=begin.add(i*M.stride);
+        const rarity=d.add(M.rarity).readS32(),type=d.add(M.type).readS32();
+        by_rarity[String(rarity)]=(by_rarity[String(rarity)]||0)+1;
+        if(type===M.candy_type&&candies.length<8)
+            candies.push({index:i,descriptor_id:d.add(M.record_id).readS32(),rarity,type,
+                flags:d.add(M.flags).readU8(),lookup_path:(d.add(M.flags).readU8()&M.lookup_bit)!==0});
+    }
+    out.rarity_histogram=by_rarity;out.candy_total=Object.values(by_rarity).reduce((n,v)=>n+v,0);
+    out.gold_descriptors=by_rarity['4']||0;out.candies=candies;
+    return out;
+}
+function parseSurveyAddress(value) {
+    const m=/^\s*survey\s+(0x[0-9a-fA-F]{1,16})\s*$/.exec(String(value||''));
+    if(!m)return null;
+    const address=ptr(parseInt(m[1],16));
+    if(address.isNull())throw new Error('survey address must be non-null');
+    return address;
+}
+function surveyManager(serviceAddress) {
+    // Explicit address only: the service locator is never scanned for.
+    try {
+        if(!serviceAddress)throw new Error('manager service address required');
+        const service=typeof serviceAddress==='string'?ptr(serviceAddress):serviceAddress;
+        const id=identity(service),needle=C.manager_survey.rtti_needle;
+        if(!id.rtti||!String(id.rtti.name).includes(needle))
+            throw new Error('unexpected class; expected '+needle);
+        managerSurvey.status='found';managerSurvey.service=service.toString();managerSurvey.rtti=id.rtti.name;
+        const survey=managerDescriptor(service);
+        managerSurvey.last=survey;managerSurvey.time=survey.time;delete managerSurvey.error;
+        event('manager_survey',{count:survey.count,gold:survey.gold_descriptors});
+        return managerSurvey;
+    } catch(e) {
+        managerSurvey.status='unavailable';managerSurvey.error=String(e);
+        return managerSurvey;
+    }
+}
 function sequencePayloadPrefix(payload) {
     // Bounded read-only prefix; the payload layout itself is not interpreted here.
     const S=C.sequence_probe,r=Process.findRangeByAddress(payload);
@@ -1799,6 +1849,7 @@ function installSequenceProbe(m) {
     sequenceSummaryCache=null;
     levelCensuses=[];
     levelCensusError=null;
+    managerSurvey.status='not_run';delete managerSurvey.last;delete managerSurvey.error;delete managerSurvey.service;
     try {
         if(S.builder<0 || S.builder+S.signature.length>m.size)throw new Error('sequence builder outside module');
         const target=m.base.add(S.builder),range=Process.findRangeByAddress(target);
@@ -1820,7 +1871,7 @@ function installSequenceProbe(m) {
     } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
 }
 function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), manager_survey: managerSurvey, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
@@ -1874,7 +1925,12 @@ function install() {
 }
 rpc.exports = {
     install, status, allGold: enableAllGold, allGoldOff: stopAllGold, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
-    mark(label) { event('user_mark', { label: String(label).slice(0, 160) }); return status(); },
+    mark(label) {
+        const surveyAddress=safe(()=>parseSurveyAddress(label));
+        if(surveyAddress&&!surveyAddress.error) { const result=surveyManager(surveyAddress); return {mark:true,survey:result,status:status()}; }
+        event('user_mark', { label: String(label).slice(0, 160) }); return status();
+    },
+    managerSurvey(address) { return surveyManager(address); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
             ...status(), metadata: { time: Date.now(), module: moduleInfo,
