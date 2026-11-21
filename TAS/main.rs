@@ -33,6 +33,7 @@ const MENU: &str = r#"
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
   catacombs [1..10]    загрузить модуль; 1..10 — скорость персонажа (по умолчанию 1)
+                       Ctrl+C — выгрузить модуль и вернуться в меню
   stones <filter>     rival stones live + burst-skip (см. help)
   help                справка по stones
   clear               wipe console + delete replay.json
@@ -509,18 +510,11 @@ fn main() {
     );
 
     let aborted = Arc::new(AtomicBool::new(false));
-    let in_cmd = Arc::new(AtomicBool::new(false));
     {
+        // Ctrl+C cancels a running command and, in the menu, unloads the modules.
+        // Either way the session survives; the menu is re-shown by the main loop.
         let aborted_c = aborted.clone();
-        let in_cmd_c = in_cmd.clone();
-        // Ctrl+C cancels the running command; in the menu it must NOT end the session.
-        let _ = ctrlc::set_handler(move || {
-            if in_cmd_c.load(Ordering::SeqCst) {
-                aborted_c.store(true, Ordering::SeqCst);
-            } else {
-                eprintln!("INFO main: Ctrl+C в меню — команда не выполняется; выход: exit");
-            }
-        });
+        let _ = ctrlc::set_handler(move || aborted_c.store(true, Ordering::SeqCst));
     }
 
     let stdin_rx = spawn_stdin_reader();
@@ -530,16 +524,21 @@ fn main() {
             eprintln!("ERROR main: frida session lost");
             break;
         }
+        // The menu is shown once per iteration: after each command and after Ctrl+C.
         println!("{MENU}");
         let Some(raw) = prompt_or_abort("> ", &stdin_rx, &aborted, true) else {
-            // Ctrl+C in the menu cancels nothing; keep the session and show the menu again.
+            // Ctrl+C in the menu unloads loaded modules (restoring what they patched) and returns to the menu.
+            println!();
             aborted.store(false, Ordering::SeqCst);
+            if let Some(state) = catacombs_mod.unload() {
+                println!("catacombs: unloaded ({state})");
+            }
+            stones_mod.stop();
             continue;
         };
         let cmd = raw.trim().to_ascii_lowercase();
 
         aborted.store(false, Ordering::SeqCst);
-        in_cmd.store(true, Ordering::SeqCst);
 
         match cmd.as_str() {
             "" | "rehearse" | "r" => {
@@ -567,10 +566,7 @@ fn main() {
                 }
                 clear_console();
             }
-            "exit" | "quit" | "q" => {
-                in_cmd.store(false, Ordering::SeqCst);
-                break;
-            }
+            "exit" | "quit" | "q" => break,
             s if s.split_whitespace().next() == Some("catacombs") => {
                 let arguments = s.strip_prefix("catacombs").unwrap_or("").trim();
                 if let Err(e) = catacombs_mod.run(arguments, &aborted) {
@@ -596,7 +592,6 @@ fn main() {
             _ => println!("unknown command: {cmd}"),
         }
 
-        in_cmd.store(false, Ordering::SeqCst);
         aborted.store(false, Ordering::SeqCst);
     }
 
