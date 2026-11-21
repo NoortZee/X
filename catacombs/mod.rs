@@ -1,7 +1,7 @@
-//! Diagnostics and an explicit one-common-object position experiment.
+//! Catacombs module: load on command; inside, only the character speed is configurable.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use frida::{Message, Script, ScriptHandler, ScriptOption, Session};
 
 struct Handler;
@@ -13,6 +13,20 @@ impl ScriptHandler for Handler {
     }
 }
 
+fn summary(value: &serde_json::Value, requested: Option<u32>) -> String {
+    let get = |path: &[&str]| path.iter().try_fold(value, |acc, key| acc.get(*key)).cloned().unwrap_or(serde_json::Value::Null);
+    let speed = get(&["speed"]);
+    let reported = speed.get("requested").and_then(|v| v.as_u64()).or(requested.map(u64::from));
+    let speed_text = match (reported, speed.get("status").and_then(|v| v.as_str())) {
+        (Some(n), Some(s)) => format!("speed={n} ({s})"),
+        (Some(n), None) => format!("speed={n}"),
+        _ => "speed=?".to_string(),
+    };
+    let enabled = get(&["enabled"]).as_bool().unwrap_or(false);
+    let phase = get(&["latest", "phase_raw"]);
+    format!("{speed_text} enabled={enabled} phase={phase}")
+}
+
 pub struct CatacombsModule<'a> {
     session: &'a Session<'a>,
     root: PathBuf,
@@ -22,60 +36,41 @@ impl<'a> CatacombsModule<'a> {
     pub fn new(session: &'a Session<'a>, root: PathBuf) -> Self {
         Self { session, root, script: None }
     }
-    pub fn command(&mut self, command: &str, aborted: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
-        let (action, label) = command.split_once(' ').unwrap_or((command, ""));
-        match action {
-            "start" => {
-                if self.script.is_some() {
-                    println!("catacombs: already loaded; stop/start to reload profile");
-                    return Ok(());
-                }
-                let path = self.root.join("catacombs/agent.js");
-                let source = crate::memory::prepend_layout(&path, &std::fs::read_to_string(&path)?)?;
-                let mut options = ScriptOption::default();
-                let mut script = self.session.create_script(&source, &mut options)?;
-                // The binding also needs this handler connection to deliver RPC replies.
-                script.handle_message(Handler)?;
-                script.load()?;
-                println!("catacombs: resolving Endless update (Ctrl+C cancels waiting)...");
-                match script.exports.call_cancellable("install", None, Duration::from_secs(30),
-                    || aborted.load(Ordering::SeqCst)) {
-                    Ok(value) => {
-                        println!("catacombs: {value:?}");
-                        self.script = Some(script);
-                    }
-                    Err(error) => { let _ = script.unload(); return Err(Box::new(error)); }
-                }
+    /// The command is the module name with an optional speed: `catacombs`, `catacombs 5`.
+    pub fn run(&mut self, argument: &str, aborted: &AtomicBool) -> Result<(), Box<dyn std::error::Error>> {
+        let argument = argument.trim();
+        {
+            if argument.eq_ignore_ascii_case("stop") { self.stop(); println!("catacombs: stopped"); return Ok(()); }
+            let mut words = argument.split_whitespace();
+            let speed_text = words.next().unwrap_or("");
+            if words.next().is_some() || (!speed_text.is_empty() && !speed_text.chars().all(|c| c.is_ascii_digit())) {
+                return Err(format!("only a speed 1..10 is accepted, got {argument:?}").into());
             }
-            "stop" => { self.stop(); println!("catacombs: stopped"); }
-            "status" | "dump" | "mark" | "move-white" | "teleport-white" | "above" | "return-height" | "spawn-probe" | "spawn-gold" | "spawn-gold-cycle" | "spawn-gold-stop" | "spawn-gold-reuse" | "spawn-gold-reuse-cycle" | "all-gold" | "all-gold-off" => {
+            {
+                let speed: u32 = if speed_text.is_empty() { 1 }
+                    else { speed_text.parse().map_err(|_| format!("speed must be an integer 1..10, got {speed_text:?}"))? };
+                if !(1..=10).contains(&speed) { return Err(format!("speed must be 1..10, got {speed}").into()); }
+                self.ensure_loaded()?;
                 let Some(script) = self.script.as_mut() else {
                     println!("catacombs: start first"); return Ok(());
                 };
-                let method = match action { "all-gold" => "allGold", "all-gold-off" => "allGoldOff", "dump" => "report", "move-white" => "moveWhite", "teleport-white" => "teleportWhite", "return-height" => "returnHeight", "spawn-probe" => "spawnProbe", "spawn-gold-cycle" => "spawnGoldCycle", "spawn-gold-stop" => "spawnGoldStop", "spawn-gold-reuse-cycle" => "spawnGoldReuseCycle", "spawn-gold-reuse" => "spawnGoldReuse", "spawn-gold" => "spawnGold", _ => action };
-                let args = if action == "mark" { Some(serde_json::json!([label])) }
-                    else if action == "all-gold" && !label.trim().is_empty() {
-                        // Optional explicit conversion cap: catacombs all-gold <count>
-                        let limit: u32 = label.trim().parse()
-                            .map_err(|_| format!("all-gold limit must be a non-negative integer, got {:?}", label.trim()))?;
-                        Some(serde_json::json!([limit]))
-                    } else { None };
-                let value = script.exports.call_cancellable(method, args, Duration::from_secs(5),
-                    || aborted.load(Ordering::SeqCst))?;
-                if action == "dump" {
-                    let dir = self.root.join("logs/catacombs");
-                    std::fs::create_dir_all(&dir)?;
-                    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
-                    let path = dir.join(format!("report-{stamp}.json"));
-                    // create_new prevents any accidental overwrite, even on a clock collision.
-                    use std::io::Write;
-                    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
-                    file.write_all(serde_json::to_string_pretty(&value)?.as_bytes())?;
-                    println!("catacombs: {}", path.display());
-                } else { println!("catacombs: {value:?}"); }
+                let value = script.exports.call_cancellable("start", Some(serde_json::json!([speed])),
+                    Duration::from_secs(30), || aborted.load(Ordering::SeqCst))?;
+                println!("catacombs: {}", summary(&value, Some(speed)));
             }
-            _ => println!("catacombs start | status | dump | mark <label> | move-white | teleport-white | above | return-height | spawn-probe | spawn-gold | spawn-gold-cycle | spawn-gold-stop | spawn-gold-reuse | spawn-gold-reuse-cycle | all-gold [limit] | all-gold-off | stop"),
         }
+        Ok(())
+    }
+    fn ensure_loaded(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.script.is_some() { return Ok(()); }
+        let path = self.root.join("catacombs/agent.js");
+        let source = crate::memory::prepend_layout(&path, &std::fs::read_to_string(&path)?)?;
+        let mut options = ScriptOption::default();
+        let mut script = self.session.create_script(&source, &mut options)?;
+        // The binding also needs this handler connection to deliver RPC replies.
+        script.handle_message(Handler)?;
+        script.load()?;
+        self.script = Some(script);
         Ok(())
     }
     pub fn stop(&mut self) {

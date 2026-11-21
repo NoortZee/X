@@ -35,7 +35,7 @@ function fixture(matches = 1, production = false, underground = false, autoRise 
         Interceptor: { attach(p, cb) { callback = cb; return { detach() { detached++; } }; } },
         rpc: { exports: {} },
     });
-    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground).replace('auto_rise: true', 'auto_rise: ' + autoRise).replace('up: 1920', autoRise ? 'up: 1920' : 'up: 768').replace('timeout_ms: 6000', autoRise ? 'timeout_ms: 6000' : 'timeout_ms: 3000') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed_test: { enabled: true', 'speed_test: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) .replace('observe_attach: true', 'observe_attach: ' + observeAttach) + '\n' +
+    vm.runInContext((production ? fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace(/underground: (?:true|false)/, 'underground: ' + underground).replace('auto_rise: true', 'auto_rise: ' + autoRise).replace('up: 1920', autoRise ? 'up: 1920' : 'up: 768').replace('timeout_ms: 6000', autoRise ? 'timeout_ms: 6000' : 'timeout_ms: 3000') : fs.readFileSync(path.join(root, 'memory/offsets.js'), 'utf8').replace('no_fall: { enabled: true', 'no_fall: { enabled: false').replace('speed: { enabled: true', 'speed: { enabled: false').replace('mask_test: { enabled: true', 'mask_test: { enabled: false').replace('wall_pass: { enabled: false', 'wall_pass: { enabled: true').replace('diagnostics: false', 'diagnostics: true').replace('auto_teleport: { enabled: true', 'auto_teleport: { enabled: false')) .replace('observe_attach: true', 'observe_attach: ' + observeAttach) + '\n' +
         fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8'), c);
     function identity(object, vp, ti, text, name) {
         memory.set(object, vp); memory.set(vp - 8, ti); memory.set(ti + 8, text);
@@ -53,7 +53,7 @@ function fixture(matches = 1, production = false, underground = false, autoRise 
 }
 test('opt-in unique resolution, graph and Candy class/rarity evidence', () => {
     const f = fixture(); assert.equal(f.rpc.status().enabled, false);
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     const r = f.rpc.report();
     assert.equal(r.calls, 1);
     assert.equal(r.latest.state.rtti.name, '20EndlessMazePlayState');
@@ -66,11 +66,11 @@ test('opt-in unique resolution, graph and Candy class/rarity evidence', () => {
     f.rpc.stop(); f.rpc.stop(); assert.equal(f.detached(), 1);
 });
 for (const n of [0, 2]) test('reject ambiguous/missing update: ' + n, () => {
-    const f = fixture(n); assert.throws(() => f.rpc.install(), /expected 1 match/);
+    const f = fixture(n); assert.throws(() => f.rpc.start(1), /expected 1 match/);
     assert.equal(f.rpc.status().enabled, false);
 });
 test('sampling, marker and bounded histories/events', () => {
-    const f = fixture(); f.rpc.install(); f.tick(); f.tick();
+    const f = fixture(); f.rpc.start(1); f.tick(); f.tick();
     assert.equal(f.rpc.status().samples, 1);
     f.rpc.mark('picked golden');
     assert.ok(f.rpc.report().events.some(e => e.kind === 'user_mark'));
@@ -80,7 +80,7 @@ test('sampling, marker and bounded histories/events', () => {
     assert.equal(f.rpc.report().events.length, 1000);
 });
 test('failed or truncated scan must not imply disappearance', () => {
-    const f = fixture(); f.rpc.install(); f.tick();
+    const f = fixture(); f.rpc.start(1); f.tick();
     f.memory.delete(0x3000); f.force(); f.tick();
     assert.equal(f.rpc.report().latest.object_graph.complete, false);
     assert.ok(!f.rpc.report().events.some(e => e.kind === 'candy_not_in_array'));
@@ -89,13 +89,13 @@ test('failed or truncated scan must not imply disappearance', () => {
     assert.equal(f.rpc.status().enabled, true);
 });
 test('disappearance is recorded as observation, never credited collection', () => {
-    const f = fixture(); f.rpc.install(); f.tick();
+    const f = fixture(); f.rpc.start(1); f.tick();
     f.memory.set(0x2800, 0); f.force(); f.tick();
     const e = f.rpc.report().events.find(e => e.kind === 'candy_not_in_array');
     assert.match(e.interpretation, /not proof/);
 });
 test('report never dereferences a retained pointer', () => {
-    const f = fixture(); f.rpc.install(); f.tick(); f.memory.clear();
+    const f = fixture(); f.rpc.start(1); f.tick(); f.memory.clear();
     assert.equal(f.rpc.report().latest.object_graph.candies.length, 1);
 });
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
@@ -111,7 +111,7 @@ test('LIVE hero chain keeps visual coordinates separate from physics', () => {
     for (const [p, v] of [[0x1040, 0x4000], [0x4018, 0x5000], [0x5198, 0x6000], [0x6020, 0x7000],
         [0x5034, 37892], [0x5038, 393], [0x700C, 12], [0x7010, 6], [0x7040, 2.2],
         [0x7044, 0], [0x7038, 0], [0x7048, 0], [0x70A8, 1]]) f.memory.set(p, v);
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     const graph = f.rpc.report().latest.hero_graph;
     assert.equal(graph.hero.position.x, 37892);
     assert.equal(graph.hero_body.address, '0x6000');
@@ -119,7 +119,7 @@ test('LIVE hero chain keeps visual coordinates separate from physics', () => {
     assert.equal(graph.physics.fields.VX, 2.2);
 });
 test('declared array size is reported when scan is truncated', () => {
-    const f = fixture(); f.memory.set(0x2018, 1025); f.rpc.install(); f.tick();
+    const f = fixture(); f.memory.set(0x2018, 1025); f.rpc.start(1); f.tick();
     const graph = f.rpc.report().latest.object_graph;
     assert.equal(graph.declared_slots, 1025);
     assert.equal(graph.scanned_slots, 1024);
@@ -132,7 +132,7 @@ test('position candidates use byte offsets from vptr without invoking methods', 
     const f = fixture();
     f.memory.set(0x8100 + 0x238, 0x200000);
     f.memory.set(0x8100 + 0x268, 0x200100);
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     const candy = f.rpc.report().latest.object_graph.candies[0];
     assert.equal(candy.position_method_candidates.position_set_candidate.target.address, '0x200000');
     assert.equal(candy.position_method_candidates.position_get_candidate.vptr_byte_offset, 0x268);
@@ -183,61 +183,9 @@ function movementFixture(production = false, underground = false, autoRise = fal
     [0x48, 0x89, 0xF8, 0x0F, 0x13, 0x47, 0x34, 0xC3]
         .forEach((b, i) => f.memory.set(0x200000 + i, b));
     f.c.Process.findRangeByAddress = () => ({ base: f.pointer(0), size: 0x4000000, protection: 'rwx' });
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     return f;
 }
-test('move-white is opt-in, queued, one object only, and executed after update', () => {
-    const f = movementFixture();
-    assert.equal(f.writes.length, 0);
-    f.rpc.moveWhite();
-    assert.equal(f.writes.length, 0);
-    assert.throws(() => f.rpc.moveWhite(), /already queued/);
-    f.leave();
-    assert.equal(f.rpc.status().last_move.success, true);
-    assert.equal(f.rpc.status().last_move.collection_confirmed, false);
-    assert.deepEqual(f.writes, [[0x3034, 524], [0x3038, 600]]);
-    f.leave(); assert.equal(f.writes.length, 2);
-});
-test('reject non-common, changed setter, paused run and invalid direction without writes', () => {
-    for (const [address, value] of [[0x31F0, 2], [0x200000, 0x90], [0x1088, 1], [0x609C, 0]]) {
-        const f = movementFixture(); f.memory.set(address, value); f.rpc.moveWhite(); f.leave();
-        assert.equal(f.writes.length, 0);
-        assert.equal(f.rpc.status().last_move.success, false);
-        assert.ok(f.rpc.status().last_move.error);
-    }
-});
-test('move uses current coordinates and direction, cancels on stop or state change', () => {
-    const f = movementFixture(); f.rpc.moveWhite();
-    f.memory.set(0x5034, 700); f.memory.set(0x609C, -1); f.leave();
-    assert.equal(f.memory.get(0x3034), 676);
-    const stopped = movementFixture(); stopped.rpc.moveWhite(); stopped.rpc.stop(); stopped.leave();
-    assert.equal(stopped.writes.length, 0);
-    const changed = movementFixture(); changed.rpc.moveWhite();
-    vm.runInContext('pendingMove.state = "different"', changed.c); changed.leave();
-    assert.equal(changed.writes.length, 0);
-});
-test('expired move request is consumed, not retried', () => {
-    const f = movementFixture(); f.rpc.moveWhite();
-    vm.runInContext('pendingMove.time -= 6000', f.c); f.leave();
-    assert.match(f.rpc.status().last_move.error, /expired/);
-    assert.equal(f.rpc.status().move_pending, null);
-    assert.equal(f.writes.length, 0);
-});
-test('failed second coordinate write attempts immediate rollback and reports failure', () => {
-    const f = movementFixture();
-    const prototype = Object.getPrototypeOf(f.pointer(0));
-    const original = prototype.writeFloat;
-    prototype.writeFloat = function (value) {
-        if (this.n === 0x3038 && value === 600) throw new Error('simulated write failure');
-        return original.call(this, value);
-    };
-    f.rpc.moveWhite(); f.leave();
-    assert.equal(f.rpc.status().last_move.success, false);
-    assert.equal(f.rpc.status().last_move.rollback, true);
-    assert.equal(f.memory.get(0x3034), 12);
-    assert.equal(f.memory.get(0x3038), 6);
-});
-
 test('Candy physics candidate is read-only and compares independent physical position', () => {
     const f = fixture();
     f.identity(0x6000, 0x8300, 0x9300, 0xA300, '20EndlessMazeCandyBody');
@@ -245,7 +193,7 @@ test('Candy physics candidate is read-only and compares independent physical pos
         [0x700C, 0.12], [0x7010, 0.06], [0x7040, 0], [0x7044, 0],
         [0x7038, 0], [0x7048, 0], [0x70A8, 0]]) f.memory.set(p, v);
     f.c.Process.findRangeByAddress = () => ({ base: f.pointer(0), size: 0x4000000, protection: 'rw-' });
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     let candidate = f.rpc.report().latest.object_graph.candies[0].physics_candidate;
     assert.equal(candidate.position_matches, true);
     assert.equal(candidate.candidate_only, true);
@@ -258,7 +206,7 @@ test('Candy physics candidate is read-only and compares independent physical pos
 test('Candy physics candidate refuses wrong class and inaccessible memory', () => {
     const f = fixture(); f.memory.set(0x3198, 0x6000);
     f.identity(0x6000, 0x8300, 0x9300, 0xA300, '8HeroBody');
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     assert.match(f.rpc.report().latest.object_graph.candies[0].physics_candidate.error, /unexpected class/);
     assert.equal(f.writes.length, 0);
 });
@@ -281,7 +229,7 @@ test('Body call probe follows only bounded direct calls, never indirect calls', 
 test('lifecycle candidates are ASLR-relative, cached, and never invoked', () => {
     const f = fixture();
     assert.equal(f.rpc.report().lifecycle_candidates, null);
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     const roots = f.rpc.report().lifecycle_candidates;
     assert.equal(roots.position_wrapper_candidate.target.rva, '0x1618980');
     assert.equal(roots.destroy_candidate.target.address, '0x1715cb0');
@@ -298,7 +246,7 @@ test('physics sweep candidates do not replace the validated transform coordinate
         [0x700C,0.12],[0x7010,0.06],[0x7040,0],[0x7044,0],[0x7038,0],
         [0x7048,0],[0x70A8,1],[0x7028,123],[0x702C,456],[0x7058,0xA000]]) f.memory.set(p,v);
     f.c.Process.findRangeByAddress = () => ({base:f.pointer(0),size:0x4000000,protection:'rw-'});
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     const physics = f.rpc.report().latest.object_graph.candies[0].physics_candidate;
     assert.equal(physics.position_matches, true);
     assert.equal(physics.extra_candidates.sweep_x_candidate,123);
@@ -310,7 +258,7 @@ test('Candy Body +0x68 is resolved from current object vptr, not a fixed target'
     const f = fixture();
     f.identity(0x6000, 0x8300, 0x9300, 0xA300, '20EndlessMazeCandyBody');
     f.memory.set(0x3198, 0x6000); f.memory.set(0x8368, 0x240000);
-    f.rpc.install(); f.tick();
+    f.rpc.start(1); f.tick();
     const method = f.rpc.report().latest.object_graph.candies[0].body_method_candidates.recreate_candidate;
     assert.equal(method.vptr_byte_offset, 0x68);
     assert.equal(method.target.address, '0x240000');
@@ -342,72 +290,6 @@ test('lifecycle has independent unique-callee budgets and stops at first return'
     assert.equal(f.writes.length, 0);
 });
 
-test('create root requests extended bounded window', () => {
-    const f = fixture();
-    vm.runInContext(`captureMethodCode = function(target, bytes, instructions) {
-        methodCode.set(target.toString(), {instructions: [], requested_bytes: bytes, requested_instructions: instructions});
-        return target.toString();
-    }; captureLifecycleCandidates();`, f.c);
-    const report = f.rpc.report();
-    const code = report.method_code[report.lifecycle_candidates.create_candidate.code_key];
-    assert.equal(code.requested_bytes, 1536);
-    assert.equal(code.requested_instructions, 512);
-});
-
-function teleportFixture(production = false, underground = false, autoRise = false) {
-    const f = movementFixture(production, underground, autoRise);
-    f.identity(0x16000, 0xB000, 0xC000, 0xD000, '20EndlessMazeCandyBody');
-    for (const [p,v] of [[0x3198,0x16000],[0x16020,0xE000],[0xE000,0],[0xE00C,0.12],
-        [0xE010,0.06],[0xE040,0],[0xE044,0],[0xE038,0],[0xE048,0],[0xE0A8,1],
-        [0xE0B8,0x16000],[0xE058,0xF000],[0xF000+0x19298,0],[0xB068,0x100000+0x1617DE0],
-        [0x16038,12],[0x1603C,6]]) f.memory.set(p,v);
-    const sigs = vm.runInContext('MEMORY_LAYOUT.catacombs.teleport_white.signatures',f.c);
-    for (const sig of sigs) sig.bytes.forEach((b,i)=>f.memory.set(0x100000+sig.rva+i,b));
-    let nativeCalls=0;
-    f.c.NativeFunction = function (target, ret, args) {
-        assert.equal(target.toString(),'0x1715cb0');
-        assert.equal(ret,'void'); assert.equal(args.join(','),'pointer');
-        return body => {
-            nativeCalls++;
-            assert.equal(body.toString(),'0x16000');
-            f.memory.set(0xE00C,f.memory.get(0x16038)/100);
-            f.memory.set(0xE010,f.memory.get(0x1603C)/100);
-        };
-    };
-    return {...f, nativeCalls:()=>nativeCalls};
-}
-test('teleport is queued, calls rebuild once with Body*, verifies physics not collection',()=>{
-    const f=teleportFixture(); f.rpc.teleportWhite(); assert.equal(f.nativeCalls(),0); f.leave();
-    const s=f.rpc.status(); assert.equal(s.last_move.success,true, JSON.stringify(s.last_move));
-    assert.equal(s.last_move.collection_confirmed,false); assert.equal(s.last_move.physics_readback.x,524);
-    assert.equal(f.nativeCalls(),1); assert.equal(f.memory.get(0x3034),12);
-    assert.equal(f.memory.get(0x16038),524); assert.equal(f.memory.get(0x1603C),600);
-    assert.equal(f.rpc.report().diagnostic_only,false);
-    assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
-    f.leave(); assert.equal(f.nativeCalls(),1);
-});
-test('teleport refuses locked world, owner mismatch, changed code, wrong recreate target before writes',()=>{
-    for (const [p,v] of [[0xF000+0x19298,2],[0xE0B8,0],[0x1715CB0,0x90],[0xB068,0x200000]]) {
-        const f=teleportFixture(); f.memory.set(p,v); f.rpc.teleportWhite(); f.leave();
-        assert.equal(f.rpc.status().last_move.success,false); assert.ok(f.rpc.status().last_move.error);
-        assert.equal(f.nativeCalls(),0); assert.equal(f.writes.length,0);
-    }
-});
-test('native failure is uncertain: no rollback or retry and report no longer read-only',()=>{
-    const f=teleportFixture(); f.c.NativeFunction=function(){return ()=>{throw Error('native failed');};};
-    f.rpc.teleportWhite();f.leave();const r=f.rpc.status().last_move;
-    assert.equal(r.success,false);assert.equal(r.native_started,true);
-    assert.match(r.warning,/uncertain/);assert.equal(r.rollback,undefined);
-    assert.equal(f.rpc.report().diagnostic_only,false);
-    assert.throws(()=>f.rpc.teleportWhite(),/already attempted/);
-});
-
-function autoFixture(underground = false, autoRise = false) {
-    const f = teleportFixture(true, underground, autoRise);
-    f.c.testTime = 1000;
-    vm.runInContext('Date.now = () => testTime', f.c);
-    return f;
-}
 test('production report is compact and automation waits 300ms then moves once per object', () => {
     const f = autoFixture(); f.leave();
     assert.equal(f.nativeCalls(),0);
@@ -419,15 +301,6 @@ test('production report is compact and automation waits 300ms then moves once pe
     assert.equal(r.auto_run.moved,1); assert.equal(r.method_code_retained,0);
     assert.ok(JSON.stringify(r).length < 10000);
 });
-test('automatic teleport covers all four rarities, pauses and defers locked world', () => {
-    for (const rarity of [1,2,3,4]) {
-        const f=autoFixture(); f.memory.set(0x31F0,rarity); f.leave();
-        f.c.testTime=1300; f.memory.set(0x1088,1); f.leave(); assert.equal(f.nativeCalls(),0);
-        f.memory.set(0x1088,0); f.memory.set(0xF000+0x19298,2); f.leave(); assert.equal(f.nativeCalls(),0);
-        f.memory.set(0xF000+0x19298,0); f.leave(); assert.equal(f.nativeCalls(),1);
-        assert.equal(f.rpc.status().last_move.rarity,rarity);
-    }
-});
 test('auto halts after validation failure and rearms only on observed level phase transition',()=>{
     const f=autoFixture(); f.leave(); f.c.testTime=1300;
     f.memory.set(0xE0B8,0); f.leave(); assert.equal(f.rpc.status().auto_run.halted,true);
@@ -436,44 +309,6 @@ test('auto halts after validation failure and rearms only on observed level phas
     f.memory.set(0x1138,1); f.leave(); f.c.testTime=2300; f.leave(); assert.equal(f.nativeCalls(),1);
     f.rpc.stop(); f.c.testTime=4000; f.leave(); assert.equal(f.nativeCalls(),1);
 });
-test('auto handles multiple Candy objects across updates, not one session-only teleport',()=>{
-    const f=autoFixture();
-    f.identity(0x4000,0x8100,0x9100,0xA100,'16EndlessMazeCandy');
-    f.identity(0x17000,0xB000,0xC000,0xD000,'20EndlessMazeCandyBody');
-    for(const [p,v] of [[0x2808,0x4000],[0x4034,40],[0x4038,60],[0x41F0,3],
-        [0x4198,0x17000],[0x17020,0x18000],[0x17038,40],[0x1703C,60],
-        [0x18000,0],[0x1800C,0.4],[0x18010,0.6],[0x18040,0],[0x18044,0],
-        [0x18038,0],[0x18048,0],[0x180A8,1],[0x180B8,0x17000],[0x18058,0xF000]]) f.memory.set(p,v);
-    let calls=0;
-    f.c.NativeFunction=function(){return body=>{
-        calls++;
-        const physics=f.memory.get(body.n+0x20);
-        f.memory.set(physics+0xC,f.memory.get(body.n+0x38)/100);
-        f.memory.set(physics+0x10,f.memory.get(body.n+0x3C)/100);
-    };};
-    f.leave(); f.c.testTime=1300; f.leave(); assert.equal(calls,1);
-    f.leave(); assert.equal(calls,1);
-    f.c.testTime=1320; f.leave(); assert.equal(calls,2);
-    f.c.testTime=1400; f.leave(); assert.equal(calls,2);
-    assert.equal(f.rpc.status().auto_run.moved,2);
-    assert.throws(()=>f.rpc.teleportWhite(),/automatic teleport enabled/);
-});
-
-function wallFixture(count = 1, mismatch = false, production = false) {
-    const f = fixture(1, production);
-    const mod=f.c.Process.findModuleByName();
-    mod.enumerateRanges=()=>[{base:f.pointer(0x200000),size:0x100000}];
-    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x200000),size:0x100000,protection:'rw-'});
-    f.c.Memory.scanSync=()=>Array.from({length:count},(_,i)=>({address:f.pointer(0x250000+i*0x200)}));
-    const neighbours=vm.runInContext('MEMORY_LAYOUT.catacombs.wall_pass.neighbours',f.c);
-    for(let i=0;i<count;i++) {
-        const base=0x250000+i*0x200;f.memory.set(base,26.67499923706);
-        for(const [off,value] of neighbours) f.memory.set(base+off,value);
-    }
-    if(mismatch)f.memory.set(0x250008,999);
-    f.c.wallTestState=f.pointer(0x1000);
-    return f;
-}
 test('Lua wall parameter applies only to unique validated block and restores original on stop',()=>{
     const f=wallFixture(); vm.runInContext('enableWalls(wallTestState)',f.c);
     assert.equal(f.rpc.status().wall_pass.status,'applied');
@@ -493,23 +328,6 @@ test('wall restoration does not overwrite external edits',()=>{
     const f=wallFixture();vm.runInContext('enableWalls(wallTestState)',f.c);
     f.memory.set(0x250000,123);f.rpc.stop();
     assert.equal(f.memory.get(0x250000),123);assert.equal(f.rpc.status().wall_pass.status,'restore_failed');
-});
-test('wall result survives inactive level and auto-event eviction, retries next observed level',()=>{
-    const f=wallFixture(0);
-    vm.runInContext('enableWalls(wallTestState)',f.c);
-    const first=f.rpc.status().wall_pass;
-    assert.equal(first.status,'unavailable');assert.equal(first.ranges,1);
-    assert.equal(first.scanned_bytes,0x100000);assert.equal(first.raw_matches,0);
-    f.memory.set(0x1138,2);
-    vm.runInContext(`
-        // Enable auto scheduling just for this direct phase-reset check.
-        restoreWalls('level inactive'); if (wallState) wallState.active = false;
-        for (let i=0;i<1100;i++) event('auto_teleport_result',{success:true});
-    `,f.c);
-    assert.equal(f.rpc.status().wall_pass.status,'unavailable');
-    assert.ok(f.rpc.status().wall_events.some(e=>e.kind==='wall_pass_unavailable'));
-    vm.runInContext('enableWalls(wallTestState)',f.c);
-    assert.notEqual(f.rpc.status().wall_pass,first);
 });
 test('wall candidate report includes actual neighbouring values on mismatch without writes',()=>{
     const f=wallFixture(1,true);vm.runInContext('enableWalls(wallTestState)',f.c);
@@ -622,22 +440,10 @@ test('mask partial failure attempts restoration without retrying application',()
     const count=f.writes.length;f.leave();assert.equal(f.writes.length,count);
 });
 
-test('normal speed configuration uses multiplier one and preserves baseline',()=>{
-    const f=wallFixture(1,false,true);
-    vm.runInContext('applySpeed(wallTestState)',f.c);
-    const r=f.rpc.status().speed_test;
-    assert.equal(r.status,'applied');assert.equal(r.multiplier,1);
-    assert.ok(Math.abs(f.memory.get(0x250008)-2.2)<0.0001);
-    assert.equal(f.memory.get(0x250000),26.67499923706);
-    assert.equal(f.writes.length,1);
-    vm.runInContext('applySpeed(wallTestState)',f.c);assert.equal(f.writes.length,1);
-    f.rpc.stop();assert.equal(f.memory.get(0x250008),2.20000004768);
-    assert.equal(f.rpc.status().speed_test.status,'restored');
-});
 test('speed config search refuses missing, ambiguous or bad required neighbours',()=>{
     for(const [count,mismatch] of [[0,false],[2,false],[1,true]]) {
         const f=wallFixture(count,mismatch,true);vm.runInContext('applySpeed(wallTestState)',f.c);
-        assert.equal(f.rpc.status().speed_test.status,'unavailable');assert.equal(f.writes.length,0);
+        assert.equal(f.rpc.status().speed.status,'unavailable');assert.equal(f.writes.length,0);
     }
 });
 test('speed restores on inactive phase and rearms next level, not during pause',()=>{
@@ -645,15 +451,15 @@ test('speed restores on inactive phase and rearms next level, not during pause',
     vm.runInContext('applySpeed(wallTestState)',f.c);assert.equal(f.writes.length,0);
     f.memory.set(0x1088,0);vm.runInContext('applySpeed(wallTestState)',f.c);
     f.memory.set(0x1138,2);vm.runInContext('applySpeed(wallTestState)',f.c);
-    assert.equal(f.rpc.status().speed_test.status,'restored');
+    assert.equal(f.rpc.status().speed.status,'restored');
     assert.equal(f.memory.get(0x250008),2.20000004768);
     f.memory.set(0x1138,1);vm.runInContext('applySpeed(wallTestState)',f.c);
-    assert.equal(f.rpc.status().speed_test.status,'applied');
+    assert.equal(f.rpc.status().speed.status,'applied');
 });
 test('speed restore does not overwrite external modifications',()=>{
     const f=wallFixture(1,false,true);vm.runInContext('applySpeed(wallTestState)',f.c);
     f.memory.set(0x250008,7);f.rpc.stop();
-    assert.equal(f.memory.get(0x250008),7);assert.equal(f.rpc.status().speed_test.status,'restore_failed');
+    assert.equal(f.memory.get(0x250008),7);assert.equal(f.rpc.status().speed.status,'restore_failed');
 });
 
 test('physics readback accepts observed large-coordinate float32 roundoff, not actual displacement',()=>{
@@ -738,34 +544,6 @@ test('underground descent times out without retry, and stop clears forced vertic
 });
 
 
-test('shipped configuration disables underground descent while preserving no-fall, speed and masks',()=>{
-    const profile=fs.readFileSync(path.join(root,'memory/offsets.js'),'utf8');
-    const values=vm.runInNewContext(profile+'; ({fall: MEMORY_LAYOUT.catacombs.no_fall, mask: MEMORY_LAYOUT.catacombs.mask_test.enabled, speed: MEMORY_LAYOUT.catacombs.speed_test.multiplier, auto: MEMORY_LAYOUT.catacombs.auto_teleport.enabled})');
-    assert.equal(values.fall.underground,false);
-    assert.equal(values.fall.enabled,true);
-    assert.equal(values.mask,true);assert.equal(values.speed,1);assert.equal(values.auto,true);
-});
-
-test('manual above queues upward velocity and return-height uses original altitude without cumulative offset',()=>{
-    const f=noFallFixture();f.leave();f.force();f.tick();
-    assert.throws(()=>f.rpc.returnHeight(),/above/);
-    f.rpc.above();assert.equal(f.memory.get(0x20044),0);f.leave();
-    assert.equal(f.memory.get(0x20044),-8);assert.equal(f.rpc.status().no_fall.altitude.target_y,-168);
-    f.memory.set(0x5038,-168);f.tick();f.leave();
-    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.altitude.status,'reached');
-    f.rpc.above();f.leave();assert.equal(f.rpc.status().no_fall.altitude.target_y,-168);
-    f.rpc.returnHeight();f.leave();assert.equal(f.memory.get(0x20044),8);
-    assert.equal(f.rpc.status().no_fall.altitude.target_y,600);
-    f.memory.set(0x5038,600);f.tick();f.leave();assert.equal(f.memory.get(0x20044),0);
-});
-test('manual altitude timeout stops velocity, stop clears pending, no automatic rise',()=>{
-    const f=noFallFixture();f.leave();f.force();f.tick();
-    assert.equal(f.rpc.status().no_fall.altitude,undefined);
-    f.rpc.above();f.leave();f.c.testTime=4001;f.leave();
-    assert.equal(f.rpc.status().no_fall.altitude.status,'timed_out');assert.equal(f.memory.get(0x20044),0);
-    f.force();f.tick();f.rpc.above();f.rpc.stop();assert.equal(f.rpc.status().altitude_pending,null);
-});
-
 test('auto-rise waits for active Hero then targets 30 cells up without above command or expiry',()=>{
     const f=noFallFixture(false,true);
     f.memory.set(0x1138,0);f.leave();assert.equal(f.rpc.status().no_fall,null);
@@ -775,14 +553,6 @@ test('auto-rise waits for active Hero then targets 30 cells up without above com
     assert.equal(f.rpc.status().no_fall.altitude.target_y,600-1920);
     assert.equal(f.memory.get(0x20044),-8);
     f.memory.set(0x5038,500);f.leave();assert.equal(f.rpc.status().no_fall.altitude.target_y,-1320);
-});
-test('auto-rise stops on arrival, stays stopped, and manual return-height does not rearm ascent',()=>{
-    const f=noFallFixture(false,true);f.leave();f.force();f.tick();
-    f.memory.set(0x5038,-1320);f.leave();
-    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.altitude.status,'reached');
-    f.rpc.returnHeight();f.leave();assert.equal(f.rpc.status().no_fall.altitude.target_y,600);
-    f.memory.set(0x5038,600);f.leave();f.leave();
-    assert.equal(f.memory.get(0x20044),0);assert.equal(f.rpc.status().no_fall.altitude.mode,'return');
 });
 test('auto-rise times out once and rearms after observed inactive phase, not every frame',()=>{
     const f=noFallFixture(false,true);f.leave();f.c.testTime=7001;f.leave();
@@ -798,47 +568,6 @@ test('shipped profile arms automatic 30-cell rise and sufficient timeout',()=>{
     assert.ok(config.timeout_ms>config.up/100/config.velocity*1000);
 });
 
-test('spawn probe is opt-in, queued read-only capture of five ASLR-relative candidates',()=>{
-    const f=fixture();
-    assert.throws(()=>f.rpc.spawnProbe(),/active Catacombs/);
-    f.rpc.install();f.tick();assert.equal(f.rpc.report().spawn_probe,null);
-    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
-    f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
-    f.c.NativeFunction=function(){throw Error('probe must not call native');};
-    f.rpc.spawnProbe();assert.equal(f.rpc.report().spawn_probe,null);
-    assert.throws(()=>f.rpc.spawnProbe(),/already queued/);
-    f.leave();const r=f.rpc.report().spawn_probe;
-    assert.equal(r.status,'captured');assert.equal(r.read_only,true);assert.equal(r.spawn_enabled,false);
-    assert.equal(r.abi_verified,false);assert.equal(Object.keys(r.candidates).length,5);
-    assert.equal(r.candidates.factory_candidate.target.rva,'0x15eea70');
-    assert.equal(r.candidates.wrapper_candidate.target.rva,'0x15fb8a0');
-    assert.equal(r.candidates.array_push_candidate.target.rva,'0x1092110');
-    assert.equal(r.candidates.factory_candidate.code.window_bytes,768);
-    assert.equal(r.candidates.wrapper_candidate.code.window_bytes,384);
-    assert.equal(r.candidates.array_push_candidate.code.instructions.length,256);
-    assert.equal(f.writes.length,0);
-    f.memory.clear();assert.equal(f.rpc.report().spawn_probe,r);
-});
-test('spawn probe cancels on stop and refuses stale or inactive state before code capture',()=>{
-    for(const kind of ['stop','expired','state','inactive']) {
-        const f=fixture();f.rpc.install();f.tick();f.rpc.spawnProbe();
-        if(kind==='stop'){f.rpc.stop();assert.equal(f.rpc.status().spawn_probe_pending,null);continue;}
-        if(kind==='expired')vm.runInContext('pendingSpawnProbe.time -= 6000',f.c);
-        if(kind==='state')vm.runInContext('pendingSpawnProbe.state = "other"',f.c);
-        if(kind==='inactive')f.memory.set(0x1138,2);
-        f.leave();assert.equal(f.rpc.report().spawn_probe.status,'failed');assert.equal(f.writes.length,0);
-    }
-});
-
-function spawnArrayFixture() {
-    const f=fixture();
-    f.identity(0x2000,0x8500,0x9500,0xA500,'6ZArrayI12KTGameObjectE');
-    for(const [p,v] of [[0x2020,0],[0x2028,1],[0x2030,32],[0x2038,0],[0x3008,2],[0x8400,0x260000]])f.memory.set(p,v);
-    f.c.spawnState=f.pointer(0x1000);
-    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
-    f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
-    return f;
-}
 test('spawn array probe separates capacity, high index and live count and resolves current Candy attach slot',()=>{
     const f=spawnArrayFixture();
     const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
@@ -861,24 +590,6 @@ test('spawn metadata rejects unsafe u64, oversized capacity and wrong RTTI',()=>
         assert.throws(()=>vm.runInContext('inspectSpawnArray(spawnState)',f.c));assert.equal(f.writes.length,0);
     }
 });
-test('queued probe includes init and live array snapshot but report never rereads object pointers',()=>{
-    const f=spawnArrayFixture();f.rpc.install();f.tick();f.rpc.spawnProbe();f.leave();
-    const r=f.rpc.report().spawn_probe;
-    assert.equal(r.candidates.init_candidate.target.rva,'0x15e90d0');
-    assert.equal(r.candidates.init_candidate.code.window_bytes,1536);
-    assert.equal(r.array.sample_candy.attach_method.target.rva,'0x160000');
-    f.memory.clear();assert.equal(f.rpc.report().spawn_probe,r);assert.equal(f.writes.length,0);
-});
-test('early live Candy evidence survives collection without reusing historical pointers',()=>{
-    const f=spawnArrayFixture();f.rpc.install();f.tick();
-    f.memory.set(0x2800,0);f.memory.set(0x2028,0);
-    f.rpc.spawnProbe();f.leave();const r=f.rpc.report().spawn_probe;
-    assert.equal(r.array.sample_candy,null);
-    assert.equal(r.early_array.array.sample_candy.address,'0x3000');
-    assert.match(r.early_array.warning,/Historical evidence/);
-    assert.equal(f.writes.length,0);
-});
-
 test('spawn array probe resolves body creator from current Candy slot +0x308',()=>{
     const f=spawnArrayFixture();f.memory.set(0x8408,0x270000);
     const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
@@ -926,7 +637,7 @@ test('no-fall cleanup does not clear spawn diagnostics or invalidate live attach
     assert.equal(f.rpc.report().spawn_probe.status,'captured');
     assert.equal(vm.runInContext('attachObservations.length',f.c),1);
     assert.equal(vm.runInContext('earlySpawnArray.state',f.c),'test');
-    f.rpc.install();assert.equal(f.rpc.report().spawn_probe,null);
+    f.rpc.start(1);assert.equal(f.rpc.report().spawn_probe,null);
     assert.equal(vm.runInContext('attachObservations.length',f.c),0);
 });
 test('registered parent is read as raw structure and corroborated against live physics world',()=>{
@@ -974,56 +685,6 @@ function goldFixture() {
         fullGoldPlan=()=>({id:42});completeGoldRegistration=()=>{};`,f.c);
     f.force();f.tick();return {...f,calls};
 }
-test('one gold spawn is queued and registers full native object in a verified free index',()=>{
-    const f=goldFixture();f.rpc.spawnGold();assert.equal(f.calls.length,0);f.leave();
-    const r=f.rpc.status().last_spawn_gold;
-    assert.equal(r.success,true,JSON.stringify(r));assert.equal(r.registered,true);assert.equal(r.collection_confirmed,false);
-    assert.equal(f.calls.join(','),'factory,attach,assign');assert.equal(f.memory.get(0x2808),0x40000);
-    assert.equal(f.memory.get(0x40034),524);assert.equal(f.memory.get(0x40038),600);
-    assert.throws(()=>f.rpc.spawnGold(),/one spawn attempt/);
-});
-test('gold spawn refuses world/parent mismatch, full array or altered signatures before any native call',()=>{
-    for(const mutate of [f=>f.memory.set(0x30008,0),f=>f.memory.set(0x2808,0x3000),
-        f=>f.memory.set(0x100000+0x15EEA70,0x90)]) {
-        const f=goldFixture();mutate(f);f.rpc.spawnGold();f.leave();
-        assert.equal(f.rpc.status().last_spawn_gold.success,false);assert.equal(f.calls.length,0);
-        assert.equal(f.rpc.status().spawn_gold_attempted,false);
-    }
-});
-test('gold native failure is latched with no retry or guessed destructor; stop cancels queued request',()=>{
-    const f=goldFixture();f.c.NativeFunction=function(){return ()=>{throw Error('native fault');};};
-    f.rpc.spawnGold();f.leave();const r=f.rpc.status().last_spawn_gold;
-    assert.equal(r.native_started,true);assert.equal(r.success,false);assert.match(r.warning,/orphan/);
-    assert.throws(()=>f.rpc.spawnGold(),/one spawn attempt/);
-    const stopped=goldFixture();stopped.rpc.spawnGold();stopped.rpc.stop();assert.equal(stopped.rpc.status().spawn_gold_pending,null);
-});
-
-test('gold spawn detaches its own attach observer and flushes before verifying original bytes',()=>{
-    const f=goldFixture();
-    const sig=vm.runInContext('C.spawn_gold.signatures.find(s=>s.rva===C.spawn_gold.attach)',f.c);
-    const code=0x100000+sig.rva;let detached=0,flushed=0;
-    f.memory.set(code,0xCC); // simulate Interceptor's installed prologue patch
-    f.c.testDetach=()=>{detached++;sig.bytes.forEach((b,i)=>f.memory.set(code+i,b));};
-    f.c.Interceptor.flush=()=>{assert.equal(detached,1);flushed++;};
-    vm.runInContext("attachObserver={detach:testDetach};attachObservationStatus={status:'listening',observed:8}",f.c);
-    f.rpc.spawnGold();f.leave();const r=f.rpc.status().last_spawn_gold;
-    assert.equal(r.success,true,JSON.stringify(r));assert.equal(r.attach_observer_detached,true);
-    assert.equal(detached,1);assert.equal(flushed,1);assert.equal(f.rpc.status().attach_observer.status,'detached_for_spawn');
-    assert.equal(f.calls.join(','),'factory,attach,assign');
-});
-test('gold spawn still rejects altered original bytes after observer detachment',()=>{
-    const f=goldFixture();
-    const sig=vm.runInContext('C.spawn_gold.signatures.find(s=>s.rva===C.spawn_gold.attach)',f.c);
-    const code=0x100000+sig.rva;
-    f.memory.set(code,0xCC);f.memory.set(code+32,0x90);
-    f.c.testDetach=()=>{sig.bytes.slice(0,20).forEach((b,i)=>f.memory.set(code+i,b));};
-    f.c.Interceptor.flush=()=>{};
-    vm.runInContext('attachObserver={detach:testDetach}',f.c);
-    f.rpc.spawnGold();f.leave();const r=f.rpc.status().last_spawn_gold;
-    assert.equal(r.success,false);assert.equal(r.native_started,false);assert.equal(f.calls.length,0);
-    assert.match(r.error,/spawn signature mismatch at 15e9700/);
-});
-
 test('spawn attach signature uses pristine pre-observer prologue, not a captured Frida jump',()=>{
     const profile=fs.readFileSync(path.join(root,'memory/offsets.js'),'utf8');
     const cfg=vm.runInNewContext(profile+'; MEMORY_LAYOUT.catacombs');
@@ -1032,162 +693,6 @@ test('spawn attach signature uses pristine pre-observer prologue, not a captured
     assert.equal(sig.bytes.slice(0,cfg.spawn_probe.attach_prefix.length).join(','),cfg.spawn_probe.attach_prefix.join(','));
     assert.equal(sig.bytes.slice(0,6).join(','),'85,72,137,229,65,86');
 });
-test('signature refusal includes expected and actual bytes, no factory call',()=>{
-    const f=goldFixture();f.memory.set(0x100000+0x15E9700,0xE9);f.rpc.spawnGold();f.leave();
-    const r=f.rpc.status().last_spawn_gold;
-    assert.equal(r.native_started,false);assert.equal(f.calls.length,0);
-    assert.equal(r.signature_mismatch.rva,'0x15e9700');assert.equal(r.signature_mismatch.first_difference,0);
-    assert.ok(r.signature_mismatch.expected_hex.startsWith('55 48 89 e5'));
-    assert.ok(r.signature_mismatch.actual_hex.startsWith('e9 '));
-});
-
-test('bounded gold cycle schedules spaced attempts, stops at100 and cannot be rearmed',()=>{
-    const f=goldFixture();let time=vm.runInContext("Date.now()",f.c);f.c.Date={now:()=>time};
-    f.rpc.spawnGoldCycle();f.leave();
-    assert.equal(f.rpc.status().spawn_cycle.registered,1);
-    f.leave();assert.equal(f.rpc.status().spawn_cycle.attempted,1);
-    // Reuse the mock free slot; real runtime must find a fresh null slot each time.
-    for(let i=1;i<100;i++){time+=100;f.memory.set(0x2808,0);f.leave();}
-    const c=f.rpc.status().spawn_cycle;
-    assert.equal(c.attempted,100);assert.equal(c.registered,100);assert.equal(c.active,false);
-    assert.equal(c.reason,'limit reached');f.force();f.tick();assert.throws(()=>f.rpc.spawnGoldCycle(),/fresh module/);
-});
-test('cycle stops on native error, explicit cancellation, state/phase change and module stop',()=>{
-    for(const mode of ['failure','cancel','phase','stop']){
-        const f=goldFixture();f.rpc.spawnGoldCycle();
-        if(mode==='failure')f.c.NativeFunction=function(){return ()=>{throw Error('fault');};};
-        if(mode==='cancel')f.rpc.spawnGoldStop();
-        if(mode==='phase')f.memory.set(0x1138,2);
-        if(mode==='stop')f.rpc.stop();
-        f.leave();assert.equal(f.rpc.status().spawn_cycle.active,false,mode);
-        assert.equal(f.rpc.status().spawn_cycle.registered,0,mode);
-    }
-});
-
-test('gold diagnostic stages survive report and follow membership without reading removed object',()=>{
-    const f=goldFixture();f.rpc.spawnGold();f.leave();f.leave();
-    let d=f.rpc.report().gold_diagnostics;
-    assert.equal(d.spawned.length,1);assert.equal(d.spawned[0].stages.factory.rarity,4);
-    assert.equal(d.spawned[0].stages.registered.body.address,'0x50000');
-    assert.equal(d.spawned[0].timeline[0].membership,'present');
-    f.memory.set(0x2808,0); // Historical address is no longer a valid member.
-    vm.runInContext('goldDiagnostics.spawned[0].next=0',f.c);f.leave();
-    d=f.rpc.report().gold_diagnostics;
-    assert.equal(d.spawned[0].done,true);
-    assert.equal(d.spawned[0].timeline.at(-1).membership,'removed_or_slot_reused');
-    assert.equal(d.spawned[0].timeline.at(-1).evidence,undefined);
-});
-test('gold diagnostic stops following historical objects on phase transition',()=>{
-    const f=goldFixture();f.rpc.spawnGold();f.leave();f.memory.set(0x1138,2);f.leave();
-    const t=f.rpc.report().gold_diagnostics.spawned[0];
-    assert.equal(t.done,true);assert.match(t.end,/old pointers not read/);
-});
-
-test('contact diagnostics capture verified lambda, column record and both containers without native calls',()=>{
-    const f=goldFixture();f.rpc.spawnGold();f.leave();const before=f.calls.length;f.c.ptr=f.pointer;f.memory.set(0x50041,0);
-    f.identity(0x70000,0x71000,0x72000,0x73000,'EndlessMazePlayState20addObstaclesInColumn');
-    for(const [p,v] of [[0x50070,0x70000],[0x71030,0x100000+0x14DB600],
-        [0x70008,0x80000],[0x70010,7],[0x70018,0x40000],[0x80058,0x2000],[0x80068,0x2000],
-        [0x80128,0x90000],[0x90020,7],[0x90028,0xA0000],[0x90030,0xA0050],
-        [0xA0010,7],[0xA0048,45],[0xA0020,42],[0x40184,42],[0x80110,0xB0000],[0xB0020,7],
-        [0xB0028,0xC0000],[0xB0030,0xC0008],[0xC0000,0x40000]]) f.memory.set(p,v);
-    const e=vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c);
-    assert.equal(e.captures.candy_matches,true);assert.equal(e.records.matches[0].id,42);
-    assert.equal(e.column_objects.matches[0].object,'0x40000');
-    assert.equal(e.container_58.slots[0],1);assert.equal(e.container_68.slots[0],1);
-    assert.equal(f.calls.length,before);
-});
-test('contact diagnostics refuse unknown callback captures and bound cyclic trees',()=>{
-    const f=goldFixture();f.c.ptr=f.pointer;f.rpc.spawnGold();f.leave();f.memory.set(0x50041,0);f.memory.set(0x50070,0);
-    assert.equal(vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c).callback_missing,true);
-    f.identity(0x70000,0x71000,0x72000,0x73000,'OtherCallback');f.memory.set(0x50070,0x70000);
-    f.memory.set(0x71030,0x100000+0x14DB600);
-    assert.equal(vm.runInContext('goldContactEvidence(ptr(0x40000))',f.c).captures,undefined);
-    f.memory.set(0x80128,0x90000);f.memory.set(0x90020,9);f.memory.set(0x90000,0x90000);
-    assert.throws(()=>vm.runInContext('diagnosticColumn(ptr(0x80000),0x128,7,0x50,42)',f.c),/tree cycle/);
-});
-
-test('full registration helper installs owned callback, clones record and adds secondary memberships',()=>{
-    const f=goldFixture();f.rpc.spawnGold();f.leave();f.c.ptr=f.pointer;
-    const base=0x100000;let alloc=0xE0000;const order=[];
-    f.c.Memory.alloc=n=>{const p=f.pointer(alloc);alloc+=n+0x100;return p;};
-    const plan={source:f.pointer(0x90000),recordNode:f.pointer(0x91000),recordEnd:f.pointer(0x92000),
-        objectNode:f.pointer(0x93000),objectEnd:f.pointer(0x94000),array58:f.pointer(0x95000),slot58:0,
-        counter:100,id:101,column:19,callbackVptr:f.pointer(0x96000),m:{base:f.pointer(base)}};
-    f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);
-    f.memory.set(0x95018,1);f.memory.set(0x95010,0x97000);f.memory.set(0x97000,0);f.memory.set(0x96020,base+0x123);
-    f.c.plan=plan;f.c.testState=f.pointer(0x1000);f.c.testObject=f.pointer(0x40000);f.c.testBody=f.pointer(0x50000);
-    f.c.testAssign=(a,o,i)=>{order.push('assign58');f.memory.set(0x97000,o.n);};
-    f.c.NativeFunction=function(p){
-        if(p.n===base+0x1618080)return (body,tmp)=>{order.push('callback');
-            f.memory.set(0x50070,0x98000);for(const off of [0,8,0x10,0x18])f.memory.set(0x98000+off,f.memory.get(tmp.n+off));};
-        if(p.n===base+0x123)return ()=>order.push('destroyTemporary');
-        if(p.n===base+0x105B020)return (dst,src)=>{order.push('copy');f.memory.set(dst.n+0x20,f.memory.get(src.n+0x20));};
-        if(p.n===base+0x14BCB80)return (vector,local)=>{order.push('pushRecord');
-            f.memory.set(0xB0020,f.memory.get(local.n+0x20));
-            f.memory.set(0x91028,0xB0000);f.memory.set(0x91030,0xB0050);return f.pointer(0xB0000);};
-        if(p.n===base+0x105B0D0)return ()=>order.push('cleanup');
-        throw Error('unexpected native');
-    };
-    vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
-    assert.equal(order.join(','),'callback,destroyTemporary,copy,copy,cleanup,assign58');
-    assert.equal(f.memory.get(0x92020),101);assert.equal(f.memory.get(0x113C),101);
-    assert.equal(f.memory.get(0x91030),0x92050);assert.equal(f.memory.get(0x94000),0x40000);
-    assert.equal(f.memory.get(0x93030),0x94008);
-    // Same helper's full-vector branch delegates record ownership to native push_back.
-    f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);f.memory.set(0x97000,0);
-    plan.recordGrow=true;order.length=0;
-    vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
-    assert.equal(order.join(','),'callback,destroyTemporary,copy,pushRecord,cleanup,assign58');
-    assert.equal(f.memory.get(0xB0020),101);assert.equal(f.c.helperResult.record_vector_grew,true);
-    f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);f.memory.set(0x97000,0);
-    plan.reuseCollected=true;plan.id=62;plan.recordFlags=7;
-    vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
-    assert.equal(f.memory.get(0xB0020),62);assert.equal(f.memory.get(0x113C),100);
-
-});
-test('full registration preflight refuses missing native signatures and cycle command stays disabled',()=>{
-    const f=goldFixture();f.c.testState=f.pointer(0x1000);f.c.testArray=f.pointer(0x2000);
-    const n=f.calls.length;
-    assert.throws(()=>vm.runInContext('originalFullGoldPlan(testState,testArray)',f.c),/full spawn signature/);
-    assert.equal(f.calls.length,n);assert.equal(f.rpc.spawnGoldCycle().limit,100);
-});
-
-test('gold may be armed before a level and waits for active phase before one native attempt',()=>{
-    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();
-    const r=f.rpc.spawnGold();assert.equal(r.armed_for_next_level,true);
-    f.leave();assert.equal(f.calls.length,0);assert.ok(f.rpc.status().spawn_gold_pending);
-    f.memory.set(0x1138,1);f.force();f.tick();f.leave();
-    assert.equal(f.rpc.status().last_spawn_gold.success,true);
-    assert.equal(f.calls.filter(x=>x==='factory').length,1);
-    assert.equal(f.rpc.status().spawn_gold_pending,null);
-});
-test('armed spawn waits only for absent template, expires or cancels without factory',()=>{
-    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();f.rpc.spawnGold();
-    vm.runInContext("fullGoldPlan=()=>{throw Error('no live uncollected gold with verified callback/column record');}",f.c);
-    f.memory.set(0x1138,1);f.force();f.tick();f.leave();
-    assert.equal(f.rpc.status().last_spawn_gold.waiting_for_template,true);assert.equal(f.calls.length,0);
-    vm.runInContext('pendingGold.deadline=0',f.c);f.leave();
-    assert.equal(f.rpc.status().spawn_gold_pending,null);assert.equal(f.calls.length,0);
-});
-
-test('full registration cycle can be armed before level and expires without any native attempt',()=>{
-    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();
-    f.rpc.spawnGoldCycle();assert.equal(f.rpc.status().spawn_cycle.state,null);
-    f.leave();assert.equal(f.calls.length,0);
-    vm.runInContext('goldCycle.armed_deadline=0',f.c);f.leave();
-    assert.equal(f.rpc.status().spawn_cycle.active,false);
-    assert.equal(f.rpc.status().spawn_cycle.reason,'level wait expired');assert.equal(f.calls.length,0);
-});
-test('armed cycle binds active level and blocks auto teleport only while series is active',()=>{
-    const f=goldFixture();f.memory.set(0x1138,0);f.force();f.tick();f.rpc.spawnGoldCycle();
-    let auto=0;f.c.testAuto=()=>auto++;vm.runInContext('autoTeleport=testAuto',f.c);
-    f.leave();assert.equal(auto,0);
-    f.memory.set(0x1138,1);f.force();f.tick();f.leave();
-    assert.equal(f.rpc.status().spawn_cycle.registered,1);f.leave();assert.equal(auto,0);
-    f.rpc.spawnGoldStop();f.leave();assert.equal(auto,1);
-});
-
 test('record observer follows ID invalidation after object removal without reading historical Candy',()=>{
     const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));f.c.testState=f.pointer(0x1000);
     f.memory.set(0x1128,0x90000);f.memory.set(0x90000,0);f.memory.set(0x90008,0);f.memory.set(0x90020,19);f.memory.set(0x90028,0xA0000);f.memory.set(0x90030,0xA0050);
@@ -1224,19 +729,6 @@ test('pointer vector growth uses native allocator pair, preserves pointers and p
     f.memory.set(0x90030,0xB0040);f.memory.set(0x90038,0xB0038);
     assert.throws(()=>vm.runInContext('growGoldPointerVector(growNode,growObject,growModule,growResult)',f.c),/bounds invalid/);
 });
-test('100ms cycle has no burst catchup after delayed update',()=>{
-    const f=goldFixture();let time=vm.runInContext('Date.now()',f.c);f.c.Date={now:()=>time};
-    f.rpc.spawnGoldCycle();f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,1);
-    time+=99;f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,1);
-    time+=1;f.memory.set(0x2808,0);f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,2);
-    time+=1000;f.memory.set(0x2808,0);f.leave();f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,3);
-});
-
-test('reuse ID command is explicit, queued, bounded and does not change the normal cycle',()=>{
-    const f=goldFixture();const r=f.rpc.spawnGoldReuse();assert.equal(r.reuse_collected_id,true);
-    assert.equal(f.rpc.status().spawn_gold_pending.reuseCollected,true);assert.equal(f.calls.length,0);
-    assert.throws(()=>f.rpc.spawnGoldReuse(),/fresh module/);f.rpc.stop();assert.equal(f.rpc.status().spawn_gold_pending,null);
-});
 test('collected natural ID selector requires invalidated matching record and no active Candy',()=>{
     const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));f.c.testState=f.pointer(0x1000);
     for(const [p,v]of [[0x3184,10],[0x1058,0x2000],[0x1128,0x90000],[0x90020,19],[0x90028,0xA0000],[0x90030,0xA0050],
@@ -1251,87 +743,6 @@ test('collected natural ID selector requires invalidated matching record and no 
     assert.throws(()=>vm.runInContext('collectedGoldTemplate(testState)',f.c),/no verified collected/);
 });
 
-test('reuse cycle explicitly marks every queued attempt and retains pacing/cancellation',()=>{
-    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));
-    vm.runInContext('collectedGoldTemplate=()=>({reuseId:62});fullGoldPlan=(state,array,reuse)=>{if(!reuse)throw Error("reuse flag missing");return {id:62};}',f.c);
-    const start=f.rpc.spawnGoldReuseCycle();assert.equal(start.reuse_collected_id,true);assert.equal(start.limit,100);
-    f.leave();assert.equal(f.rpc.status().last_spawn_gold.reused_collected_id,true);
-    assert.equal(f.rpc.status().spawn_cycle.registered,1);
-    f.rpc.spawnGoldStop();f.leave();assert.equal(f.rpc.status().spawn_cycle.active,false);
-    assert.equal(f.calls.filter(c=>c==='factory').length,1);
-});
-test('reuse cycle refuses missing collected ID before enabling series or native calls',()=>{
-    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));
-    assert.throws(()=>f.rpc.spawnGoldReuseCycle(),/no verified collected/);
-    assert.equal(f.rpc.status().spawn_cycle,null);assert.equal(f.calls.length,0);
-});
-
-function descriptorGoldFixture(authoredGold=3) {
-    const f=goldFixture();const G=vm.runInContext('C.all_gold',f.c);
-    // Authored gold count is now the default cap; seed it like a live census would.
-    vm.runInContext(`levelCensuses=[{time:Date.now(),state:'0x1000',surviving_total:10,surviving_by_rarity:{1:5,2:1,3:1,4:${authoredGold}}}]`,f.c);
-    G.signature.forEach((v,i)=>f.memory.set(0x100000+G.descriptor_factory+i,v));
-    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'rwx'});
-    for(const [p,v] of [[0x100000+G.rarity_map+8,0x80000],[0x8001C,4],[0x80020,4],
-        [0x90048,45],[0x90020,62],[0x90010,7],[0x90044,1]])f.memory.set(p,v);
-    let callback,detached=0,flushed=0;
-    f.c.Interceptor.attach=(p,cb)=>{assert.equal(p.n,0x100000+G.descriptor_factory);callback=cb;return {detach(){detached++;}};};
-    f.c.Interceptor.flush=()=>{flushed++;};
-    return {...f,G,enter(caller=G.caller){callback.onEnter.call({returnAddress:f.pointer(0x100000+caller)},[f.pointer(0x90000)]);},detached:()=>detached,flushed:()=>flushed};
-}
-test('all-gold changes descriptor rarity key/flag before native creation, not IDs or counts',()=>{
-    const f=descriptorGoldFixture();assert.equal(f.rpc.allGold().active,true);f.enter();
-    assert.equal(f.memory.get(0x90044),4);assert.equal(f.memory.get(0x90010),0x807);assert.equal(f.memory.get(0x90020),62);
-    assert.equal(f.rpc.status().all_gold.converted,1);f.enter();assert.equal(f.rpc.status().all_gold.converted,1);
-    assert.equal(f.rpc.status().all_gold.seen,2);f.enter(0x123);assert.equal(f.rpc.status().all_gold.skipped_caller,1);
-    assert.throws(()=>f.rpc.spawnGold(),/disable all-gold/);
-    assert.equal(f.rpc.allGoldOff().active,false);assert.equal(f.detached(),1);assert.equal(f.flushed(),2);
-    assert.equal(f.calls.length,0);
-});
-test('all-gold rejects descriptor signature mismatch before installing hook',()=>{
-    const f=descriptorGoldFixture();f.memory.set(0x100000+f.G.descriptor_factory,0x90);
-    assert.throws(()=>f.rpc.allGold(),/signature mismatch/);assert.equal(f.rpc.status().all_gold.active,false);
-});
-test('all-gold fails closed on missing/wrong runtime rarity mapping and does not change record',()=>{
-    for(const value of [2,null]) {
-        const f=descriptorGoldFixture();if(value===null)f.memory.set(0x100000+f.G.rarity_map+8,0);else f.memory.set(0x80020,value);
-        f.rpc.allGold();f.enter();assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
-        assert.equal(f.rpc.status().all_gold.active,false);assert.ok(f.rpc.status().all_gold.error);
-    }
-});
-test('all-gold leaves non-Candy and retired records unchanged',()=>{
-    const f=descriptorGoldFixture();f.rpc.allGold();f.memory.set(0x90048,46);f.enter();
-    assert.equal(f.memory.get(0x90044),1);f.memory.set(0x90048,45);f.memory.set(0x90020,-1);f.enter();
-    assert.equal(f.memory.get(0x90044),1);assert.equal(f.rpc.status().all_gold.converted,0);
-});
-
-test('all-gold restores both descriptor fields on interrupted write/readback',()=>{
-    const f=descriptorGoldFixture(),prototype=Object.getPrototypeOf(f.pointer(0)),write=prototype.writeS32;
-    let failed=false;
-    prototype.writeS32=function(n){if(this.n===0x90010&&!failed){failed=true;throw Error('simulated write failure');}return write.call(this,n);};
-    f.rpc.allGold();f.enter();assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
-    assert.equal(f.rpc.status().all_gold.last_failed_record.rollback,true);
-    assert.equal(f.rpc.status().all_gold.active,false);
-});
-test('all-gold rejects readonly descriptor without mutation',()=>{
-    const f=descriptorGoldFixture();f.rpc.allGold();
-    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'r--'});f.enter();
-    assert.equal(f.memory.get(0x90044),1);assert.equal(f.memory.get(0x90010),7);
-    assert.match(f.rpc.status().all_gold.error,/not writable/);
-});
-
-function sequenceFixture() {
-    const f=goldFixture();const S=vm.runInContext('C.sequence_probe',f.c);
-    S.signature.forEach((v,i)=>f.memory.set(0x100000+S.builder+i,v));
-    for(const [p,v]of [[0x1150,0x90000],[0x1158,2],[0x90000,0],[0x90008,0x91000],[0x9001C,1],[0x90020,11],
-        [0x91000,0],[0x91008,0],[0x9101C,4],[0x91020,3]])f.memory.set(p,v);
-    let callback,detached=0;
-    f.c.Interceptor.attach=(address,cb)=>{assert.equal(address.n,0x100000+S.builder);callback=cb;return {detach(){detached++;}};};
-    f.c.Interceptor.flush=()=>{};f.c.sequenceModule={base:f.pointer(0x100000),size:0x3000000};
-    return {...f,S,install(){vm.runInContext('installSequenceProbe(sequenceModule)',f.c);},
-        invoke(payload=0x10D8){callback.onEnter.call({returnAddress:f.pointer(0x100000+0x14D78E9)},
-            [f.pointer(0x80000),f.pointer(payload),f.pointer(1),f.pointer(0x1148),f.pointer(7),f.pointer(0)]);},detached:()=>detached};
-}
 test('sequence probe captures read-only builder input type/count pairs and actual argument ownership',()=>{
     const f=sequenceFixture();f.install();const before=f.writes.length;f.invoke();
     const p=f.rpc.report().sequence_probe;assert.equal(p.status,'listening');assert.equal(p.calls,1);
@@ -1391,7 +802,7 @@ test('sequence probe census fails closed on malformed record vectors without bre
 
 test('level census records surviving Candy by rarity during active phase without writes',()=>{
     const f=sequenceFixture(); // fixture default phase_raw=1, diagnostics off
-    vm.runInContext('install()',f.c); // attach observer through the normal graph scan path
+    f.rpc.start(1); // attach observer through the normal graph scan path
     for(const [p,v]of [[0x1128,0x92000],[0x92000,0],[0x92008,0],[0x92020,0x128],[0x92028,0xA0000],[0x92030,0xA00A0],
         [0xA0010,7],[0xA0020,11],[0xA0044,1],[0xA0048,0x2D],
         [0xA0060,7],[0xA0070,12],[0xA0094,4],[0xA0098,0x2D]])f.memory.set(p,v);
@@ -1595,40 +1006,8 @@ test('manager location skips vanished heap ranges and still confirms the manager
     assert.equal(bad.status,'unavailable');assert.ok(bad.error);
 });
 
-test('all-gold accepts an explicit conversion cap and stops converting at it',()=>{
-    const f=descriptorGoldFixture();
-    const r=f.rpc.allGold(2);
-    assert.equal(r.active,true);assert.equal(r.limit,2);
-    // Same descriptor converted repeatedly still counts once; the cap gates further conversions.
-    f.enter();assert.equal(f.rpc.status().all_gold.converted,1);assert.equal(f.rpc.status().all_gold.limit,2);
-    f.memory.set(0x90044,1);f.enter(undefined);assert.equal(f.rpc.status().all_gold.converted,2);
-    f.memory.set(0x90044,1);f.enter();assert.equal(f.rpc.status().all_gold.converted,2); // cap reached
-    assert.equal(f.memory.get(0x90044),1); // untouched beyond the cap
-    assert.equal(f.rpc.status().all_gold.active,true); // mode stays on, just stops converting
-    assert.throws(()=>f.rpc.allGold(-1),/non-negative/);
-    // Default cap is the authored gold count from the census, not unlimited.
-    const g=descriptorGoldFixture(5);assert.equal(g.rpc.allGold().limit,5);
-});
-
-test('all-gold default cap follows the authored gold count and refuses when unknown',()=>{
-    const f=descriptorGoldFixture(3);
-    assert.equal(f.rpc.allGold().limit,3);
-    // Census wins over nothing; snapshots are the fallback when no census sample exists.
-    const g=goldFixture();
-    vm.runInContext(`levelCensuses=[];sequenceProbe.snapshots=[{level:{inventory:{rarity_by_key:{'4':7}}}}]`,g.c);
-    g.c.Process.findRangeByAddress=()=>({base:g.pointer(0),size:0x4000000,protection:'rwx'});
-    const G=vm.runInContext('C.all_gold',g.c);
-    G.signature.forEach((v,i)=>g.memory.set(0x100000+G.descriptor_factory+i,v));
-    g.c.Interceptor.attach=()=>({detach(){}});g.c.Interceptor.flush=()=>{};
-    assert.equal(vm.runInContext('allGoldLimit(undefined)',g.c),7);
-    // Unknown authored count must fail closed instead of silently converting everything.
-    vm.runInContext('sequenceProbe.snapshots=[]',g.c);
-    assert.throws(()=>vm.runInContext('allGoldLimit(undefined)',g.c),/authored gold count unknown/);
-    assert.equal(vm.runInContext('allGoldLimit(0)',g.c),0); // explicit override still allowed
-});
-
 test('stage snapshot exposes boundary/continue fields read-only and records changes',()=>{
-    const f=fixture();f.rpc.install();
+    const f=fixture();f.rpc.start(1);
     // current=18 (float), lower1, upper21, max20, goal object, continue flag0, phase1
     f.memory.set(0x10F0,18);f.memory.set(0x1178,1);f.memory.set(0x117C,21);
     f.memory.set(0x1180,20);f.memory.set(0x1188,0x7000);f.memory.set(0x1194,0);f.memory.set(0x1190,0);
@@ -1660,4 +1039,109 @@ test('manager survey reports set capacity and records descriptor set fields verb
     assert.equal(r.last.set_field_samples[2].set,22);
     assert.equal(r.last.read_only,true);
     assert.equal(f.writes.length,0);
+});
+
+function teleportFixture(production = false, underground = false, autoRise = false) {
+    const f = movementFixture(production, underground, autoRise);
+    f.identity(0x16000, 0xB000, 0xC000, 0xD000, '20EndlessMazeCandyBody');
+    for (const [p,v] of [[0x3198,0x16000],[0x16020,0xE000],[0xE000,0],[0xE00C,0.12],
+        [0xE010,0.06],[0xE040,0],[0xE044,0],[0xE038,0],[0xE048,0],[0xE0A8,1],
+        [0xE0B8,0x16000],[0xE058,0xF000],[0xF000+0x19298,0],[0xB068,0x100000+0x1617DE0],
+        [0x16038,12],[0x1603C,6]]) f.memory.set(p,v);
+    const sigs = vm.runInContext('MEMORY_LAYOUT.catacombs.teleport_white.signatures',f.c);
+    for (const sig of sigs) sig.bytes.forEach((b,i)=>f.memory.set(0x100000+sig.rva+i,b));
+    let nativeCalls=0;
+    f.c.NativeFunction = function (target, ret, args) {
+        assert.equal(target.toString(),'0x1715cb0');
+        assert.equal(ret,'void'); assert.equal(args.join(','),'pointer');
+        return body => {
+            nativeCalls++;
+            assert.equal(body.toString(),'0x16000');
+            f.memory.set(0xE00C,f.memory.get(0x16038)/100);
+            f.memory.set(0xE010,f.memory.get(0x1603C)/100);
+        };
+    };
+    return {...f, nativeCalls:()=>nativeCalls};
+}
+function autoFixture(underground = false, autoRise = false) {
+    const f = teleportFixture(true, underground, autoRise);
+    f.c.testTime = 1000;
+    vm.runInContext('Date.now = () => testTime', f.c);
+    return f;
+}
+function wallFixture(count = 1, mismatch = false, production = false) {
+    const f = fixture(1, production);
+    const mod=f.c.Process.findModuleByName();
+    mod.enumerateRanges=()=>[{base:f.pointer(0x200000),size:0x100000}];
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x200000),size:0x100000,protection:'rw-'});
+    f.c.Memory.scanSync=()=>Array.from({length:count},(_,i)=>({address:f.pointer(0x250000+i*0x200)}));
+    const neighbours=vm.runInContext('MEMORY_LAYOUT.catacombs.wall_pass.neighbours',f.c);
+    for(let i=0;i<count;i++) {
+        const base=0x250000+i*0x200;f.memory.set(base,26.67499923706);
+        for(const [off,value] of neighbours) f.memory.set(base+off,value);
+    }
+    if(mismatch)f.memory.set(0x250008,999);
+    f.c.wallTestState=f.pointer(0x1000);
+    return f;
+}
+function spawnArrayFixture() {
+    const f=fixture();
+    f.identity(0x2000,0x8500,0x9500,0xA500,'6ZArrayI12KTGameObjectE');
+    for(const [p,v] of [[0x2020,0],[0x2028,1],[0x2030,32],[0x2038,0],[0x3008,2],[0x8400,0x260000]])f.memory.set(p,v);
+    f.c.spawnState=f.pointer(0x1000);
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
+    f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
+    return f;
+}
+function descriptorGoldFixture(authoredGold=3) {
+    const f=goldFixture();const G=vm.runInContext('C.all_gold',f.c);
+    // Authored gold count is now the default cap; seed it like a live census would.
+    vm.runInContext(`levelCensuses=[{time:Date.now(),state:'0x1000',surviving_total:10,surviving_by_rarity:{1:5,2:1,3:1,4:${authoredGold}}}]`,f.c);
+    G.signature.forEach((v,i)=>f.memory.set(0x100000+G.descriptor_factory+i,v));
+    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'rwx'});
+    for(const [p,v] of [[0x100000+G.rarity_map+8,0x80000],[0x8001C,4],[0x80020,4],
+        [0x90048,45],[0x90020,62],[0x90010,7],[0x90044,1]])f.memory.set(p,v);
+    let callback,detached=0,flushed=0;
+    f.c.Interceptor.attach=(p,cb)=>{assert.equal(p.n,0x100000+G.descriptor_factory);callback=cb;return {detach(){detached++;}};};
+    f.c.Interceptor.flush=()=>{flushed++;};
+    return {...f,G,enter(caller=G.caller){callback.onEnter.call({returnAddress:f.pointer(0x100000+caller)},[f.pointer(0x90000)]);},detached:()=>detached,flushed:()=>flushed};
+}
+function sequenceFixture() {
+    const f=goldFixture();const S=vm.runInContext('C.sequence_probe',f.c);
+    S.signature.forEach((v,i)=>f.memory.set(0x100000+S.builder+i,v));
+    for(const [p,v]of [[0x1150,0x90000],[0x1158,2],[0x90000,0],[0x90008,0x91000],[0x9001C,1],[0x90020,11],
+        [0x91000,0],[0x91008,0],[0x9101C,4],[0x91020,3]])f.memory.set(p,v);
+    let callback,detached=0;
+    f.c.Interceptor.attach=(address,cb)=>{assert.equal(address.n,0x100000+S.builder);callback=cb;return {detach(){detached++;}};};
+    f.c.Interceptor.flush=()=>{};f.c.sequenceModule={base:f.pointer(0x100000),size:0x3000000};
+    return {...f,S,install(){vm.runInContext('installSequenceProbe(sequenceModule)',f.c);},
+        invoke(payload=0x10D8){callback.onEnter.call({returnAddress:f.pointer(0x100000+0x14D78E9)},
+            [f.pointer(0x80000),f.pointer(payload),f.pointer(1),f.pointer(0x1148),f.pointer(7),f.pointer(0)]);},detached:()=>detached};
+}
+
+test('start is the single command surface and validates the speed 1..10',()=>{
+    const f=wallFixture(1,false,true);
+    for(const bad of [0,11,-1,2.5,'fast'])assert.throws(()=>f.rpc.start(bad),/speed/);
+    assert.equal(typeof f.c.install,'undefined'); // internal install is not exposed as a command
+    const r=f.rpc.start(4);
+    assert.equal(r.enabled,true);assert.equal(r.speed.requested,4);assert.equal(r.speed.multiplier,4);
+    // The multiplier is what the physics block receives.
+    f.memory.set(0x1088,0);f.memory.set(0x1138,1);
+    vm.runInContext('applySpeed(wallTestState)',f.c);
+    assert.equal(f.rpc.status().speed.multiplier,4);
+    assert.ok(Math.abs(f.memory.get(0x250008)-2.20000004768*4)<1e-6); // float32 storage tolerance
+    // stop() restores the character value (asserted by the restore tests above).
+    f.rpc.stop();
+    // Repeated identical start is idempotent; a different speed reloads the session.
+    assert.equal(f.rpc.start(4).enabled,true);
+    assert.equal(f.rpc.start(4).speed.unchanged,true);
+});
+test('speed 1 leaves the character value untouched',()=>{
+    const f=wallFixture(1,false,true);
+    const before=f.memory.get(0x250008);
+    f.rpc.start(1);
+    f.memory.set(0x1088,0);f.memory.set(0x1138,1);
+    vm.runInContext('applySpeed(wallTestState)',f.c);
+    assert.equal(f.memory.get(0x250008),before);
+    assert.equal(f.rpc.status().speed.status,'applied');
 });

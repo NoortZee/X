@@ -32,7 +32,7 @@ const MENU: &str = r#"
   play                only play
   calibrate           predict_lead_ms test (10 taps)
   dry-run             plan only, no taps
-  catacombs start|status|dump|mark <label>|move-white|teleport-white|above|return-height|spawn-probe|spawn-gold|spawn-gold-cycle|spawn-gold-stop|spawn-gold-reuse|spawn-gold-reuse-cycle|all-gold [limit]|all-gold-off|stop
+  catacombs [1..10]    загрузить модуль; 1..10 — скорость персонажа (по умолчанию 1)
   stones <filter>     rival stones live + burst-skip (см. help)
   help                справка по stones
   clear               wipe console + delete replay.json
@@ -556,7 +556,7 @@ fn main() {
             }
             s if s.split_whitespace().next() == Some("catacombs") => {
                 let arguments = s.strip_prefix("catacombs").unwrap_or("").trim();
-                if let Err(e) = catacombs_mod.command(arguments, &aborted) {
+                if let Err(e) = catacombs_mod.run(arguments, &aborted) {
                     eprintln!("ERROR catacombs: {e}");
                 }
             }
