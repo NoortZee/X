@@ -413,3 +413,10 @@
 - Two live cycles registered3/1 objects, stopped at column spare-capacity guard; all objects left slots14–15ms after registration, credit unconfirmed.
 - New bounded record_watch observes current tree/ID/original descriptor slot after object disappearance, no historical object dereference. Detects ID invalidation/flags, checks descriptor identity (with ABA limitations), no claim of HUD credit.
 - Existing growth guards/spawn behavior unchanged.105 Node mock tests including post-removal invalidation/replacement/state cancellation, syntax/diff. README/Rust untouched.
+
+## Explicit gold stress series: max10/sec with bounded growth
+
+- Requested interval100ms, hard100 registrations per install, no burst catchup. Actual throughput depends on update/native cost. Explicit stop/error/state/timeout cancellation preserved; HUD credit unconfirmed.
+- Full descriptor vector delegates growth/copy to native14BCB80; non-owning pointer vector uses game new/delete with doubled bounded capacity. Full ZArrays may grow via indexed setter within1024 budget. No owning-record memcpy/manual refcounts.
+- First live test of native growth paths, risk of crash/partial mutation; no native retry/guessed rollback. Existing world/ID/template/closure checks retained. Detailed histories limited to first10 objects.
+- 107 Node mock tests including native record push delegation, pointer allocation/copy/free and100ms pacing/no catchup; syntax/diff checks. No live runtime available, Rust/README unchanged.

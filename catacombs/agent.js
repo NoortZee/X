@@ -1194,9 +1194,9 @@ function startGoldCycle() {
     if (latest && latest.phase_raw===1 && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
     if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
     goldCycle = { active: true, state: latest && latest.phase_raw===1 ? latest.state.address : null, armed_deadline: Date.now()+60000, attempted: 0, registered: 0,
-        limit: 10, interval_ms: 2000, next: Date.now(), reason: null };
+        limit: 100, interval_ms: 100, next: Date.now(), reason: null };
     event('spawn_cycle_started', { ...goldCycle });
-    return { ...goldCycle, warning: 'Experimental: at most ten objects, no proof of visible spawn or credit.' };
+    return { ...goldCycle, warning: 'Experimental: up to100 objects at a maximum10/sec; actual rate depends on update cost. HUD credit unconfirmed.' };
 }
 function tickGoldCycle(state) {
     if (!goldCycle || !goldCycle.active) return;
@@ -1248,11 +1248,14 @@ function fullGoldPlan(state, array68) {
     function tail(node,stride) {
         const begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer(),cap=node.add(0x38).readPointer();
         const used=Number(end.sub(begin).toString()),free=Number(cap.sub(end).toString());
-        if(!Number.isSafeInteger(used)||used<0||used%stride||used/stride>1024||!Number.isSafeInteger(free)||free<stride||free%stride||free/stride>1024)
-            throw new Error('column has no verified allocated spare capacity; refusing growth');
+        if(!Number.isSafeInteger(used)||used<0||used%stride||used/stride>1024||!Number.isSafeInteger(free)||free<0||free%stride||free/stride>1024)
+            throw new Error('column vector bounds invalid');
         return end;
     }
     const recordEnd=tail(recordNode,0x50),objectEnd=tail(objectNode,8);
+    if(Number(recordEnd.sub(recordNode.add(0x28).readPointer()).toString())/0x50>=512 ||
+        Number(objectEnd.sub(objectNode.add(0x28).readPointer()).toString())/8>=1024)
+        throw new Error('column vector growth hard limit');
     const source=recordNode.add(0x28).readPointer().add(e.records.matches[0].index*0x50);
     if(source.add(0x48).readS32()!==0x2D) throw new Error('gold record type mismatch');
     const array58=state.add(0x58).readPointer();requireClass(array58,C.spawn_probe.array_name);
@@ -1260,7 +1263,11 @@ function fullGoldPlan(state, array68) {
     const capacity=safeU64(array58.add(C.array.slots)),data=array58.add(C.array.data).readPointer();
     if(capacity<1||capacity>C.limits.slots||data.isNull()) throw new Error('secondary container invalid');
     let slot58=-1;for(let i=0;i<capacity;i++) if(data.add(i*8).readPointer().isNull()){slot58=i;break;}
-    if(slot58<0) throw new Error('secondary container full');
+    if(slot58<0) {
+        const growth=safeU64(array58.add(0x30));
+        if(capacity+growth+1>C.limits.slots) throw new Error('secondary array growth budget exceeded');
+        slot58=capacity;
+    }
     const counter=state.add(0x13C).readS32();
     if(counter<0||counter>=0x7ffffffe) throw new Error('invalid ID counter');
     // Counter monotonicity is corroborated against every bounded tree record.
@@ -1276,15 +1283,45 @@ function fullGoldPlan(state, array68) {
     const callbackVptr=template.o.add(C.object.body).readPointer().add(0x70).readPointer().readPointer();
     const destroyTarget=callbackVptr.add(0x20).readPointer(),destroyModule=Process.findModuleByAddress(destroyTarget),destroyRange=Process.findRangeByAddress(destroyTarget);
     if(!destroyModule || destroyModule.name!==MEMORY_LAYOUT.module_name || !destroyRange || !destroyRange.protection.includes('x')) throw new Error('lambda inline destructor outside game code');
-    return {source,recordNode,recordEnd,objectNode,objectEnd,array58,slot58,counter,id:counter+1,
+    const recordGrow=recordEnd.toString()===recordNode.add(0x38).readPointer().toString();
+    const objectGrow=objectEnd.toString()===objectNode.add(0x38).readPointer().toString();
+    if(recordGrow || objectGrow) {
+        for(const rva of [0x14BCB80,0x1F26660,0x1F26640]) {
+            const code=m.base.add(rva),range=Process.findRangeByAddress(code);
+            if(!range || !range.protection.includes('r') || !range.protection.includes('x')) throw new Error('vector growth helper not readable executable');
+        }
+        if(recordGrow) {
+            const prefix=new Uint8Array(m.base.add(0x14BCB80).readByteArray(4));
+            if(![0x55,0x48,0x89,0xe5].every((v,i)=>prefix[i]===v)) throw new Error('record push_back prefix mismatch');
+        }
+    }
+    return {source,recordNode,recordEnd,objectNode,objectEnd,recordGrow,objectGrow,array58,slot58,counter,id:counter+1,
         column:e.captures.column,callbackVptr,m};
+}
+function growGoldPointerVector(node,object,m,result) {
+    const begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer(),cap=node.add(0x38).readPointer();
+    const used=Number(end.sub(begin).toString()),bytes=Number(cap.sub(begin).toString());
+    if(!Number.isSafeInteger(used)||used<0||used!==bytes||used%8||used/8>=1024)
+        throw new Error('pointer vector grow bounds invalid');
+    const count=used/8,newCapacity=Math.min(1024,Math.max(count+1,count*2,8));
+    // This vector contains non-owning Candy pointers in the observed native path.
+    // Allocate/delete with the game's operator new/delete, never Frida Memory.alloc.
+    const allocate=new NativeFunction(m.base.add(0x1F26660),'pointer',['uint64']);
+    const release=new NativeFunction(m.base.add(0x1F26640),'void',['pointer']);
+    const fresh=allocate(newCapacity*8);
+    if(fresh.isNull()) throw new Error('pointer vector allocation failed');
+    for(let i=0;i<count;i++) fresh.add(i*8).writePointer(begin.add(i*8).readPointer());
+    fresh.add(count*8).writePointer(object);
+    node.add(0x28).writePointer(fresh);node.add(0x30).writePointer(fresh.add((count+1)*8));node.add(0x38).writePointer(fresh.add(newCapacity*8));
+    if(!begin.isNull()) release(begin);
+    result.object_vector_grew={before:count,capacity:newCapacity};
 }
 function completeGoldRegistration(plan,state,object,body,assign,result) {
     const P=plan;
     if(state.add(0x13C).readS32()!==P.counter ||
         P.recordNode.add(0x30).readPointer().toString()!==P.recordEnd.toString() ||
         P.objectNode.add(0x30).readPointer().toString()!==P.objectEnd.toString() ||
-        !P.array58.add(C.array.data).readPointer().add(P.slot58*8).readPointer().isNull()) throw new Error('full registration reservations changed');
+        (P.slot58<safeU64(P.array58.add(C.array.slots)) && !P.array58.add(C.array.data).readPointer().add(P.slot58*8).readPointer().isNull())) throw new Error('full registration reservations changed');
     const copy=new NativeFunction(P.m.base.add(0x105B020),'void',['pointer','pointer']);
     const cleanup=new NativeFunction(P.m.base.add(0x105B0D0),'void',['pointer']);
     const installCallback=new NativeFunction(P.m.base.add(0x1618080),'void',['pointer','pointer']);
@@ -1306,12 +1343,22 @@ function completeGoldRegistration(plan,state,object,body,assign,result) {
     const local=Memory.alloc(0x50);copy(local,P.source);
     local.add(0x20).writeS32(P.id);
     // Preserve the template descriptor/key/flags. Its original position belongs to this column.
-    copy(P.recordEnd,local);cleanup(local);
+    if(P.recordGrow) {
+        const push=new NativeFunction(P.m.base.add(0x14BCB80),'pointer',['pointer','pointer']);
+        push(P.recordNode.add(0x28),local);
+        if(Number(P.recordNode.add(0x30).readPointer().sub(P.recordNode.add(0x28).readPointer()).toString())/0x50>1024)
+            throw new Error('record growth readback budget exceeded');
+        result.record_vector_grew=true;
+    } else {
+        copy(P.recordEnd,local);P.recordNode.add(0x30).writePointer(P.recordEnd.add(0x50));
+    }
+    cleanup(local);
     state.add(0x13C).writeS32(P.id);
-    P.recordNode.add(0x30).writePointer(P.recordEnd.add(0x50));
     result.registration_stage='column_record_added';
     assign(P.array58,object,P.slot58);
-    P.objectEnd.writePointer(object);P.objectNode.add(0x30).writePointer(P.objectEnd.add(8));
+    if(P.objectGrow) {
+        growGoldPointerVector(P.objectNode,object,P.m,result);
+    } else {P.objectEnd.writePointer(object);P.objectNode.add(0x30).writePointer(P.objectEnd.add(8));}
     result.secondary_slot=P.slot58;result.column=P.column;result.id=P.id;
     result.registration_stage='all_containers_added';
 }
@@ -1346,7 +1393,10 @@ function performGold(state) {
         if (data.isNull()) throw new Error('null array data');
         let slot = -1;
         for (let i = 0; i < capacity; i++) if (data.add(i * Process.pointerSize).readPointer().isNull()) { slot = i; break; }
-        if (slot < 0) throw new Error('no allocated free slot; refusing array growth/replacement');
+        if (slot < 0) {
+            if(capacity+safeU64(array.add(0x30))+1>C.limits.slots) throw new Error('primary array growth budget exceeded');
+            slot=capacity;
+        }
         const fullPlan = fullGoldPlan(state,array);
         result.full_registration = true;
         result.attach_observer_detached = detachAttachObserverForSpawn();
@@ -1402,7 +1452,7 @@ function performGold(state) {
         if (state.add(C.state.objects).readPointer().toString() !== array.toString()) throw new Error('array changed during spawn');
         const currentCapacity = safeU64(array.add(C.array.slots));
         const currentData = array.add(C.array.data).readPointer();
-        if (slot >= currentCapacity || !currentData.add(slot*Process.pointerSize).readPointer().isNull()) throw new Error('reserved slot no longer free');
+        if (slot > currentCapacity || (slot < currentCapacity && !currentData.add(slot*Process.pointerSize).readPointer().isNull())) throw new Error('reserved slot no longer free');
         completeGoldRegistration(fullPlan,state,object,body,assign,result);
         assign(array,object,slot); // Indexed assignment, NOT capacity+1 or an assumed append helper.
         const registered = array.add(C.array.data).readPointer().add(slot*Process.pointerSize).readPointer();
