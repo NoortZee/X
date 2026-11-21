@@ -1564,3 +1564,31 @@ test('manager location verifies during the scan and stops at the first confirmed
     const bad=g.rpc.locateManager();
     assert.equal(bad.status,'unavailable');assert.match(bad.error,/no vptr layout|no verified/);
 });
+
+test('manager location skips vanished heap ranges and still confirms the manager',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    const M=vm.runInContext('C.manager_survey',f.c);
+    f.identity(0x35000,0x100000+M.vtable,0x355000,0x356000,'N11EndlessMaze7ManagerE');
+    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
+    f.c.Process.enumerateRanges=()=>[
+        {base:f.pointer(0x34000),size:0x1000,protection:'rw-'},
+        {base:f.pointer(0x36000),size:0x800,protection:'rw-'}];
+    let scans=0;
+    f.c.Memory.scanSync=(base)=>{
+        scans++;
+        if(base.n===0x34000)throw new Error('access violation accessing 0x34000');
+        return [{address:f.pointer(0x35000)}];
+    };
+    const located=f.rpc.locateManager();
+    assert.equal(scans,2);
+    assert.equal(located.status,'found');
+    assert.equal(located.skipped_ranges,1);
+    assert.match(located.skipped_range_samples[0].error,/access violation/);
+    assert.equal(located.verified[0].gold,1);
+    // Every range failing still reports unavailable, plus the skip evidence.
+    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
+    g.c.Process.enumerateRanges=()=>[{base:g.pointer(0x34000),size:0x1000,protection:'rw-'}];
+    g.c.Memory.scanSync=()=>{throw new Error('access violation');};
+    const bad=g.rpc.locateManager();
+    assert.equal(bad.status,'unavailable');assert.ok(bad.error);
+});
