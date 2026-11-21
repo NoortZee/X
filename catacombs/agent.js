@@ -1760,6 +1760,7 @@ function levelSummary(state) {
     return out;
 }
 const managerSurvey={status:'not_run',read_only:true};
+let managerLocate={status:'not_run',read_only:true};
 function managerDescriptor(service) {
     // Read-only survey of the EndlessMaze::Manager descriptor vector; nothing is modified.
     const M=C.manager_survey,begin=service.add(M.descriptor_begin).readPointer();
@@ -1797,10 +1798,63 @@ function parseSurveyAddress(value) {
     if(address.isNull())throw new Error('survey address must be non-null');
     return address;
 }
+function locateManager() {
+    // Bounded read-only search: heap objects whose vptr is the EndlessMaze::Manager vtable.
+    const M=C.manager_survey,m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    if(!m)throw new Error('game module missing');
+    const vtable=m.base.add(M.vtable);
+    // The vtable is not an object: its typeinfo pointer sits at vtable-8 (Itanium ABI).
+    const vtableName=safe(()=>nameAt(vtable.add(-Process.pointerSize).readPointer().add(C.rtti.name).readPointer()));
+    if(!vtableName||vtableName.error)throw new Error('manager vtable typeinfo not readable');
+    if(!String(vtableName).includes(M.rtti_needle))
+        throw new Error('vtable RVA does not belong to '+M.rtti_needle+' (found '+vtableName+')');
+    const ranges=Process.enumerateRanges('rw-');
+    if(ranges.length>M.scan_max_ranges)throw new Error('too many memory ranges to scan');
+    // Scan pattern is the little-endian pointer bytes, not a text address.
+    let pattern=BigInt(vtable.toString()),patternText='';
+    for(let i=0;i<Process.pointerSize;i++){patternText+=(i?' ':'')+(pattern&0xffn).toString(16).padStart(2,'0');pattern>>=8n;}
+    const needle=patternText;
+    let scanned=0,matches=[];
+    for(const r of ranges) {
+        if(scanned>M.scan_max_bytes)throw new Error('manager scan byte budget exceeded');
+        if(!r.size||r.size>M.scan_max_range)continue;
+        scanned+=r.size;
+        for(const hit of Memory.scanSync(r.base,r.size,needle)) {
+            matches.push(hit.address);
+            if(matches.length>=M.scan_matches)break;
+        }
+        if(matches.length>=M.scan_matches)break;
+    }
+    // Classify candidates strictly; never use an unverified object.
+    const verified=[];
+    for(const p of matches) {
+        const id=safe(()=>identity(p));
+        if(!id||id.error||!id.rtti)continue;
+        const name=String(id.rtti.name);
+        if(!name.includes(M.rtti_needle))continue;
+        const probe=safe(()=>managerDescriptor(p));
+        if(!probe||probe.error)continue;
+        verified.push({object:p.toString(),rtti:name,count:probe.count,
+            gold:probe.gold_descriptors,total:probe.candy_total});
+    }
+    managerLocate={status:verified.length?'found':'unavailable',read_only:true,scanned_bytes:scanned,
+        vtable:vtable.toString(),candidates:matches.length,verified,
+        time:Date.now()};
+    if(!verified.length)managerLocate.error='no verified '+M.rtti_needle+' object with a readable descriptor vector';
+    if(verified.length===1)managerLocate.chosen=verified[0].object;
+    return managerLocate;
+}
 function surveyManager(serviceAddress) {
     // Explicit address only: the service locator is never scanned for.
     try {
-        if(!serviceAddress)throw new Error('manager service address required');
+        if(!serviceAddress) {
+            // Explicit height: located strictly by vtable, then surveyed. No guessing.
+            const located=locateManager();
+            if(located.error||!located.verified||!located.verified.length)throw new Error(located.error||'manager not located');
+            if(located.verified.length>1)throw new Error('multiple verified managers; pass an address explicitly');
+            serviceAddress=located.chosen;
+            managerSurvey.located=true;
+        }
         const service=typeof serviceAddress==='string'?ptr(serviceAddress):serviceAddress;
         const id=identity(service),needle=C.manager_survey.rtti_needle;
         if(!id.rtti||!String(id.rtti.name).includes(needle))
@@ -1840,6 +1894,7 @@ function captureSequenceInput(args,caller) {
         return {state:state.toString(),phase:state.add(S.state_phase).readS32(),paused:state.add(C.state.paused).readU8()};});
     out.owner=owner;
     if(owner.error) {out.counts_skipped='builder arguments not corroborated as current state fields';return out;}
+    sequenceProbe.last_payload={time:out.time,action_arg:out.action_arg,prefix:out.payload_prefix};
     out.counts=safe(()=>sequenceCounts(args[3]));
     // Same read-only census at request time, to compare against the builder input counts.
     out.level=safe(()=>levelSummary(state));
@@ -1855,7 +1910,9 @@ function installSequenceProbe(m) {
     sequenceSummaryCache=null;
     levelCensuses=[];
     levelCensusError=null;
-    managerSurvey.status='not_run';delete managerSurvey.last;delete managerSurvey.error;delete managerSurvey.service;
+    managerSurvey.status='not_run';delete managerSurvey.last;delete managerSurvey.error;delete managerSurvey.service;delete managerSurvey.located;
+    managerLocate={status:'not_run',read_only:true};
+    sequenceProbe.last_payload=null;
     try {
         if(S.builder<0 || S.builder+S.signature.length>m.size)throw new Error('sequence builder outside module');
         const target=m.base.add(S.builder),range=Process.findRangeByAddress(target);
@@ -1877,7 +1934,7 @@ function installSequenceProbe(m) {
     } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
 }
 function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), manager_survey: managerSurvey, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), manager_survey: managerSurvey, manager_locate: managerLocate, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed_test: speedTest, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
     teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 function install() {
     if (enabled) return status();
@@ -1948,6 +2005,7 @@ rpc.exports = {
         event('user_mark', { label: String(label).slice(0, 160) }); return status();
     },
     managerSurvey(address) { return surveyManager(address); },
+    locateManager() { return locateManager(); },
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
             ...status(), metadata: { time: Date.now(), module: moduleInfo,

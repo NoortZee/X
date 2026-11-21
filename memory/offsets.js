@@ -78,7 +78,10 @@ const MEMORY_LAYOUT = {
         // EndlessMaze::Manager descriptor vector (service+0x78..0x80), read-only survey only.
         manager_survey: { descriptor_begin: 0x78, descriptor_end: 0x80, stride: 0x50, max_descriptors: 512,
             rarity: 0x44, type: 0x48, record_id: 0x20, flags: 0x11, lookup_bit: 0x08, candy_type: 0x2D,
-            rtti_needle: 'EndlessMaze7Manager' },
+            rtti_needle: 'EndlessMaze7Manager',
+            // Manager vtable RVA (live dump). Used only to locate the object read-only.
+            vtable: 0x2026FC8, scan_max_range: 0x4000000, scan_max_bytes: 0x20000000,
+            scan_max_ranges: 65536, scan_matches: 16 },
         all_gold: { descriptor_factory: 0x1604540, caller: 0x14DA4A4, rarity_map: 0x2183AA0,
             key: 4, value: 4, type: 0x2D, flags: 0x10, lookup_flag: 0x800, rarity_key: 0x44,
             signature: [0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xec,0x28,0x8b,0x47,0x48] },
