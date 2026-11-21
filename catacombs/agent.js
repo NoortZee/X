@@ -1131,6 +1131,37 @@ function captureNaturalGold(state) {
     found.sort((a,b)=>(b.object.rarity===4)-(a.object.rarity===4));
     goldDiagnostics.natural.push(...found.slice(0,4-goldDiagnostics.natural.length));
 }
+function followGoldRecords(state) {
+    const now=Date.now();
+    for(const track of goldDiagnostics.spawned) {
+        if(!track.record_watch || track.record_watch.done || now<track.record_watch.next) continue;
+        const watch=track.record_watch;
+        if(track.state!==state.toString() || state.add(C.state.phase).readS32()!==1) {
+            watch.done=true;watch.end='state/phase changed';continue;
+        }
+        // Look up the tree anew through the current state. Never read track.object/track.body.
+        const observation=safe(()=>{
+            requireClass(state,C.move_white.state_name);
+            const found=diagnosticColumn(state,0x128,watch.column,0x50,watch.id);
+            const out={id_lookup:found,credit_confirmed:false};
+            if(!found.node || watch.index>=found.count) return out;
+            const node=ptr(found.node),entry=node.add(0x28).readPointer().add(watch.index*0x50);
+            const raw=Array.from(new Uint8Array(entry.readByteArray(0x50)));
+            // ID and flag fields may change on pickup; compare other descriptor bytes before
+            // interpreting the historical index. Index shifts/replacement are not a pickup.
+            const expected=watch.descriptor;
+            out.descriptor_matches=raw.every((v,i)=>(i>=0x10&&i<0x14)||(i>=0x20&&i<0x24)||v===expected[i]);
+            out.index=watch.index;out.id_at_index=entry.add(0x20).readS32();
+            out.flags_at_index=entry.add(0x10).readS32()>>>0;
+            out.record_id_invalidated=out.descriptor_matches && out.id_at_index===-1;
+            out.note='ID invalidation is accounting-path evidence, NOT confirmed HUD reward.';
+            return out;
+        });
+        watch.timeline.push({time:now,elapsed_ms:now-track.time,...observation});
+        watch.next=now+1000;
+        if(watch.timeline.length>=11) {watch.done=true;watch.end='observation budget reached';}
+    }
+}
 function followGold(state) {
     const now=Date.now();
     for(const track of goldDiagnostics.spawned) {
@@ -1378,10 +1409,17 @@ function performGold(state) {
         if (registered.toString() !== object.toString()) throw new Error('array registration readback failed');
         result.registered = true; result.success = true;
         result.registered_evidence = safe(() => goldObjectEvidence(object));
-        if(goldDiagnostics.spawned.length<10) goldDiagnostics.spawned.push({
-            state:state.toString(),time:Date.now(),object:object.toString(),slot,
-            body:body.toString(),next:Date.now(),done:false,timeline:[],
-            stages:{factory:result.factory_evidence,attach:result.attach_evidence,registered:result.registered_evidence} });
+        if(goldDiagnostics.spawned.length<10) {
+            const evidence=result.registered_evidence;
+            const contact=evidence && evidence.contact;
+            const record=contact && contact.records && contact.records.matches && contact.records.matches[0];
+            const watch=record && contact.captures ? {id:record.id,column:contact.captures.column,index:record.index,
+                descriptor:record.raw_hex.split(' ').map(b=>parseInt(b,16)),next:Date.now(),done:false,timeline:[]} : null;
+            goldDiagnostics.spawned.push({
+                state:state.toString(),time:Date.now(),object:object.toString(),slot,
+                body:body.toString(),next:Date.now(),done:false,timeline:[],record_watch:watch,
+                stages:{factory:result.factory_evidence,attach:result.attach_evidence,registered:result.registered_evidence} });
+        }
         result.note = 'Full registration experiment: new ID, column record, copied lambda and both containers. HUD credit still unconfirmed.';
     } catch (e) {
         result.error = String(e);
@@ -1497,7 +1535,7 @@ function install() {
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             preventFall(this.updateState);
-            try { captureNaturalGold(this.updateState); followGold(this.updateState); }
+            try { captureNaturalGold(this.updateState); followGold(this.updateState); followGoldRecords(this.updateState); }
             catch(e) { goldDiagnostics.last_error={time:Date.now(),error:String(e)}; }
             tickGoldCycle(this.updateState);
             if (pendingGold) performGold(this.updateState);

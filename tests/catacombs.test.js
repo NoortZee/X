@@ -1173,3 +1173,22 @@ test('armed cycle binds active level and blocks auto teleport only while series 
     assert.equal(f.rpc.status().spawn_cycle.registered,1);f.leave();assert.equal(auto,0);
     f.rpc.spawnGoldStop();f.leave();assert.equal(auto,1);
 });
+
+test('record observer follows ID invalidation after object removal without reading historical Candy',()=>{
+    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));f.c.testState=f.pointer(0x1000);
+    f.memory.set(0x1128,0x90000);f.memory.set(0x90000,0);f.memory.set(0x90008,0);f.memory.set(0x90020,19);f.memory.set(0x90028,0xA0000);f.memory.set(0x90030,0xA0050);
+    f.memory.set(0xA0020,-1);f.memory.set(0xA0010,7);
+    // Raw mock stores S32 separately; create matching descriptor from its byte reader.
+    f.c.testDescriptor=Array.from(new Uint8Array(f.pointer(0xA0000).readByteArray(0x50)));
+    vm.runInContext(`goldDiagnostics.spawned=[{state:testState.toString(),time:Date.now(),done:true,
+        object:'0xDEAD',body:'0xBAD',record_watch:{column:19,id:107,index:0,descriptor:testDescriptor,next:0,done:false,timeline:[]}}];
+        followGoldRecords(testState)`,f.c);
+    let w=f.rpc.report().gold_diagnostics.spawned[0].record_watch;
+    assert.equal(w.timeline[0].record_id_invalidated,true,JSON.stringify(w));assert.equal(w.timeline[0].credit_confirmed,false);
+    f.memory.set(0xA0048,45); // same index replaced by a different descriptor
+    vm.runInContext('goldDiagnostics.spawned[0].record_watch.next=0;followGoldRecords(testState)',f.c);
+    w=f.rpc.report().gold_diagnostics.spawned[0].record_watch;
+    assert.equal(w.timeline[1].descriptor_matches,false);assert.equal(w.timeline[1].record_id_invalidated,false);
+    f.memory.set(0x1138,0);vm.runInContext('goldDiagnostics.spawned[0].record_watch.next=0;followGoldRecords(testState)',f.c);
+    assert.equal(f.rpc.report().gold_diagnostics.spawned[0].record_watch.done,true);
+});

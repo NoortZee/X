@@ -407,3 +407,11 @@ After report1795222574042295755 confirmed all_containers_added for one new ID107
 Can arm before active level:60s to enter, then binds to that state. During series autoTeleport is temporarily suppressed so natural uncollected gold templates remain available; Hero speed/masks/no-fall/rise unchanged, manual moves remain explicit. After spawn-gold-stop/limit/error normal auto resumes. This means HUD changes after series may include ordinary auto collection too: note HUD during series and before/after stopping, distinguish regular pickups. No infinite cycle or reward mutation. Capacity/template checks may stop before10; registered count is not credit count. Stop does not delete objects. For native failure restart game, no repeat. JS-only, no Rust rebuild.
 
 Test fresh install (stop/start resets prior single-attempt latch), before level: spawn-gold-cycle, enter within60s, watch HUD for20–30s, spawn-gold-stop then dump. All created evidence bounded10. README unchanged.
+
+### Record observation after slot removal
+
+Reports1795222867319947657/1795222926948079203 show respectively3 and1 structurally registered new objects. Both cycles stopped at allocated column-vector capacity guard (before native on the failing attempt). All new objects left their slots in14–15ms. This is not confirmed credit and no-growth guard remains.
+
+gold_diagnostics.spawned[].record_watch now retains ID/column/index/descriptor at registration, independently observing the current state's column record up to11 times at1s intervals even after Candy slot removal. It reacquires the tree from current state, never dereferences historical Candy/Body. Records matching ID are reported; original index is inspected only within verified vector bounds, with descriptor comparison excluding flags/ID bytes to detect shifts/replacement. record_id_invalidated=true means descriptor still matches and ID=-1; this is accounting-path evidence, NOT HUD credit. Flags/ID lookup/error/timestamps retained. State/phase change or budget stops observation. Stop disables all hooks as before. No container growth/native behavior changes.
+
+JS-only update: fresh start, one pre-armed spawn-gold before level, wait12s and dump. Another cycle not needed for this diagnostic. Native failure requires game restart; HUD result separately.
