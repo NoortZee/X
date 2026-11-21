@@ -1026,9 +1026,74 @@ function detachAttachObserverForSpawn() {
 }
 // Bounded read-only evidence. Never dereference a historical object after slot removal/reuse.
 let goldDiagnostics = { natural: [], spawned: [], note: 'Membership/removal is not proof of reward; compare HUD.' };
+function diagnosticColumn(ctx, rootOffset, column, stride, wanted) {
+    let node=ctx.add(rootOffset).readPointer();
+    const visited=new Set();
+    for(let hops=0; !node.isNull() && hops<64; hops++) {
+        if(visited.has(node.toString())) throw new Error('column tree cycle');
+        visited.add(node.toString());
+        const key=node.add(0x20).readS32();
+        if(key!==column) { node=node.add(key>column?0:8).readPointer();continue; }
+        const begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer();
+        const bytes=Number(end.sub(begin).toString());
+        if(!Number.isSafeInteger(bytes)||bytes<0||bytes%stride||bytes/stride>1024)
+            throw new Error('column vector bounds invalid');
+        const result={node:node.toString(),column,count:bytes/stride,matches:[]};
+        for(let i=0;i<bytes/stride;i++) {
+            const entry=begin.add(i*stride);
+            if(stride===0x50 ? entry.add(0x20).readS32()===wanted : entry.readPointer().toString()===wanted) {
+                if(result.matches.length>=4) {result.truncated=true;break;}
+                result.matches.push(stride===0x50 ? {index:i,id:entry.add(0x20).readS32(),
+                    flags:entry.add(0x10).readS32()>>>0,type:entry.add(0x48).readS32(),
+                    raw_hex:Array.from(new Uint8Array(entry.readByteArray(0x50))).map(b=>b.toString(16).padStart(2,'0')).join(' ')} : {index:i,object:wanted});
+            }
+        }
+        return result;
+    }
+    if(!node.isNull()) throw new Error('column tree hop budget exceeded');
+    return {column,found:false};
+}
+function diagnosticMembership(ctx,offset,object) {
+    const array=ctx.add(offset).readPointer();requireClass(array,C.spawn_probe.array_name);
+    const capacity=safeU64(array.add(C.array.slots));
+    if(capacity>C.limits.slots) throw new Error('membership scan budget exceeded');
+    const data=array.add(C.array.data).readPointer(),slots=[];
+    for(let i=0;i<capacity;i++) if(data.add(i*Process.pointerSize).readPointer().toString()===object.toString()) {
+        if(slots.length>=4) break;slots.push(i);
+    }
+    return {array:array.toString(),capacity,slots};
+}
+function goldContactEvidence(object) {
+    const body=object.add(C.object.body).readPointer();
+    if(body.isNull()) return {body_missing:true};
+    requireClass(body,C.candy_body_probe.body_name);
+    const callback=body.add(0x70).readPointer();
+    const out={contact_flag:body.add(0x41).readU8(),callback:identity(callback)};
+    if(callback.isNull()) {out.callback_missing=true;return out;}
+    const target=callback.readPointer().add(0x30).readPointer();
+    out.invoke=address(target);
+    const m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
+    const name=out.callback.rtti && out.callback.rtti.name;
+    // Captures below belong ONLY to this observed lambda, not arbitrary std::function objects.
+    if(!m || target.toString()!==m.base.add(0x14DB600).toString() || typeof name!=='string' ||
+        !name.includes('EndlessMazePlayState20addObstaclesInColumn')) {
+        out.captures_skipped='callback identity not confirmed';return out;
+    }
+    const ctx=callback.add(8).readPointer(),column=callback.add(0x10).readS32(),candy=callback.add(0x18).readPointer();
+    out.captures={context:ctx.toString(),column,candy:candy.toString(),candy_matches:candy.toString()===object.toString()};
+    if(ctx.isNull() || !out.captures.candy_matches) return out;
+    out.context_identity=identity(ctx);
+    out.id_counter=safe(()=>ctx.add(0x13C).readS32());
+    out.records=safe(()=>diagnosticColumn(ctx,0x128,column,0x50,object.add(0x184).readS32()));
+    out.column_objects=safe(()=>diagnosticColumn(ctx,0x110,column,8,object.toString()));
+    out.container_58=safe(()=>diagnosticMembership(ctx,0x58,object));
+    out.container_68=safe(()=>diagnosticMembership(ctx,0x68,object));
+    out.invoke_code=safe(()=>{const key=captureMethodCode(target,384,96);return key?methodCode.get(key):{error:'code budget exhausted'};});
+    return out;
+}
 function goldObjectEvidence(object) {
     requireClass(object, C.candy.name);
-    return { address: object.toString(), position: position(object),
+    return { contact: safe(() => goldContactEvidence(object)), address: object.toString(), position: position(object),
         id: safe(() => object.add(0x184).readS32()),
         refcount: safe(() => object.add(C.spawn_probe.refcount).readS32()),
         rarity: safe(() => object.add(C.candy.rarity).readS32()),
