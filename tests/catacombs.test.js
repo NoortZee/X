@@ -1041,15 +1041,15 @@ test('signature refusal includes expected and actual bytes, no factory call',()=
     assert.ok(r.signature_mismatch.actual_hex.startsWith('e9 '));
 });
 
-test('bounded gold cycle schedules spaced attempts, stops at ten and cannot be rearmed',()=>{
+test('bounded gold cycle schedules spaced attempts, stops at100 and cannot be rearmed',()=>{
     const f=goldFixture();let time=vm.runInContext("Date.now()",f.c);f.c.Date={now:()=>time};
     f.rpc.spawnGoldCycle();f.leave();
     assert.equal(f.rpc.status().spawn_cycle.registered,1);
     f.leave();assert.equal(f.rpc.status().spawn_cycle.attempted,1);
     // Reuse the mock free slot; real runtime must find a fresh null slot each time.
-    for(let i=1;i<10;i++){time+=2000;f.memory.set(0x2808,0);f.leave();}
+    for(let i=1;i<100;i++){time+=100;f.memory.set(0x2808,0);f.leave();}
     const c=f.rpc.status().spawn_cycle;
-    assert.equal(c.attempted,10);assert.equal(c.registered,10);assert.equal(c.active,false);
+    assert.equal(c.attempted,100);assert.equal(c.registered,100);assert.equal(c.active,false);
     assert.equal(c.reason,'limit reached');f.force();f.tick();assert.throws(()=>f.rpc.spawnGoldCycle(),/fresh module/);
 });
 test('cycle stops on native error, explicit cancellation, state/phase change and module stop',()=>{
@@ -1115,7 +1115,7 @@ test('full registration helper installs owned callback, clones record and adds s
         objectNode:f.pointer(0x93000),objectEnd:f.pointer(0x94000),array58:f.pointer(0x95000),slot58:0,
         counter:100,id:101,column:19,callbackVptr:f.pointer(0x96000),m:{base:f.pointer(base)}};
     f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);
-    f.memory.set(0x95010,0x97000);f.memory.set(0x97000,0);f.memory.set(0x96020,base+0x123);
+    f.memory.set(0x95018,1);f.memory.set(0x95010,0x97000);f.memory.set(0x97000,0);f.memory.set(0x96020,base+0x123);
     f.c.plan=plan;f.c.testState=f.pointer(0x1000);f.c.testObject=f.pointer(0x40000);f.c.testBody=f.pointer(0x50000);
     f.c.testAssign=(a,o,i)=>{order.push('assign58');f.memory.set(0x97000,o.n);};
     f.c.NativeFunction=function(p){
@@ -1123,6 +1123,9 @@ test('full registration helper installs owned callback, clones record and adds s
             f.memory.set(0x50070,0x98000);for(const off of [0,8,0x10,0x18])f.memory.set(0x98000+off,f.memory.get(tmp.n+off));};
         if(p.n===base+0x123)return ()=>order.push('destroyTemporary');
         if(p.n===base+0x105B020)return (dst,src)=>{order.push('copy');f.memory.set(dst.n+0x20,f.memory.get(src.n+0x20));};
+        if(p.n===base+0x14BCB80)return (vector,local)=>{order.push('pushRecord');
+            f.memory.set(0xB0020,f.memory.get(local.n+0x20));
+            f.memory.set(0x91028,0xB0000);f.memory.set(0x91030,0xB0050);return f.pointer(0xB0000);};
         if(p.n===base+0x105B0D0)return ()=>order.push('cleanup');
         throw Error('unexpected native');
     };
@@ -1131,12 +1134,18 @@ test('full registration helper installs owned callback, clones record and adds s
     assert.equal(f.memory.get(0x92020),101);assert.equal(f.memory.get(0x113C),101);
     assert.equal(f.memory.get(0x91030),0x92050);assert.equal(f.memory.get(0x94000),0x40000);
     assert.equal(f.memory.get(0x93030),0x94008);
+    // Same helper's full-vector branch delegates record ownership to native push_back.
+    f.memory.set(0x113C,100);f.memory.set(0x91030,0x92000);f.memory.set(0x93030,0x94000);f.memory.set(0x97000,0);
+    plan.recordGrow=true;order.length=0;
+    vm.runInContext('helperResult={};originalCompleteGoldRegistration(plan,testState,testObject,testBody,testAssign,helperResult)',f.c);
+    assert.equal(order.join(','),'callback,destroyTemporary,copy,pushRecord,cleanup,assign58');
+    assert.equal(f.memory.get(0xB0020),101);assert.equal(f.c.helperResult.record_vector_grew,true);
 });
 test('full registration preflight refuses missing native signatures and cycle command stays disabled',()=>{
     const f=goldFixture();f.c.testState=f.pointer(0x1000);f.c.testArray=f.pointer(0x2000);
     const n=f.calls.length;
     assert.throws(()=>vm.runInContext('originalFullGoldPlan(testState,testArray)',f.c),/full spawn signature/);
-    assert.equal(f.calls.length,n);assert.equal(f.rpc.spawnGoldCycle().limit,10);
+    assert.equal(f.calls.length,n);assert.equal(f.rpc.spawnGoldCycle().limit,100);
 });
 
 test('gold may be armed before a level and waits for active phase before one native attempt',()=>{
@@ -1191,4 +1200,29 @@ test('record observer follows ID invalidation after object removal without readi
     assert.equal(w.timeline[1].descriptor_matches,false);assert.equal(w.timeline[1].record_id_invalidated,false);
     f.memory.set(0x1138,0);vm.runInContext('goldDiagnostics.spawned[0].record_watch.next=0;followGoldRecords(testState)',f.c);
     assert.equal(f.rpc.report().gold_diagnostics.spawned[0].record_watch.done,true);
+});
+
+test('pointer vector growth uses native allocator pair, preserves pointers and publishes correct bounds',()=>{
+    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));
+    for(const [p,v] of [[0x90028,0xA0000],[0x90030,0xA0010],[0x90038,0xA0010],[0xA0000,0x1230],[0xA0008,0x4560]])f.memory.set(p,v);
+    let frees=0,bytes=0;
+    f.c.NativeFunction=function(address){
+        if(address.n===0x100000+0x1F26660)return n=>{bytes=n;return f.pointer(0xB0000);};
+        if(address.n===0x100000+0x1F26640)return p=>{assert.equal(p.n,0xA0000);frees++;};
+        throw Error('unexpected grow native');
+    };
+    f.c.growNode=f.pointer(0x90000);f.c.growObject=f.pointer(0x7890);f.c.growModule={base:f.pointer(0x100000)};
+    vm.runInContext('growResult={};growGoldPointerVector(growNode,growObject,growModule,growResult)',f.c);
+    assert.equal(bytes,64);assert.equal(frees,1);
+    assert.equal(f.memory.get(0xB0000),0x1230);assert.equal(f.memory.get(0xB0008),0x4560);assert.equal(f.memory.get(0xB0010),0x7890);
+    assert.equal(f.memory.get(0x90028),0xB0000);assert.equal(f.memory.get(0x90030),0xB0018);assert.equal(f.memory.get(0x90038),0xB0040);
+    f.memory.set(0x90030,0xB0040);f.memory.set(0x90038,0xB0038);
+    assert.throws(()=>vm.runInContext('growGoldPointerVector(growNode,growObject,growModule,growResult)',f.c),/bounds invalid/);
+});
+test('100ms cycle has no burst catchup after delayed update',()=>{
+    const f=goldFixture();let time=vm.runInContext('Date.now()',f.c);f.c.Date={now:()=>time};
+    f.rpc.spawnGoldCycle();f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,1);
+    time+=99;f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,1);
+    time+=1;f.memory.set(0x2808,0);f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,2);
+    time+=1000;f.memory.set(0x2808,0);f.leave();f.leave();assert.equal(f.rpc.status().spawn_cycle.registered,3);
 });
