@@ -1432,7 +1432,7 @@ function surveyFixture() {
     f.identity(0x30000,0x31000,0x32000,0x33000,'N11EndlessMaze7ManagerE');
     const d=i=>0x40000+i*0x50;
     f.memory.set(0x30078,0x40000);f.memory.set(0x30080,0x40000+4*0x50);
-    for(let i=0;i<4;i++)for(const [off,v] of [[0x11,0],[0x20,0],[0x44,1],[0x48,0x2D]])f.memory.set(d(i)+off,v);
+    for(let i=0;i<4;i++)for(const [off,v] of [[0x10,1],[0x11,0],[0x20,0],[0x44,1],[0x48,0x2D],[0xC,0],[0x14,0]])f.memory.set(d(i)+off,v);
     f.memory.set(d(0)+0x11,0x3F);f.memory.set(d(0)+0x20,7);
     f.memory.set(d(2)+0x44,4);f.memory.set(d(2)+0x20,9);
     f.memory.set(d(3)+0x44,2);
@@ -1646,4 +1646,18 @@ test('stage snapshot exposes boundary/continue fields read-only and records chan
     assert.equal(s.history.length,2);assert.equal(s.latest.upper,22);assert.equal(s.latest.continue_flag,1);
     assert.equal(s.note.includes('Nothing is modified'),true);
     assert.equal(f.writes.length,before); // observation performs no writes
+});
+
+test('manager survey reports set capacity and records descriptor set fields verbatim',()=>{
+    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
+    const d=i=>0x40000+i*0x50;
+    f.memory.set(d(0)+0x10,21);f.memory.set(d(1)+0x10,21);f.memory.set(d(2)+0x10,22);
+    const r=f.rpc.managerSurvey('0x30000');
+    assert.equal(r.status,'found');
+    // Fixture seeds +0x10=1 for all four; two descriptors were overridden to 21 and one to 22.
+    assert.equal(r.last.sets.distinct,3);
+    assert.deepEqual({...r.last.sets.sizes},{'1':1,'21':2,'22':1});
+    assert.equal(r.last.set_field_samples[2].set,22);
+    assert.equal(r.last.read_only,true);
+    assert.equal(f.writes.length,0);
 });

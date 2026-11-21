@@ -78,6 +78,7 @@ const MEMORY_LAYOUT = {
         // EndlessMaze::Manager descriptor vector (service+0x78..0x80), read-only survey only.
         manager_survey: { descriptor_begin: 0x78, descriptor_end: 0x80, stride: 0x50, max_descriptors: 512,
             rarity: 0x44, type: 0x48, record_id: 0x20, flags: 0x11, lookup_bit: 0x08, candy_type: 0x2D,
+            set_field: 0x10,
             rtti_needle: 'EndlessMaze7Manager',
             // Manager vtable RVA (live dump). Used only to locate the object read-only.
             vtable: 0x2026FC8, scan_max_range: 0x4000000, scan_max_bytes: 0x300000000,
