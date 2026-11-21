@@ -1466,22 +1466,30 @@ test('mark survey ADDRESS routes to the survey instead of a plain label mark',()
     assert.equal(f.rpc.report().events.some(e=>e.kind==='user_mark'&&e.label==='picked golden'),true);
 });
 
-test('survey label tolerates free wording and rejects without silent fallback',()=>{
+test('survey label without an address attempts location instead of being rejected',()=>{
     const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    // Bare address with a stray word, no strict prefix, still routes to the survey.
-    const r=f.rpc.mark('survey Manager: 0x30000');
-    assert.equal(r.mark,true);assert.equal(r.survey.last.gold_descriptors,1);
-    // A survey attempt without a parseable address is recorded, never silently a plain mark.
+    const M=vm.runInContext('C.manager_survey',f.c);
+    f.memory.set(0x35100,0x777000);
+    f.c.Process.enumerateRanges=()=>[{base:f.pointer(0x34000),size:0x2000,protection:'rw-'}];
+    f.c.Memory.scanSync=()=>[];
+    // Location finds nothing, but the attempt itself is recorded, not silently a plain mark.
+    const r=f.rpc.mark('survey');
+    assert.equal(r.requested,'locate');
+    assert.equal(r.survey.status,'unavailable');
+    assert.match(r.survey.error,/vtable typeinfo|no verified/);
+    const locate=f.rpc.report().manager_locate;
+    assert.equal(locate.status,'unavailable');assert.match(locate.error,/vtable typeinfo|no verified/);
+    assert.equal(f.rpc.report().events.some(e=>e.kind==='manager_survey_rejected'),false);
+    // An explicit address in free wording still routes by address.
     const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
-    const bad=g.rpc.mark('survey Manager');
-    assert.equal(bad.mark,false);assert.equal(bad.survey.status,'unavailable');
-    assert.match(bad.survey.error,/hex address/);assert.equal(bad.survey.last_label,'survey Manager');
-    assert.equal(g.rpc.report().events.some(e=>e.kind==='manager_survey_rejected'),true);
-    // Plain labels stay plain marks.
-    assert.equal(g.rpc.mark('picked golden').sequence_probe !== undefined,true);
-    assert.equal(g.rpc.status().manager_survey.status,'unavailable');
+    const byAddress=g.rpc.mark('survey Manager: 0x30000');
+    assert.equal(byAddress.requested,'address');assert.equal(byAddress.survey.last.gold_descriptors,1);
+    // Plain labels remain plain marks.
+    const h=surveyFixture();h.c.ptr=n=>h.pointer(Number(n));
+    assert.equal(h.rpc.report().manager_survey.status,'not_run');
+    h.rpc.mark('picked golden');
+    assert.equal(h.rpc.report().manager_survey.status,'not_run');
 });
-
 test('manager auto-locate finds the single verified Manager by vtable and refuses ambiguity',()=>{
     const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
     const M=vm.runInContext('C.manager_survey',f.c);
