@@ -1799,6 +1799,13 @@ function parseSurveyAddress(value) {
     return address;
 }
 function locateManager() {
+    try { return locateManagerUnsafe(); }
+    catch(e) {
+        managerLocate={status:'unavailable',read_only:true,error:String(e),time:Date.now()};
+        return managerLocate;
+    }
+}
+function locateManagerUnsafe() {
     // Bounded read-only search: heap objects whose vptr is the EndlessMaze::Manager vtable.
     const M=C.manager_survey,m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
     if(!m)throw new Error('game module missing');
@@ -1989,20 +1996,13 @@ function install() {
 rpc.exports = {
     install, status, allGold: enableAllGold, allGoldOff: stopAllGold, spawnGoldCycle() { return startGoldCycle(); }, spawnGoldReuseCycle() { return startGoldCycle(true); }, spawnGoldStop() { return stopGoldCycle(); }, spawnGold: requestGold, spawnGoldReuse: requestGoldReuse, spawnProbe: requestSpawnProbe, above() { return requestAltitude('above'); }, returnHeight() { return requestAltitude('return'); }, moveWhite() { return requestMove(); }, teleportWhite() { return requestMove('teleport'); }, stop() { stop(); return status(); },
     mark(label) {
-        const surveyRequested=/survey/i.test(String(label||''));
-        const surveyAddress=safe(()=>parseSurveyAddress(label));
-        const surveyFailed=!surveyAddress||surveyAddress.error;
-        if(surveyRequested&&surveyFailed) {
-            // Never fail silently: a survey attempt is always visible in the dump.
-            managerSurvey.status='unavailable';
-            managerSurvey.error=surveyAddress&&surveyAddress.error?String(surveyAddress.error):'survey label requires a hex address, e.g. survey 0x7fb13a055148';
-            managerSurvey.last_label=String(label||'').slice(0,160);
-            managerSurvey.time=Date.now();
-            event('manager_survey_rejected',{label:managerSurvey.last_label,error:managerSurvey.error});
-            return {mark:false,survey:managerSurvey,status:status()};
-        }
-        if(!surveyFailed) { const result=surveyManager(surveyAddress); return {mark:true,survey:result,status:status()}; }
-        event('user_mark', { label: String(label).slice(0, 160) }); return status();
+        const text=String(label||'');
+        if(!/survey/i.test(text)) { event('user_mark', { label: text.slice(0, 160) }); return status(); }
+        // A survey label always attempts the survey. Address is optional: none means bounded location.
+        const parsed=safe(()=>parseSurveyAddress(text));
+        const parsedAddress=parsed&&!parsed.error?parsed:null;
+        const result=surveyManager(parsedAddress||undefined);
+        return {mark:!!parsedAddress,survey:result,requested:parsedAddress?'address':'locate',status:status()};
     },
     managerSurvey(address) { return surveyManager(address); },
     locateManager() { return locateManager(); },
