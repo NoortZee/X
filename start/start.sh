@@ -107,7 +107,14 @@ exec {HEALTH_LOG_FD}>>"$RUN/health.log" || fail "Cannot open health log in $RUN.
 exec {WATCH_LOG_FD}>>"$RUN/watch.log" || fail "Cannot open watcher log in $RUN."
 
 # Parse YAML as data, never source/eval it. Runtime endpoints follow the selected config.
-python3 - "$CONFIG" >"$RUN/settings" <<'PY'
+# PyYAML comes from the system python3 on Arch and Debian; a NixOS python3 has no
+# site-packages of its own, so fall back to the TAS venv, which install.sh
+# populates on every distribution.
+YAML_PY=python3
+"$YAML_PY" -c 'import yaml' 2>/dev/null || YAML_PY="$DATA/venv/bin/python"
+"$YAML_PY" -c 'import yaml' 2>/dev/null ||
+    fail 'PyYAML is unavailable to both python3 and the TAS venv; run start/install.sh.'
+"$YAML_PY" - "$CONFIG" >"$RUN/settings" <<'PY'
 import re, sys, yaml
 with open(sys.argv[1]) as f: config = yaml.safe_load(f)
 phantom, frida = config['phantom'], config['frida']
