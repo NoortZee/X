@@ -4,7 +4,11 @@
 'use strict';
 
 const MEMORY_LAYOUT = {
-    game_version: '2.84.1',
+    // Profile description only (not a hard version check): agents resolve
+    // functions by AOB signatures and read fields by relative struct offsets,
+    // so the layout is not tied to absolute addresses of a single build.
+    // Validated on King of Thieves 2.84.2 x86_64, libthieves.so.
+    game_version: '2.84.2',
     arch: 'x64',
     module_name: 'libthieves.so',
     pointer_alignment_mask: 7,
