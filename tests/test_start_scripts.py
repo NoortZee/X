@@ -51,6 +51,19 @@ elif name == 'adb':
     if 'wm size' in command: print(os.environ.get('WM_SIZE', 'Physical size: 1920x1048'))
     if '--version' in command: print(os.environ.get('SERVER_VERSION', '17.16.4'))
 elif name == 'python':
+    # start.sh parses the config with this interpreter when the system python3 has
+    # no PyYAML (NixOS); the health check calls it with five arguments instead.
+    if args[:1] == ['-c']:
+        sys.exit(0)
+    if args[:1] == ['-'] and len(args) == 2:
+        import re, yaml
+        with open(args[1]) as f:
+            config = yaml.safe_load(f)
+        port = re.fullmatch(r'(?:127\.0\.0\.1|localhost):([0-9]+)', config['frida']['device'])
+        print(config['phantom']['port'])
+        print(int(port[1]))
+        print(config['frida']['package'])
+        sys.exit(0)
     print('health check: ' + args[-1])
     sys.stdin.read()
     if os.environ.get('FAIL_HEALTH'): sys.exit(1)
@@ -158,11 +171,12 @@ class PhantomRemoteTests(unittest.TestCase):
 class InstallerDependencyTests(unittest.TestCase):
     """Execute the real dependency-selection prefix, with an isolated mock PATH."""
 
-    def run_dependencies(self, managers, fail_install=False):
+    def run_dependencies(self, managers, fail_install=False, nixos=False, present=()):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             bin_dir = root / 'bin'
             bin_dir.mkdir()
+            (root / 'start').mkdir()
             log = root / 'commands.jsonl'
             mock = "#!" + sys.executable + "\n" + r'''
 import json, os, pathlib, sys
@@ -174,23 +188,62 @@ elif name == 'sudo':
         f.write(json.dumps(sys.argv[1:]) + '\n')
     if os.environ.get('FAIL_INSTALL') and sys.argv[1] != '-v':
         sys.exit(42)
+elif name == 'nix':
+    args = sys.argv[1:]
+    with open(os.environ['MOCK_LOG'], 'a') as f:
+        f.write(json.dumps(args) + '\n')
+    if os.environ.get('FAIL_INSTALL') and 'profile' in args:
+        sys.exit(42)
+    # A real `nix profile install nixpkgs#jdk17` puts javac on PATH; the installer
+    # derives JAVA_HOME from it, so the mock has to reproduce that side effect.
+    if any(a.endswith('#jdk17') for a in args):
+        for tool in ('javac', 'java'):
+            path = pathlib.Path(sys.argv[0]).resolve().parent / tool
+            path.write_text('#!/bin/sh\n')
+            path.chmod(0o755)
 '''
             for name in ('uname', 'sudo', 'waydroid', *managers):
                 path = bin_dir / name
                 path.write_text(mock)
                 path.chmod(0o755)
-            (bin_dir / 'dirname').symlink_to(shutil.which('dirname'))
-            script = root / 'install.sh'
+            if nixos:
+                # NixOS is identified by nixos-rebuild, not by the nix binary alone.
+                for name in ('nixos-rebuild', 'nix'):
+                    path = bin_dir / name
+                    path.write_text(mock)
+                    path.chmod(0o755)
+            # Tools the installer should find already installed and leave alone.
+            for name in present:
+                path = bin_dir / name
+                path.write_text('#!/bin/sh\n')
+                path.chmod(0o755)
+            # The harness owns PATH, so the coreutils the prefix really executes
+            # have to be linked in explicitly.
+            for name in ('dirname', 'grep', 'install', 'mv', 'date', 'sha256sum',
+                         'cut', 'tr', 'chmod', 'readlink'):
+                real = shutil.which(name)
+                if real:
+                    (bin_dir / name).symlink_to(real)
+            # install.sh resolves ROOT as the parent of its own directory and
+            # creates config.yaml from config.example.yaml before anything else.
+            shutil.copy2(ROOT / 'config.example.yaml', root / 'config.example.yaml')
+            script = root / 'start/install.sh'
             prefix = (ROOT / 'start/install.sh').read_text().split('# Use the installed JDK', 1)[0]
             script.write_text(prefix + 'printf "JAVA_HOME=%s\\n" "$JAVA_HOME"\n')
             result = subprocess.run([shutil.which('bash'), script], capture_output=True, text=True,
                                     env={**os.environ, 'PATH': str(bin_dir), 'HOME': str(root),
                                          'MOCK_LOG': str(log), 'FAIL_INSTALL': '1' if fail_install else ''})
             commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
-            return result, commands
+            # The temporary tree disappears on return, so anything worth asserting
+            # about the filesystem has to be read here.
+            config = root / 'config.yaml'
+            paths = {'root': str(root), 'bin': str(bin_dir),
+                     'config_created': config.is_file(),
+                     'config_mode': config.stat().st_mode & 0o777 if config.is_file() else None}
+            return result, commands, paths
 
     def test_cachyos_pacman_dependencies(self):
-        result, commands = self.run_dependencies(('pacman',))
+        result, commands, _ = self.run_dependencies(('pacman',))
         self.assertEqual(result.returncode, 0, result.stderr)
         install = commands[-1]
         self.assertEqual(install[:4], ['pacman', '-S', '--needed', '--noconfirm'])
@@ -208,7 +261,7 @@ elif name == 'sudo':
         self.assertIn('JAVA_HOME=/usr/lib/jvm/java-17-openjdk', result.stdout)
 
     def test_debian_apt_dependencies_preserved(self):
-        result, commands = self.run_dependencies(('apt-get',))
+        result, commands, _ = self.run_dependencies(('apt-get',))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(commands[1], ['apt-get', 'update'])
         self.assertEqual(commands[2][:3], ['apt-get', 'install', '-y'])
@@ -217,21 +270,79 @@ elif name == 'sudo':
         self.assertIn('JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64', result.stdout)
 
     def test_pacman_preferred_if_both_commands_exist(self):
-        result, commands = self.run_dependencies(('pacman', 'apt-get'))
+        result, commands, _ = self.run_dependencies(('pacman', 'apt-get'))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(any(c[0] == 'apt-get' for c in commands))
 
     def test_unsupported_manager_fails_without_sudo(self):
-        result, commands = self.run_dependencies(())
+        result, commands, _ = self.run_dependencies(())
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Supported distributions', result.stderr)
         self.assertEqual(commands, [])
 
     def test_package_failure_stops_installation(self):
-        result, commands = self.run_dependencies(('pacman',), fail_install=True)
+        result, commands, _ = self.run_dependencies(('pacman',), fail_install=True)
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertEqual(len(commands), 2)
         self.assertNotIn('JAVA_HOME=', result.stdout)
+
+    def nix_command(self, commands):
+        nix = [c for c in commands if c[0] == '--extra-experimental-features']
+        self.assertEqual(len(nix), 1, commands)
+        self.assertEqual(nix[0][:4], ['--extra-experimental-features', 'nix-command flakes',
+                                      'profile', 'install'])
+        return nix[0][4:]
+
+    def test_nixos_is_preferred_over_pacman_and_apt(self):
+        # NixOS can have pacman or apt-get installed through nix; neither can write
+        # to a read-only store, so the distribution marker must win.
+        result, commands, _ = self.run_dependencies(('pacman', 'apt-get'), nixos=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(c[0] in ('pacman', 'apt-get') for c in commands), commands)
+        self.assertEqual([c for c in commands if c[0] == '-v'], [['-v']])
+        self.nix_command(commands)
+
+    def test_nixos_installs_dependencies_into_the_user_profile(self):
+        result, commands, _ = self.run_dependencies((), nixos=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attrs = self.nix_command(commands)
+        for attr in ('android-tools', 'gnumake', 'gcc', 'pkg-config', 'clang', 'llvm',
+                     'git', 'curl', 'unzip', 'xz', 'python3', 'jdk17',
+                     'util-linux', 'procps', 'findutils', 'cargo', 'rustc'):
+            self.assertIn(f'nixpkgs#{attr}', attrs)
+        # Every argument is a store path spec, never a bare attribute.
+        self.assertTrue(all(a.startswith('nixpkgs#') for a in attrs), attrs)
+        self.assertEqual(len(commands), 2)  # sudo -v and the profile install only
+
+    def test_nixos_derives_java_home_from_the_javac_it_installed(self):
+        result, commands, paths = self.run_dependencies((), nixos=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # There is no /usr/lib/jvm on NixOS: JAVA_HOME comes from readlink -f javac.
+        # javac lives in <home>/bin/javac here, so JAVA_HOME is the directory
+        # holding bin/, exactly as $out/lib/openjdk would be in the real store.
+        self.assertIn(f"JAVA_HOME={paths['root']}\n", result.stdout)
+        self.assertNotIn('/usr/lib/jvm', result.stdout)
+
+    def test_nixos_skips_tools_already_on_path(self):
+        # `nix profile install` refuses duplicates, so present tools must be probed out.
+        result, commands, _ = self.run_dependencies((), nixos=True, present=('git', 'curl', 'unzip'))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        attrs = self.nix_command(commands)
+        for gone in ('nixpkgs#git', 'nixpkgs#curl', 'nixpkgs#unzip'):
+            self.assertNotIn(gone, attrs)
+        self.assertIn('nixpkgs#android-tools', attrs)
+
+    def test_nixos_package_failure_stops_installation(self):
+        result, commands, _ = self.run_dependencies((), nixos=True, fail_install=True)
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertNotIn('JAVA_HOME=', result.stdout)
+
+    def test_installer_creates_config_before_touching_packages(self):
+        result, commands, paths = self.run_dependencies(('pacman',))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(paths['config_created'], 'config.yaml was not created next to the checkout')
+        self.assertEqual(paths['config_mode'], 0o600)
+        self.assertIn('Created config.yaml', result.stdout)
 
 
 @unittest.skipIf(os.geteuid() == 0, 'Launcher intentionally refuses root')
@@ -316,6 +427,18 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(any(c[0] == 'kot-tas' for c in self.commands()))
         # Nothing was deployed yet, but the ADB server this session started is stopped.
         self.assertEqual(self.commands()[-1], ['adb', 'kill-server'])
+
+    def test_system_python_without_pyyaml_falls_back_to_the_venv(self):
+        # A NixOS system python3 has no site-packages, so `import yaml` fails and
+        # the launcher must parse the config with the TAS venv interpreter instead.
+        broken = self.bin / 'python3'
+        broken.write_text('#!' + sys.executable + '\nimport sys\nsys.exit(1)\n')
+        broken.chmod(0o755)
+        result = self.run_launcher()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['adb', '-s', '192.168.240.112:5555', 'forward', '--no-rebind',
+                       'tcp:41337', 'localabstract:/data/local/tmp/sysmon.sock'], self.commands())
+        self.assertTrue(any(c[0] == 'kot-tas' for c in self.commands()))
 
     def test_restricted_log_permissions_do_not_stop_healthy_tas(self):
         # Reproduce an unwritable watch.log/directory after TAS has already started.

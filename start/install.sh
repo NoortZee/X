@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# CachyOS/Arch or Ubuntu/Debian + existing, initialized Waydroid. Run as the desktop user, not root.
+# CachyOS/Arch, Ubuntu/Debian or NixOS + existing, initialized Waydroid.
+# Run as the desktop user, not root.
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA="${XDG_DATA_HOME:-$HOME/.local/share}/kot-tas"
@@ -10,7 +11,7 @@ if [[ "${1:-}" == --help ]]; then
     echo 'Usage: start/install.sh'
     echo 'Creates config.yaml, then installs only the missing or damaged dependencies:'
     echo 'system packages, Rust, Android SDK, modified Phantom server and modified Frida.'
-    echo 'Requires CachyOS/Arch or Ubuntu/Debian, sudo, initialized Waydroid, internet and ~5 GB disk space.'
+    echo 'Requires CachyOS/Arch, Ubuntu/Debian or NixOS, sudo, initialized Waydroid, internet and ~5 GB disk space.'
     printf 'Artifacts: %s; existing config.yaml is preserved.\n' "$DATA"
     exit 0
 fi
@@ -79,16 +80,51 @@ check_config() {
 }
 check_config
 
-if command -v pacman >/dev/null; then
+# NixOS is detected first: it can legitimately have pacman or apt-get installed
+# through nix, and neither of them can write to a read-only /nix store system.
+if [[ -e /etc/NIXOS ]] || command -v nixos-rebuild >/dev/null; then
+    PACKAGE_MANAGER=nix
+elif command -v pacman >/dev/null; then
     PACKAGE_MANAGER=pacman
 elif command -v apt-get >/dev/null; then
     PACKAGE_MANAGER=apt-get
 else
-    fail 'Supported distributions: CachyOS/Arch (pacman), Ubuntu/Debian (apt-get).'
+    fail 'Supported distributions: CachyOS/Arch (pacman), Ubuntu/Debian (apt-get), NixOS (nix/nixos-rebuild).'
 fi
 command -v sudo >/dev/null || fail 'Install sudo first.'
 command -v waydroid >/dev/null || fail 'Install and initialize Waydroid first (distribution-specific setup).'
 sudo -v
+
+# NixOS has no mutable /usr: dependencies go into the user profile, and
+# `nix profile install` refuses a package that is already there, so probe each
+# tool first. Arguments are <binary to probe>:<nixpkgs attribute>.
+nix_install() {
+    local spec tool attr missing=()
+    for spec in "$@"; do
+        tool=${spec%%:*}
+        attr=${spec##*:}
+        command -v "$tool" >/dev/null || missing+=("nixpkgs#$attr")
+    done
+    if (( ${#missing[@]} == 0 )); then
+        skip_existing 'Nix dependencies' 'all tools already on PATH'
+        return
+    fi
+    # --extra-experimental-features works whether or not the user enabled the new
+    # CLI in nix.conf, so a stock NixOS install needs no configuration change.
+    echo "Installing into the user Nix profile: ${missing[*]}"
+    nix --extra-experimental-features 'nix-command flakes' profile install "${missing[@]}"
+}
+
+# NixOS keeps the JDK in /nix/store, not /usr/lib/jvm: derive JAVA_HOME from the
+# javac that is actually on PATH so SDK tools and d8 find their runtime.
+java_home_from_javac() {
+    local javac
+    javac="$(command -v javac)" || return 1
+    javac="$(readlink -f -- "$javac")" || return 1
+    [[ $javac == */bin/javac ]] || return 1
+    printf '%s\n' "${javac%/bin/javac}"
+}
+
 case "$PACKAGE_MANAGER" in
     pacman)
         echo 'Installing TAS dependencies only (no system upgrade or database refresh).'
@@ -105,6 +141,18 @@ case "$PACKAGE_MANAGER" in
             openjdk-17-jdk-headless util-linux procps
         export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
         ;;
+    nix)
+        echo 'Installing TAS dependencies only, into the user Nix profile; the system configuration is not touched.'
+        nix_install \
+            adb:android-tools make:gnumake cc:gcc pkg-config:pkg-config clang:clang \
+            llvm-config:llvm git:git curl:curl unzip:unzip xz:xz python3:python3 \
+            javac:jdk17 flock:util-linux ps:procps find:findutils \
+            cargo:cargo rustc:rustc
+        # No hardcoded /usr/lib/jvm path exists here; resolve what nix linked in.
+        JAVA_HOME="$(java_home_from_javac)" \
+            || fail 'JDK 17 was installed but javac is not on PATH; re-open the shell or check your Nix profile.'
+        export JAVA_HOME
+        ;;
 esac
 # Use the installed JDK for SDK tools and javac without changing the system Java default.
 export PATH="$JAVA_HOME/bin:$PATH"
@@ -116,6 +164,11 @@ flock -n 9 || fail 'Another installer or TAS session is active.'
 
 if command -v cargo >/dev/null; then
     skip_existing 'Rust toolchain' "$(cargo --version) at $(command -v cargo)"
+elif [[ $PACKAGE_MANAGER == nix ]]; then
+    # A rustup toolchain cannot link on NixOS: there is no FHS /usr/lib and no
+    # ld at a fixed path. nixpkgs cargo/rustc were installed above, so a missing
+    # cargo here means the profile install did not take effect.
+    fail 'Rust toolchain missing: nixpkgs#cargo did not land on PATH (re-open the shell, or check `nix profile list`).'
 else
     curl --fail --location --proto '=https' --tlsv1.2 https://sh.rustup.rs -o "$DATA/downloads/rustup.sh"
     sh "$DATA/downloads/rustup.sh" -y --profile minimal --default-toolchain stable
@@ -283,11 +336,13 @@ fi
 
 # The venv is verified by importing the exact pinned Frida version, not by its existence.
 VENV_PY="$DATA/venv/bin/python"
-if [[ -x $VENV_PY ]] && "$VENV_PY" -c "import sys, frida; sys.exit(0 if frida.__version__ == '$FRIDA_VERSION' else 1)" 2>/dev/null; then
-    skip_existing "frida==$FRIDA_VERSION (venv)" "$DATA/venv"
+# PyYAML goes into the venv on every distribution: start.sh parses config.yaml
+# with it, and a NixOS system python3 has no site-packages to provide it.
+if [[ -x $VENV_PY ]] && "$VENV_PY" -c "import sys, yaml, frida; sys.exit(0 if frida.__version__ == '$FRIDA_VERSION' else 1)" 2>/dev/null; then
+    skip_existing "frida==$FRIDA_VERSION + PyYAML (venv)" "$DATA/venv"
 else
     [[ -x $VENV_PY ]] || python3 -m venv "$DATA/venv"
-    "$VENV_PY" -m pip install --disable-pip-version-check "frida==$FRIDA_VERSION"
+    "$VENV_PY" -m pip install --disable-pip-version-check "frida==$FRIDA_VERSION" pyyaml
 fi
 
 # Rebuild only when the binary is missing or older than the tracked Rust sources.
@@ -305,7 +360,15 @@ needs_cargo_build() {
 }
 cd "$ROOT"
 if needs_cargo_build; then
-    cargo build --release
+    if [[ $PACKAGE_MANAGER == nix ]]; then
+        # NixOS keeps pkg-config files and C headers in `dev` outputs that a user
+        # profile does not expose, so build inside a shell that has them instead
+        # of relying on the linked binaries alone.
+        nix-shell -p cargo rustc pkg-config openssl clang gnumake \
+            --run "cd $(printf '%q' "$ROOT") && cargo build --release"
+    else
+        cargo build --release
+    fi
 else
     skip_existing 'kot-tas (release build is current)' "$ROOT/target/release/kot-tas"
 fi
