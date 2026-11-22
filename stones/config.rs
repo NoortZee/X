@@ -1,11 +1,45 @@
 //! Настройки сканера соперников и его Telegram-уведомлений.
 
+use crate::config::{scale_frac, ConfigError, ScreenConfig};
+
 use serde::Deserialize;
 
+/// «Найти следующего» в Find a Match.
+///
+/// Доли (`x_frac`/`y_frac`) масштабируются под реальное окно Waydroid, поэтому
+/// кнопка остаётся на месте при любом разрешении. Абсолютные `x`/`y` имеют
+/// приоритет, если заданы оба варианта.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct SkipCoords {
-    pub x: i32,
-    pub y: i32,
+    pub x: Option<i32>,
+    pub y: Option<i32>,
+    pub x_frac: Option<f64>,
+    pub y_frac: Option<f64>,
+}
+
+impl SkipCoords {
+    pub fn resolve(&self, screen: &ScreenConfig) -> Result<(i32, i32), ConfigError> {
+        let frac = self.x_frac.is_some() || self.y_frac.is_some();
+        if !frac {
+            let x = self
+                .x
+                .ok_or_else(|| ConfigError::InvalidTap("missing stones.skip_on_no_match.x".into()))?;
+            let y = self
+                .y
+                .ok_or_else(|| ConfigError::InvalidTap("missing stones.skip_on_no_match.y".into()))?;
+            return Ok((x, y));
+        }
+        let (w, h) = screen.resolve()?;
+        let x = match self.x {
+            Some(v) => v,
+            None => scale_frac(self.x_frac, w, "stones.skip_on_no_match.x_frac")?,
+        };
+        let y = match self.y {
+            Some(v) => v,
+            None => scale_frac(self.y_frac, h, "stones.skip_on_no_match.y_frac")?,
+        };
+        Ok((x, y))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

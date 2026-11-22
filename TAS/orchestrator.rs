@@ -122,7 +122,7 @@ impl<'c> Orchestrator<'c> {
     pub fn new(cfg: &'c Config, replay: &'c Replay) -> Result<Self, ReplayError> {
         let (tap_x, tap_y) = cfg
             .tap
-            .resolve()
+            .resolve(&cfg.screen)
             .map_err(|e| ReplayError::Msg(e.to_string()))?;
         Ok(Self {
             cfg,

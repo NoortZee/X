@@ -1,3 +1,18 @@
+## Без выпуска — координаты тапов считаются от реального окна Waydroid
+
+Координаты были захардкожены в пикселях (`tap: 540x960`, `stones.skip_on_no_match: 1775x970`) и молча уезжали при любом другом размере окна. Теперь они задаются долями окна, а размер окна читается у Waydroid.
+
+- `start/start.sh`: после проверок устройства выполняется `adb -s <device> shell wm size`. `Override size` имеет приоритет над `Physical size` (игра рендерит именно в override-окно после изменения размера). Размер печатается и экспортируется в `KOT_TAS_SCREEN_WIDTH`/`KOT_TAS_SCREEN_HEIGHT`. Нечитаемый ответ (`error: device offline`, пустой вывод, значения < 320) прерывает запуск до развёртывания серверов — тап не может уйти в точку от чужого разрешения.
+- `TAS/config.rs`: новая секция `screen` (`ScreenConfig`), `env_dim()` читает переменные лаунчера, `scale_frac()` переводит долю 0..=1 в пиксели. `TapConfig::resolve(&self, screen)` получил режим `fraction` (`x_frac`/`y_frac`); `center_lower_third` больше не требует `tap.screen_width`/`tap.screen_height` и берёт размер из `screen`. Поля `screen_width`/`screen_height` из `tap` удалены.
+- `stones/config.rs`: `SkipCoords.{x,y}` стали `Option`, добавлены `x_frac`/`y_frac`; абсолютные значения имеют приоритет, если заданы оба варианта.
+- `config.example.yaml`: `tap.position: "fraction"` с `x_frac: 0.28125` / `y_frac: 0.916` и `skip_on_no_match` с `x_frac: 0.9245` / `y_frac: 0.9256`. На окне 1920x1048 это ровно прежние 540x960 и 1775x970, то есть для текущего рабочего setups ничего не меняется.
+- `TAS/main.rs`: размер окна печатается один раз при старте; отсутствие размера — `WARN`, а не ошибка, потому что `tap.position: explicit` и абсолютные `skip`-координаты в нём не нуждаются.
+- `screen:` без ключей разбирается как YAML null, а `#[serde(default)]` на present-but-null не срабатывает — добавлен `screen_or_default`, иначе пример конфига не загрузился бы.
+
+Тесты: `tests/test_start_scripts.py` — мок `adb shell wm size` и 4 новых теста (размер доходит до TAS, `Override size` побеждает `Physical size`, `\r` в выводе не ломает разбор, нечитаемый размер останавливает запуск до TAS и ADB всё равно гасится). Новый `tests/test_tap_scaling.py` — 11 тестов: доли из `config.example.yaml` дают прежние пиксели на 1920x1048, не выходят за границы на 1080x1920 / 2560x1440 / 1280x720, имена переменных окружения в `start.sh` и `TAS/config.rs` совпадают, все три режима `tap.position` на месте, старых вызовов `tap.resolve()` без аргумента не осталось. Итого 37 python-тестов; 5 падений в `InstallerDependencyTests` — те же, что на чистом `7bc5d13`. `node --test` — 75/75.
+
+Rust в этой среде не собирается (нет cargo/rustc, `static.rust-lang.org` закрыт), поэтому правки Rust проверены разбором AST (ast-grep, узлов ERROR нет) и полным перебором ссылок на изменённые имена. **Компилятором не проверено.**
+
 ## Без выпуска — исправлена регрессия `stones`: `ReferenceError: '_last_rival_addr'`
 
 Регрессия внесена предыдущей чисткой. Из `stones/rival_hook.js` удалили объявление `let _last_rival_addr = null;` как «write-only»: анализатор строил граф достижимости по ссылкам-чтениям, а запись `_last_rival_addr = p;` в `onLeave` осталась в файле. В `'use strict'` присваивание несуществующему имени даёт `ReferenceError`, который `onLeave` ловит своим `try/catch` и отправляет в `type: 'err'` — поэтому хук вставал (`hooked at 0x…`), а снапшот не сохранялся и не отправлялся: подбор камней в LIVE-режиме перестал работать.

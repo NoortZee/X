@@ -13,6 +13,7 @@ use thiserror::Error;
 pub mod config;
 
 use self::config::{StonesConfig, TelegramConfig};
+use crate::config::ScreenConfig;
 use crate::phantom::PhantomBridge;
 
 pub const HELP: &str = r#"=== stones — камни соперника (burst-режим) ===
@@ -453,9 +454,19 @@ impl<'a> StonesModule<'a> {
         hook_path: PathBuf,
         sc: &StonesConfig,
         tg_cfg: &TelegramConfig,
+        screen: &ScreenConfig,
     ) -> Self {
         let (seq_tx, seq_rx) = mpsc::channel();
-        let skip_xy = sc.skip_on_no_match.as_ref().map(|c| (c.x, c.y));
+        let skip_xy = sc
+            .skip_on_no_match
+            .as_ref()
+            .and_then(|c| match c.resolve(screen) {
+                Ok(xy) => Some(xy),
+                Err(e) => {
+                    eprintln!("ERROR stones: skip_on_no_match unusable: {e}");
+                    None
+                }
+            });
         let tg = TgNotifier::from_config(tg_cfg);
         if let Some((x, y)) = skip_xy {
             eprintln!(

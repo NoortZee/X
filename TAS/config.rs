@@ -14,12 +14,16 @@ pub enum ConfigError {
     Yaml(#[from] serde_yaml::Error),
     #[error("invalid tap config: {0}")]
     InvalidTap(String),
+    #[error("invalid screen config: {0}")]
+    InvalidScreen(String),
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub phantom: PhantomConfig,
     pub tap: TapConfig,
+    #[serde(default, deserialize_with = "screen_or_default")]
+    pub screen: ScreenConfig,
     #[serde(default)]
     pub stones: StonesConfig,
     #[serde(default)]
@@ -50,17 +54,70 @@ pub struct PhantomConfig {
     pub reconnect_attempts: usize,
 }
 
+/// Waydroid display size that every scaled coordinate is resolved against.
+///
+/// Nothing here is a guess: `start/start.sh` exports what `adb shell wm size`
+/// reported for the running window, and an explicit `screen:` section wins when
+/// the operator wants to pin a size instead.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ScreenConfig {
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
+impl ScreenConfig {
+    pub fn resolve(&self) -> Result<(i32, i32), ConfigError> {
+        let w = match self.width {
+            Some(v) => v,
+            None => env_dim("KOT_TAS_SCREEN_WIDTH")?,
+        };
+        let h = match self.height {
+            Some(v) => v,
+            None => env_dim("KOT_TAS_SCREEN_HEIGHT")?,
+        };
+        if w < 1 || h < 1 {
+            return Err(ConfigError::InvalidScreen(format!(
+                "display {w}x{h} is not usable"
+            )));
+        }
+        Ok((w, h))
+    }
+}
+
+fn env_dim(name: &str) -> Result<i32, ConfigError> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .ok_or_else(|| {
+            ConfigError::InvalidScreen(format!(
+                "no Waydroid display size: set screen.width and screen.height in config.yaml, \
+                 or launch through start/start.sh, which exports {name} from `adb shell wm size`"
+            ))
+        })
+}
+
+/// Scale a 0..=1 fraction of the display span to pixels.
+pub fn scale_frac(frac: Option<f64>, span: i32, name: &str) -> Result<i32, ConfigError> {
+    let f = frac.ok_or_else(|| ConfigError::InvalidTap(format!("missing {name}")))?;
+    if !(0.0..=1.0).contains(&f) {
+        return Err(ConfigError::InvalidTap(format!(
+            "{name}={f} is outside 0..=1"
+        )));
+    }
+    Ok((f * span as f64).round() as i32)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct TapConfig {
     pub position: String,
     pub x: Option<i32>,
     pub y: Option<i32>,
-    pub screen_width: Option<i32>,
-    pub screen_height: Option<i32>,
+    pub x_frac: Option<f64>,
+    pub y_frac: Option<f64>,
 }
 
 impl TapConfig {
-    pub fn resolve(&self) -> Result<(i32, i32), ConfigError> {
+    pub fn resolve(&self, screen: &ScreenConfig) -> Result<(i32, i32), ConfigError> {
         match self.position.as_str() {
             "explicit" => {
                 let x = self
@@ -71,13 +128,15 @@ impl TapConfig {
                     .ok_or_else(|| ConfigError::InvalidTap("missing tap.y".into()))?;
                 Ok((x, y))
             }
+            "fraction" => {
+                let (w, h) = screen.resolve()?;
+                Ok((
+                    scale_frac(self.x_frac, w, "tap.x_frac")?,
+                    scale_frac(self.y_frac, h, "tap.y_frac")?,
+                ))
+            }
             "center_lower_third" => {
-                let w = self
-                    .screen_width
-                    .ok_or_else(|| ConfigError::InvalidTap("missing screen_width".into()))?;
-                let h = self
-                    .screen_height
-                    .ok_or_else(|| ConfigError::InvalidTap("missing screen_height".into()))?;
+                let (w, h) = screen.resolve()?;
                 Ok((w / 2, (h * 2) / 3))
             }
             other => Err(ConfigError::InvalidTap(format!(
@@ -138,6 +197,16 @@ impl Config {
         let raw = std::fs::read_to_string(path)?;
         Ok(serde_yaml::from_str(&raw)?)
     }
+}
+
+/// `screen:` with every key commented out parses as YAML null. `#[serde(default)]`
+/// only covers an absent key, so accept null explicitly and fall back to
+/// autodetection instead of failing to load the config.
+fn screen_or_default<'de, D>(de: D) -> Result<ScreenConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<ScreenConfig>::deserialize(de)?.unwrap_or_default())
 }
 
 fn d_async() -> String { "async".into() }
