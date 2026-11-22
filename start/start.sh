@@ -142,6 +142,24 @@ adb devices
 [[ $(adb_device shell "su -c id" | tr -d '\r') == *uid=0* ]] || fail 'ADB su root access is required.'
 adb_device shell "pidof $PACKAGE" >/dev/null || fail "Open the game ($PACKAGE) in Waydroid first."
 
+# Tap coordinates scale to the real window, so read it instead of hardcoding a
+# resolution. "Override size" wins: that is what the game renders into when the
+# Waydroid window was resized away from the physical size.
+WM_RAW="$(adb_device shell wm size 2>/dev/null | tr -d '\r' || true)"
+WM_DIMS="$(printf '%s\n' "$WM_RAW" |
+    sed -n 's/^Override size: \([0-9][0-9]*\)x\([0-9][0-9]*\)$/\1 \2/p' | tail -1)"
+[[ -n "$WM_DIMS" ]] || WM_DIMS="$(printf '%s\n' "$WM_RAW" |
+    sed -n 's/^Physical size: \([0-9][0-9]*\)x\([0-9][0-9]*\)$/\1 \2/p' | tail -1)"
+SCREEN_W="${WM_DIMS%% *}"
+SCREEN_H="${WM_DIMS##* }"
+if [[ ! "$SCREEN_W" =~ ^[0-9]+$ || ! "$SCREEN_H" =~ ^[0-9]+$ ]] ||
+    (( SCREEN_W < 320 || SCREEN_H < 320 )); then
+    fail "Cannot read Waydroid display size; 'adb shell wm size' said: ${WM_RAW:-<empty>}"
+fi
+export KOT_TAS_SCREEN_WIDTH="$SCREEN_W"
+export KOT_TAS_SCREEN_HEIGHT="$SCREEN_H"
+echo "Waydroid display: ${SCREEN_W}x${SCREEN_H}; tap coordinates scale to it."
+
 # Explicitly restart the old servers, as in the manual launch procedure.
 android_root sh -c 'pkill -9 -f "/data/local/tmp/[s]ysmon( |$)" || [ "$?" = 1 ]'
 android_root sh -c 'pkill -9 -f "com.phantom.server.[P]hantomServer" || [ "$?" = 1 ]'

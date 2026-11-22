@@ -321,7 +321,7 @@ fn do_calibrate(
         eprintln!("ERROR main: ensure_pump failed: {e}");
         return;
     }
-    let (x, y) = match cfg.tap.resolve() {
+    let (x, y) = match cfg.tap.resolve(&cfg.screen) {
         Ok(xy) => xy,
         Err(e) => {
             eprintln!("ERROR main: {e}");
@@ -467,6 +467,13 @@ fn main() {
         log_dir.display()
     );
 
+    // Report the display once so scaled coordinates are traceable in the log.
+    // Not fatal: tap.position=explicit and absolute skip coords need no size.
+    match cfg.screen.resolve() {
+        Ok((w, h)) => eprintln!("INFO main: Waydroid display {w}x{h}; scaled tap coordinates follow it"),
+        Err(e) => eprintln!("WARN main: {e}"),
+    }
+
     let dm = DeviceManager::obtain(&FRIDA);
     let device = match connect_remote_device(&dm, &cfg.frida.device) {
         Ok(d) => d,
@@ -505,6 +512,7 @@ fn main() {
         root.join("stones").join("rival_hook.js"),
         &cfg.stones,
         &cfg.telegram,
+        &cfg.screen,
     );
 
     let aborted = Arc::new(AtomicBool::new(false));

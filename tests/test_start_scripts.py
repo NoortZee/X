@@ -48,12 +48,16 @@ elif name == 'adb':
     if 'get-state' in command: print('device')
     if 'ro.product.cpu.abi' in command: print('x86_64')
     if 'su -c id' in command: print('uid=0(root)')
+    if 'wm size' in command: print(os.environ.get('WM_SIZE', 'Physical size: 1920x1048'))
     if '--version' in command: print(os.environ.get('SERVER_VERSION', '17.16.4'))
 elif name == 'python':
     print('health check: ' + args[-1])
     sys.stdin.read()
     if os.environ.get('FAIL_HEALTH'): sys.exit(1)
 elif name == 'kot-tas':
+    with open(os.environ['MOCK_LOG'], 'a') as f:
+        f.write(json.dumps(['kot-tas-env', os.environ.get('KOT_TAS_SCREEN_WIDTH'),
+                            os.environ.get('KOT_TAS_SCREEN_HEIGHT')]) + '\n')
     if os.environ.get('MOCK_QUIT_FILE'):
         def cancel_command(signum, frame):
             with open(os.environ['MOCK_LOG'], 'a') as f:
@@ -283,6 +287,35 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_cleanup()
         self.assertTrue(any(c[0] == 'kot-tas' for c in self.commands()))
+
+    def test_waydroid_display_size_reaches_tas(self):
+        result = self.run_launcher(WM_SIZE='Physical size: 1920x1048')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(['adb', '-s', '192.168.240.112:5555', 'shell', 'wm', 'size'], self.commands())
+        self.assertEqual([c for c in self.commands() if c[0] == 'kot-tas-env'],
+                         [['kot-tas-env', '1920', '1048']])
+        self.assertIn('Waydroid display: 1920x1048', result.stdout)
+
+    def test_override_size_wins_over_physical_size(self):
+        # A resized Waydroid window reports both lines; the game renders into the override.
+        result = self.run_launcher(WM_SIZE='Physical size: 1920x1080\nOverride size: 1280x720')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c for c in self.commands() if c[0] == 'kot-tas-env'],
+                         [['kot-tas-env', '1280', '720']])
+
+    def test_carriage_returns_in_wm_size_output_are_tolerated(self):
+        result = self.run_launcher(WM_SIZE='Physical size: 1080x1920\r')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([c for c in self.commands() if c[0] == 'kot-tas-env'],
+                         [['kot-tas-env', '1080', '1920']])
+
+    def test_unreadable_display_size_stops_before_tas(self):
+        result = self.run_launcher(WM_SIZE='error: device offline')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Cannot read Waydroid display size', result.stderr)
+        self.assertFalse(any(c[0] == 'kot-tas' for c in self.commands()))
+        # Nothing was deployed yet, but the ADB server this session started is stopped.
+        self.assertEqual(self.commands()[-1], ['adb', 'kill-server'])
 
     def test_restricted_log_permissions_do_not_stop_healthy_tas(self):
         # Reproduce an unwritable watch.log/directory after TAS has already started.
