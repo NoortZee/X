@@ -15,9 +15,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The window these fractions were measured on. On it the scaled values must
-# match the previously hardcoded pixels exactly, so upgrading changes nothing
-# for an existing setup and only starts helping on other resolutions.
+# The window the shipped fractions were measured on, and the pixels they stood
+# for before scaling existed. The example config no longer mentions any of these
+# numbers, so this test is the only record that the tap points did not move:
+# on that window the fractions must still land on exactly those pixels.
 REFERENCE = (1920, 1048)
 
 
@@ -49,11 +50,19 @@ class ConfigExampleScalingTests(unittest.TestCase):
                 x, y = scale(coords['x_frac'], w), scale(coords['y_frac'], h)
                 self.assertTrue(0 <= x < w and 0 <= y < h, f'{name} out of bounds on {w}x{h}')
 
-    def test_hardcoded_resolution_keys_are_gone(self):
-        self.assertNotIn('screen_width', self.config['tap'])
-        self.assertNotIn('screen_height', self.config['tap'])
-        # The screen section exists but is left to autodetection by default,
-        # so it parses as null; config.rs must accept that (screen_or_default).
+    def test_example_carries_no_hardcoded_pixels_or_resolution(self):
+        # Coordinates scale, so the example must not pin one device's numbers.
+        raw = (ROOT / 'config.example.yaml').read_text(encoding='utf-8')
+        pattern = re.compile(r'(?<![\d.])(1920|1048|540|960|1775|970)(?![\d.])')
+        for number, line in enumerate(raw.splitlines(), 1):
+            found = pattern.search(line)
+            if found:
+                self.fail(f'hardcoded {found[1]} is back in config.example.yaml:{number}: {line.strip()}')
+        for section in (self.config['tap'], self.config['stones']['skip_on_no_match']):
+            for key in ('x', 'y', 'screen_width', 'screen_height'):
+                self.assertNotIn(key, section)
+        # The screen section stays as an (empty) autodetection placeholder, which
+        # parses as null; config.rs must accept that instead of failing to load.
         self.assertIn('screen', self.config)
         self.assertIn(self.config['screen'], (None, {}))
         self.assertIn('fn screen_or_default', (ROOT / 'TAS/config.rs').read_text(encoding='utf-8'))
