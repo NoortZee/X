@@ -38,6 +38,8 @@ ADB_OWNED=0
 REMOTE_OWNED=0
 FORWARDS=()
 adb_device() { timeout --kill-after=2 20 adb -s "$DEVICE" "$@"; }
+# Root inside Waydroid comes from the container, not from Android's `su`: the
+# stock Waydroid image ships no su binary, and ADB is only used as a transport.
 android_root() { timeout --kill-after=2 20 sudo -n waydroid shell -- "$@"; }
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 cleanup() {
@@ -147,7 +149,8 @@ adb_device wait-for-device
 [[ $(adb_device get-state | tr -d '\r') == device ]] || fail 'ADB device not ready/authorized.'
 adb devices
 [[ $(adb_device shell getprop ro.product.cpu.abi | tr -d '\r') == x86_64 ]] || fail 'TAS hooks require Android x86_64.'
-[[ $(adb_device shell "su -c id" | tr -d '\r') == *uid=0* ]] || fail 'ADB su root access is required.'
+# `su` is absent from the stock Waydroid image, so it is never probed: every
+# privileged step (deploy, servers, cleanup) goes through android_root above.
 adb_device shell "pidof $PACKAGE" >/dev/null || fail "Open the game ($PACKAGE) in Waydroid first."
 
 # Tap coordinates scale to the real window, so read it instead of hardcoding a
