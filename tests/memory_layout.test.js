@@ -80,7 +80,7 @@ test('stones parser and item reads follow edited profile values', () => {
     agent.context.rpc.exports.installHooks();
     assert.deepEqual(agent.hooks, [agent.base + 0x111000]);
     agent.values.set(0x200000 + 0x30, 77);
-    assert.equal(vm.runInContext('_readItem(ptr(0x200000), false).rating', agent.context), 77);
+    assert.equal(vm.runInContext('_readItem(ptr(0x200000)).rating', agent.context), 77);
 });
 
 test('agents do not retain inline numeric field offsets or signature definitions', () => {

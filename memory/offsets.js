@@ -64,7 +64,6 @@ const MEMORY_LAYOUT = {
         rival_n_items: 0x20,
         rival_items_ptr: 0x28,
         item_fields: { rating: 0x18, slot: 0x1C, flag: 0x20, cnt: 0x24 },
-        item_size: 0x28,
         item_stride: 8,
         item_first_ptr: 8,
     },
@@ -79,17 +78,6 @@ const MEMORY_LAYOUT = {
             level_columns: [0x128, 0x148], level_scan_ms: 250, level_samples: 8,
             level_sample_ms: 5000,
             signature: [0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x55,0x41,0x54,0x53,0x48,0x81,0xec,0xd8,0x04,0x00,0x00] },
-        // EndlessMaze::Manager descriptor vector (service+0x78..0x80), read-only survey only.
-        manager_survey: { descriptor_begin: 0x78, descriptor_end: 0x80, stride: 0x50, max_descriptors: 512,
-            rarity: 0x44, type: 0x48, record_id: 0x20, flags: 0x11, lookup_bit: 0x08, candy_type: 0x2D,
-            set_field: 0x10,
-            rtti_needle: 'EndlessMaze7Manager',
-            // Manager vtable RVA (live dump). Used only to locate the object read-only.
-            vtable: 0x2026FC8, scan_max_range: 0x4000000, scan_max_bytes: 0x300000000,
-            scan_max_ranges: 65536, scan_matches: 16 },
-        all_gold: { descriptor_factory: 0x1604540, caller: 0x14DA4A4, rarity_map: 0x2183AA0,
-            key: 4, value: 4, type: 0x2D, flags: 0x10, lookup_flag: 0x800, rarity_key: 0x44,
-            signature: [0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x48,0x83,0xec,0x28,0x8b,0x47,0x48] },
         wall_pass: { enabled: false, pattern: '66 66 d5 41', original: 26.67499923706,
             patched: -3.00000691414, tolerance: 0.0001, max_scan_bytes: 33554432, max_matches: 64,
             // Lua neighbours validate the unique block. Third=false marks observation-only legacy fields.

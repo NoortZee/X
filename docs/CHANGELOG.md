@@ -1,3 +1,22 @@
+## Без выпуска — удалён недостижимый код (агенты, карта памяти, Rust)
+
+Критерий удаления — недостижимость, а не «экспериментальность»: точка входа либо отсутствует, либо триггер уже некому поставить.
+
+Агенты (проверено разбором AST от точек входа `rpc.exports`, которые реально вызывает Rust):
+- `TAS/agent.js` 992 → 768 строк. Удалены libc-хуки RNG/времени (`installRngHooks`/`installTimeHooks`/`installLibcHooks`/`detach*`) — их никто не устанавливал, поэтому `_rngLog`/`_timeLog` всегда были пусты; frame gate (`setFrameGate`/`waitForGate`/`releaseGate`/`gateStatus`, помеченный «в async не используется»); `compareTwoRecordings`; `detectGetBodyHash`/`detectGetTimeLog`; экспорт `pumpFrame`/`pumpReset`/`pumpPause`/`pumpResume`/`pumpStep`/`pumpDbgStats` и методы `pump.pause/resume/step` вместе с веткой паузы в кадровом хуке. RPC-поверхность теперь ровно та, что вызывает `TAS/frida_agent.rs`.
+- `catacombs/agent.js` 2136 → 1287 строк. Удалены опись Manager (`surveyManager`/`locateManager`/`locateManagerUnsafe`/`managerDescriptor`/`parseSurveyAddress`), `mark`, `report`-метаданные модуля, весь gold-путь (`startGoldCycle`/`tickGoldCycle`/`stopGoldCycle`/`stopAllGold`/`requestGold*`/`enableAllGold`/`allGold*`/`authGoldCount`/`convertGoldDescriptor`/`performGold`/`fullGoldPlan`/`completeGoldRegistration`/`collectedGoldTemplate`/`growGoldPointerVector`), `performSpawnProbe`/`inspectSpawnArray`/`captureEarlySpawnArray`, `performMove`/`requestMove` и ручная ветка `altitude`. Триггеры (`pendingGold`/`pendingSpawnProbe`/`pendingMove`/`pendingAltitude`/`goldCycle`) ставились только удалёнными функциями, то есть ветки не исполнялись никогда. `status`/`report` оставлены как read-only окно для `tests/catacombs.test.js`.
+- `stones/rival_hook.js` 287 → 273 строки: удалены `readAt` и цепочка `includeHex`/`raw_hex` вместе с `_last_rival_addr`.
+
+Карта памяти (`memory/offsets.js`):
+- Удалены секции `catacombs.manager_survey` и `catacombs.all_gold` и ключ `stones.item_size` — после чистки агентов их не читает ни один агент.
+- `catacombs.spawn_gold` остался: агент его не читает, но на нём построены фикстуры `tests/catacombs.test.js` (байты сигнатур по RVA).
+
+Rust (значения, которые записывались, но не читались):
+- `PhantomError::Tap` (не конструировался), `TapResult.{sync_mode,slot,x,y}`, `JumpLogEntry.{idx,t}`, `FireRecord.{idx,abs_frame,target_frame,tap_x,tap_y,snap_before,snap_after}`, `PlanStep.snap`, `LoggingConfig.level` (вместе с ключом в `config.example.yaml`), `Replay.rng_log` и `detect_get_rng_log` — цепочка к удалённому JS-экспорту.
+- `#[allow(dead_code)]` в `TAS/phantom.rs` и `TAS/frida_agent.rs` сняты вместе с самими полями; `#![allow(dead_code)]` в `TAS/main.rs` оставлен.
+
+Тесты: `tests/catacombs.test.js` 82 → 68 (удалены 14 тестов удалённых подсистем, 3 переписаны на живое поведение, из `goldFixture` убрана заглушка `fullGoldPlan`, инвариант «только `writeFloat`» пересчитан 18 → 12). Все 68 проходят, `tests/memory_layout.test.js` 5/5. Rust-тесты и сборка в этой среде недоступны (нет cargo/rustc, `static.rust-lang.org` закрыт): правки Rust проверены только разбором AST (ast-grep, узлов ERROR нет) и поиском ссылок. `tests/test_start_scripts.py` — 5 падений в `InstallerDependencyTests`, те же на чистом HEAD до правок.
+
 ## Без выпуска — install.sh: config первым, пропуск целых зависимостей, чистые варнинги сборки
 
 - `install.sh` первым делом проверяет `config.yaml` **до любой установки**: нет — создаётся из `config.example.yaml` (`0600`); есть, но битый (пустой, обрезанный, без секций примера, не читается PyYAML) — переименовывается в `config.yaml.broken.<дата>` и создаётся заново. Печатается `config.yaml: exists and is intact — skipping`.

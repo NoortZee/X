@@ -117,8 +117,5 @@ frida:
   package: "com.zeptolab.thieves.google"
 
 logging:
-  # DEBUG / INFO / WARNING / ERROR
-  level: "INFO"
-
   # Каталог логов (внутри хранится только replay.json).
   log_dir: "logs"

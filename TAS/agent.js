@@ -285,139 +285,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
     }
 
     // ------------------------------------------------------------
-    // Libc hooks
-    // ------------------------------------------------------------
-    const _libcHooks = {
-        rng: new Set(), time: new Set(),
-        rngInstalled: false, timeInstalled: false,
-        rngHandles: [], timeHandles: [],
-    };
-    function installRngHooks() {
-        if (_libcHooks.rngInstalled) return;
-        _libcHooks.rngInstalled = true;
-        for (const name of ['rand', 'random', 'lrand48', 'mrand48', 'drand48']) {
-            const a = findExport(PLATFORM.libc, name);
-            if (!a) continue;
-            _libcHooks.rng.add(name);
-            const h = Interceptor.attach(a, {
-                onEnter() { this._fn = name; },
-                                         onLeave(ret) {
-                                             if (pump._recordRng) {
-                                                 try { pump._rngLog.push({ f: pump._frame, fn: name, v: ret.toUInt32() }); } catch (_) {}
-                                             }
-                                             if (pump._replayRng) {
-                                                 const q = pump._replayRng.get(name);
-                                                 if (q && q.length > 0) {
-                                                     const v = q.shift();
-                                                     try { ret.replace(ptr(v)); } catch (_) {}
-                                                 }
-                                             }
-                                         }
-            });
-            _libcHooks.rngHandles.push(h);
-        }
-    }
-    function installTimeHooks() {
-        if (_libcHooks.timeInstalled) return;
-        _libcHooks.timeInstalled = true;
-        for (const name of ['clock_gettime', 'gettimeofday', 'clock_gettime64']) {
-            const a = findExport(PLATFORM.libc, name);
-            if (!a) continue;
-            _libcHooks.time.add(name);
-            const h = Interceptor.attach(a, {
-                onEnter(args) {
-                    this._ts  = args[name === 'gettimeofday' ? 0 : 1];
-                    this._clk = name === 'gettimeofday' ? -1 : args[0].toInt32();
-                    this._fn  = name;
-                },
-                onLeave(ret) {
-                    if (pump._recordTime && this._ts && isReadablePtr(this._ts)) {
-                        try {
-                            const s = BigInt(this._ts.add(PLATFORM.time_seconds).readS64().toString());
-                            const sub = BigInt(this._ts.add(PLATFORM.time_subseconds).readS64().toString());
-                            const ns = (this._fn === 'gettimeofday')
-                                ? (s * 1000000000n + sub * 1000n)
-                                : (s * 1000000000n + sub);
-                            pump._timeLog.push({ f: pump._frame, fn: this._fn, clk: this._clk, ns: ns.toString() });
-                        } catch (_) {}
-                    }
-                    if (pump._freezeTime && pump._frozenNs !== null && this._ts && isReadablePtr(this._ts)) {
-                        try {
-                            const ns = BigInt(pump._frozenNs);
-                            const sec = ns / 1000000000n;
-                            const rem = ns % 1000000000n;
-                            this._ts.add(PLATFORM.time_seconds).writeS64(Number(sec));
-                            if (this._fn === 'gettimeofday') {
-                                this._ts.add(PLATFORM.time_subseconds).writeS64(Number(rem / 1000n));
-                            } else {
-                                this._ts.add(PLATFORM.time_subseconds).writeS64(Number(rem));
-                            }
-                            ret.replace(0);
-                        } catch (_) {}
-                    }
-                }
-            });
-            _libcHooks.timeHandles.push(h);
-        }
-    }
-    function detachRngHooks() {
-        for (const h of _libcHooks.rngHandles) { try { h.detach(); } catch (_) {} }
-        _libcHooks.rngHandles = [];
-        _libcHooks.rngInstalled = false;
-        _libcHooks.rng.clear();
-    }
-    function detachTimeHooks() {
-        for (const h of _libcHooks.timeHandles) { try { h.detach(); } catch (_) {} }
-        _libcHooks.timeHandles = [];
-        _libcHooks.timeInstalled = false;
-        _libcHooks.time.clear();
-    }
-    function installLibcHooks() { installRngHooks(); installTimeHooks(); }
-
-    // ------------------------------------------------------------
-    // Frame gate (в async не используется)
-    // ------------------------------------------------------------
-    const gate = {
-        armed: false, target: 0, waiting: false, released: false,
-        enteredAtFrame: null, releasedAtFrame: null, waitMs: 0,
-    };
-    function setFrameGate(targetFrame) {
-        if (gate.armed) return { ok: false, error: 'gate_already_armed', target: gate.target };
-        gate.target = targetFrame;
-        gate.armed = true;
-        gate.waiting = false;
-        gate.released = false;
-        gate.enteredAtFrame = null;
-        gate.releasedAtFrame = null;
-        return { ok: true, target: targetFrame, current: pump._frame };
-    }
-    function waitForGate(timeoutMs) {
-        const t0 = Date.now();
-        while (gate.armed && !gate.waiting && !gate.released) {
-            if (Date.now() - t0 > timeoutMs) {
-                return { ok: false, error: 'gate_timeout',
-                    target: gate.target, current: pump._frame };
-            }
-            Thread.sleep(0.001);
-        }
-        if (gate.waiting)  return { ok: true, frame: gate.enteredAtFrame, waiting: true };
-        if (gate.released) return { ok: true, frame: gate.releasedAtFrame, skipped: true };
-        return { ok: false, error: 'gate_not_armed', current: pump._frame };
-    }
-    function releaseGate() {
-        if (!gate.armed && !gate.waiting) return { ok: false, error: 'gate_not_armed' };
-        gate.released = true;
-        return { ok: true, frame: gate.enteredAtFrame, releasedAt: gate.releasedAtFrame };
-    }
-    function gateStatus() {
-        return {
-            armed: gate.armed, target: gate.target, waiting: gate.waiting,
-            released: gate.released, enteredAt: gate.enteredAtFrame,
-            releasedAt: gate.releasedAtFrame, waitMs: gate.waitMs, current: pump._frame,
-        };
-    }
-
-    // ------------------------------------------------------------
     // JUMP monitor
     // ------------------------------------------------------------
     let _jumpTotal = 0;
@@ -446,35 +313,24 @@ const BODY = MEMORY_LAYOUT.tas.body;
     // Pump
     // ------------------------------------------------------------
     const pump = {
-        _frame: 0, _paused: false, _budget: -1, _installed: false,
+        _frame: 0, _installed: false,
         _onFrame: null, _onFirstUpdate: null, _onLeave: null,
         _lastHero: null, _lastHeroFrame: null,
         _detectBodyRecord: false, _detectBodyFrames: [], _detectBodyHash: new Map(),
         _playbackBodyMap: null, _playbackAnchorFrame: null, _playbackAnchorRecFrame: null,
         _replayBodyFrames: [], _divergences: [],
         _ring: [], _ringMax: 300, _ringActive: false,
-        _recordTime: false, _timeLog: [], _frameNsTimeline: new Map(),
-        _recordRng: false, _rngLog: [],
-        _replayRng: null,
-        _freezeTime: false, _frozenNs: null,
+        _recordTime: false, _frameNsTimeline: new Map(),
         _dbgStats: { enter: 0, leave: 0, nullBody: 0, readOk: 0 },
 
         install() {
             if (pump._installed) { send({ type: 'pump_already' }); return; }
-            pump._paused = false; pump._budget = -1; pump._frame = 0;
+            pump._frame = 0;
 
             Interceptor.attach(FRAME_FUNC, {
                 onEnter(args) {
                     this._hero = args[0];
 
-                    if (pump._paused || pump._budget === 0) {
-                        let g = 0;
-                        while (pump._paused || pump._budget === 0) {
-                            Thread.sleep(0.001);
-                            if (++g > 60000) break;
-                        }
-                    }
-                    if (pump._budget > 0) pump._budget--;
                     pump._frame++;
                     pump._dbgStats.enter++;
                     try {
@@ -594,9 +450,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
         resetHero() { pump._lastHero = null; pump._lastHeroFrame = null; },
         reset()     { pump._frame = 0; },
         frame()     { return pump._frame; },
-        pause()     { pump._paused = true; },
-        resume()    { pump._paused = false; pump._budget = -1; },
-        step(n)     { pump._paused = false; pump._budget = n; },
 
         setOnFrame(fn)       { pump._onFrame = fn; },
         clearOnFrame()       { pump._onFrame = null; },
@@ -612,7 +465,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
         },
         detectBodyStop()    { pump._detectBodyRecord = false; },
         detectBodyGet()     { return pump._detectBodyFrames; },
-        detectBodyHashGet() { return pump._detectBodyHash; },
 
         setPlaybackBody(framesArray) {
             if (!framesArray || !framesArray.length) { pump._playbackBodyMap = null; return 0; }
@@ -633,7 +485,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
             pump._playbackAnchorRecFrame = null;
             pump._replayBodyFrames = [];
             pump._divergences = [];
-            pump._replayRng = null;
         },
     };
 
@@ -708,11 +559,8 @@ const BODY = MEMORY_LAYOUT.tas.body;
         detectWaitFirstHeroUpdate = false;
         _jumpCallSites = new Set();
         pump._frameNsTimeline = new Map();
-        pump._timeLog = [];
-        pump._rngLog = [];
         pump.detectBodyStart();
         pump._recordTime = true;
-        pump._recordRng = true;
         pump.setOnFrame(_onFrameRecordTimeline);
         send({ type: 'detect_started', frame: pump.frame(),
             wall: detectStartWall, ns: detectStartNsVal,
@@ -724,7 +572,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
         detectWaitFirstHeroUpdate = false;
         pump.detectBodyStop();
         pump._recordTime = false;
-        pump._recordRng = false;
         pump.clearOnFrame();
         const dur = detectStartWall ? (Date.now() - detectStartWall) : 0;
         const frames_delta = pump.frame() - detectFrameAtStart;
@@ -733,8 +580,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
             count: detectEvents.length,
             body_frames: pump._detectBodyFrames.length,
             body_hashes: pump._detectBodyHash.size,
-            time_samples: pump._timeLog.length,
-            rng_samples: pump._rngLog.length,
             duration_ms: dur,
             frames_delta: frames_delta,
             avg_fps: dur > 0 ? (frames_delta * 1000 / dur).toFixed(1) : 'n/a',
@@ -744,19 +589,12 @@ const BODY = MEMORY_LAYOUT.tas.body;
     }
 
     function detectGetBodyFrames() { return pump.detectBodyGet(); }
-    function detectGetBodyHash() {
-        const out = [];
-        for (const [f, h] of pump._detectBodyHash) out.push([f, h]);
-        return out;
-    }
     function detectGetFrameNsTimeline() {
         const out = [];
         for (const [f, ns] of pump._frameNsTimeline) out.push([f, ns]);
         out.sort((a, b) => a[0] - b[0]);
         return out;
     }
-    function detectGetRngLog()  { return pump._rngLog; }
-    function detectGetTimeLog() { return pump._timeLog; }
 
     // ------------------------------------------------------------
     // Play (NO jumpFn)
@@ -779,7 +617,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
             pump.clearOnLeave();
             pump.clearPlaybackBody();
             pump.resetHero();
-            gate.armed = false; gate.waiting = false; gate.released = false;
 
             const allJumps = events.filter(e => e.name === 'jump')
             .sort((a, b) => a.frame - b.frame);
@@ -859,7 +696,7 @@ const BODY = MEMORY_LAYOUT.tas.body;
         function playState() {
             return { phase: play.phase, anchor: play.anchorFrame,
                 anchorRec: play.anchorRecFrame, kind: play.anchorKind,
-                plan: play.plan, gate: gateStatus(), frame: pump._frame };
+                plan: play.plan, frame: pump._frame };
         }
         function playStop() {
             for (const h of _playHooks) { try { h.detach(); } catch (_) {} }
@@ -867,7 +704,6 @@ const BODY = MEMORY_LAYOUT.tas.body;
             pump.clearOnFirstUpdate();
             pump.clearPlaybackBody();
             pump._ringActive = false;
-            gate.armed = false;
             play.phase = 'idle';
             return { ok: true };
         }
@@ -904,45 +740,11 @@ const BODY = MEMORY_LAYOUT.tas.body;
             };
         }
 
-        function compareTwoRecordings(a, b) {
-            if (!Array.isArray(a) || !Array.isArray(b)) {
-                return { error: 'both args must be arrays' };
-            }
-            const mapB = new Map(b.map(r => [r.frame, r]));
-            let compared = 0, diffs = 0, maxU32 = 0;
-            const samples = [];
-            for (const ra of a) {
-                const rb = mapB.get(ra.frame);
-                if (!rb) continue;
-                compared++;
-                const div = compareBodyBit(ra, rb);
-                if (div) {
-                    diffs++;
-                    if (samples.length < 10)
-                        samples.push({ f: ra.frame, diffs: div.diffs.slice(0, 6) });
-                    for (const d of div.diffs) {
-                        if (d.int) continue;
-                        const dd = Math.abs((d.aU32 | 0) - (d.eU32 | 0));
-                        if (dd > maxU32) maxU32 = dd;
-                    }
-                }
-            }
-            return { compared, a_len: a.length, b_len: b.length,
-                diffs, max_abs_diff_u32: maxU32, samples,
-                deterministic: diffs === 0 };
-        }
-
         // ------------------------------------------------------------
         // RPC exports
         // ------------------------------------------------------------
         rpc.exports = {
             pumpInstall:        () => pump.install(),
-            pumpFrame:          () => pump.frame(),
-            pumpReset:          () => pump.reset(),
-            pumpPause:          () => pump.pause(),
-            pumpResume:         () => pump.resume(),
-            pumpStep:           (n) => pump.step(n),
-            pumpDbgStats:       () => pump._dbgStats,
 
             pumpJumpCount:      () => _jumpTotal,
             pumpJumpLogSince:   (idx) => {
@@ -954,15 +756,8 @@ const BODY = MEMORY_LAYOUT.tas.body;
             detectStart:              () => detectStart(),
             detectStop:               () => detectStop(),
             detectGetBodyFrames:      () => detectGetBodyFrames(),
-            detectGetBodyHash:        () => detectGetBodyHash(),
             detectGetFrameNsTimeline: () => detectGetFrameNsTimeline(),
-            detectGetRngLog:          () => detectGetRngLog(),
-            detectGetTimeLog:         () => detectGetTimeLog(),
 
-            setFrameGate: (t) => setFrameGate(t),
-            waitForGate:  (t) => waitForGate(t),
-            releaseGate:  () => releaseGate(),
-            gateStatus:   () => gateStatus(),
             ringTail:     (n) => ringTail(n),
 
             playSetup:  (ev, opts) => playSetup(ev, opts),
@@ -970,23 +765,4 @@ const BODY = MEMORY_LAYOUT.tas.body;
             playVerify: () => playVerify(),
             playStop:   () => playStop(),
 
-            compareTwoRecordings: (a, b) => compareTwoRecordings(a, b),
-
-            libcHooksInstall:    () => { installLibcHooks(); return {
-                rng: Array.from(_libcHooks.rng), time: Array.from(_libcHooks.time) }; },
-                libcHooksDetachRng:  () => { detachRngHooks();  return true; },
-                libcHooksDetachTime: () => { detachTimeHooks(); return true; },
-                setFreezeTime: (enabled, ns) => {
-                    pump._freezeTime = !!enabled;
-                    pump._frozenNs = (ns != null) ? Number(ns) : null;
-                    if (pump._freezeTime) installTimeHooks();
-                    else detachTimeHooks();
-                },
-                setReplayRng: (obj) => {
-                    const m = new Map();
-                    for (const k of Object.keys(obj || {})) m.set(k, (obj[k] || []).slice());
-                    pump._replayRng = m;
-                    installRngHooks();
-                },
-                clearReplayRng: () => { pump._replayRng = null; },
         };

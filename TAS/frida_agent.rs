@@ -44,14 +44,7 @@ const PRINT_TYPES: &[&str] = &[
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct JumpLogEntry {
-    /// Monotonic jump counter from the agent; kept for diagnostics/log correlation.
-    #[allow(dead_code)]
-    pub idx: u64,
     pub frame: i64,
-    /// Agent wall-clock timestamp of the jump; kept for latency analysis.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub t: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,17 +190,6 @@ impl<'a> TasAgent<'a> {
         serde_json::from_value(v).map_err(|e| {
             AgentError::BadResponse("detectGetFrameNsTimeline".into(), e.to_string())
         })
-    }
-
-    pub fn detect_get_rng_log(&mut self) -> Result<Option<Vec<Value>>, AgentError> {
-        let v = self.rpc("detectGetRngLog", None)?;
-        let list: Vec<Value> = serde_json::from_value(v)
-            .map_err(|e| AgentError::BadResponse("detectGetRngLog".into(), e.to_string()))?;
-        if list.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(list))
-        }
     }
 
     pub fn pump_jump_count(&mut self) -> Result<u64, AgentError> {

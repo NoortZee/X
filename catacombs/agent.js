@@ -1,7 +1,7 @@
 // Bounded diagnostics with an explicit single-object position experiment. All candidate offsets are in memory/offsets.js.
 'use strict';
 const C = MEMORY_LAYOUT.catacombs;
-let hook = null, enabled = false, error = null, moduleInfo = null;
+let hook = null, enabled = false, error = null;
 let calls = 0, samples = 0, skipped = 0, lastTime = null, latest = null;
 let history = [], events = [], previous = new Map(), previousState = null;
 let resolution = null;
@@ -15,13 +15,8 @@ let fixtureReport = null, filterSymbols = null;
 let maskTest = null, maskBackup = null;
 let speedTest = null, speedBackup = null;
 let fallStatus = null, fallBackup = null;
-let pendingAltitude = null;
-let pendingSpawnProbe = null, spawnInspection = null;
-let earlySpawnArray = null;
-let pendingGold = null, goldResult = null, goldAttempted = false;
-let goldCycle = null;
 let attachObserver = null, attachObservationStatus = null, attachObservations = [];
-let pendingMove = null, lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
+let lastMove = null, movesExecuted = 0, mutationAttempted = false, teleportUsed = false;
 function event(kind, data) {
     if (kind.startsWith('wall_pass_')) {
         wallEvents.push({ time: Date.now(), kind, ...data });
@@ -391,7 +386,6 @@ function restoreHeroMasks(reason) {
     event('hero_mask_restore', { result: maskTest });
 }
 function restoreNoFall(reason) {
-    pendingAltitude = null;
     if (!fallBackup) return;
     try {
         const context = heroMaskContext(fallBackup.state);
@@ -445,24 +439,6 @@ function preventFall(state) {
         }
         mutationAttempted = true;
         if (g !== 0) gravity.writeFloat(0);
-        if (pendingAltitude) {
-            const request = pendingAltitude; pendingAltitude = null;
-            if (request.state !== state.toString() || Date.now() - request.time > C.altitude_test.expiry_ms) {
-                fallStatus.altitude_error = 'altitude request stale/state changed';
-            } else {
-                const y = numberAt(context.hero, C.object.y);
-                if (request.mode === 'above' && fallBackup.originY === undefined) fallBackup.originY = y;
-                if (fallBackup.originY === undefined) fallStatus.altitude_error = 'use above before return-height';
-                else {
-                    fallBackup.flight = { target: request.mode === 'above' ? fallBackup.originY - C.altitude_test.up : fallBackup.originY,
-                        started: Date.now(), mode: request.mode };
-                    fallStatus.altitude = { mode: request.mode, status: 'moving', origin_y: fallBackup.originY,
-                        target_y: fallBackup.flight.target };
-                    delete fallStatus.altitude_error;
-                    fallStatus.descent = 'cancelled_by_manual_altitude';
-                }
-            }
-        }
         let desiredVY = 0;
         if (fallStatus.descent === 'descending') {
             const y = numberAt(context.hero, C.object.y);
@@ -578,7 +554,6 @@ function sample(state) {
     if (!C.diagnostics) {
         if (lastTime !== null && Date.now() - lastTime < C.limits.sample_ms) { skipped++; return; }
         lastTime = Date.now(); samples++;
-        safe(() => captureEarlySpawnArray(state));
         safe(() => captureFixtureReport(state));
         safe(() => levelCensus(state));
         safe(() => recordStage(state));
@@ -591,7 +566,6 @@ function sample(state) {
     const key = state.toString();
     if (lastTime !== null && now - lastTime < C.limits.sample_ms) { skipped++; return; }
     lastTime = now;
-    safe(() => captureEarlySpawnArray(state));
     safe(() => captureFixtureReport(state));
     safe(() => levelCensus(state));
     safe(() => recordStage(state));
@@ -706,73 +680,6 @@ function teleportCandy(selected, target, result) {
     result.position_check = physicsPositionCheck(target, result.physics_readback);
     if (!result.position_check.matches)
         throw new Error('rebuilt physics position differs from target; do not retry');
-}
-function performMove(state) {
-    if (!pendingMove) return;
-    const request = pendingMove;
-    pendingMove = null; // Exactly one attempt; never retry automatically.
-    const result = { time: Date.now(), request_time: request.time, success: false,
-        collection_confirmed: false, mode: request.mode || 'visual', experiment: request.mode === 'teleport' ? 'native physics rebuild; collection unverified' : 'object coordinates only; Body sync unverified' };
-    try {
-        if (Date.now() - request.time > C.move_white.expiry_ms) throw new Error('request expired');
-        if (state.toString() !== request.state) throw new Error('state changed');
-        requireClass(state, C.move_white.state_name);
-        if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0)
-            throw new Error('run is not active');
-        const world = state.add(C.state.world).readPointer();
-        const hero = world.add(C.world.hero).readPointer();
-        requireClass(hero, C.move_white.hero_name);
-        const body = hero.add(C.object.body).readPointer();
-        requireClass(body, C.move_white.hero_body_name);
-        const direction = body.add(C.move_white.direction).readS32();
-        if (direction !== 1 && direction !== -1) throw new Error('invalid hero direction');
-        const hx = numberAt(hero, C.object.x), hy = numberAt(hero, C.object.y);
-        const target = { x: hx + direction * C.move_white.ahead, y: hy };
-        const array = state.add(C.state.objects).readPointer();
-        const count = array.add(C.array.slots).readS32();
-        if (count < 0 || count > C.limits.slots) throw new Error('array invalid or too large for experiment');
-        const data = array.add(C.array.data).readPointer();
-        let selected = null, distance = Infinity;
-        for (let i = 0; i < count; i++) {
-            const candidate = data.add(i * Process.pointerSize).readPointer();
-            if (candidate.isNull()) continue;
-            const id = identity(candidate);
-            if (!id.rtti || id.rtti.name !== C.candy.name) continue;
-            if (candidate.add(C.candy.rarity).readS32() !== C.move_white.rarity) continue;
-            const x = numberAt(candidate, C.object.x), y = numberAt(candidate, C.object.y);
-            const d = Math.hypot(x - hx, y - hy);
-            if (d < distance) { selected = candidate; distance = d; }
-        }
-        if (!selected) throw new Error('no common Candy in current array');
-        const setter = selected.readPointer().add(C.method_probe.object_methods.position_set_candidate).readPointer();
-        const m = Process.findModuleByAddress(setter);
-        const range = Process.findRangeByAddress(setter);
-        if (!m || m.name !== MEMORY_LAYOUT.module_name || !range || !range.protection.includes('x'))
-            throw new Error('unexpected setter location');
-        const bytes = new Uint8Array(setter.readByteArray(C.move_white.setter_bytes.length));
-        if (!C.move_white.setter_bytes.every((b, i) => bytes[i] === b)) throw new Error('setter bytes changed');
-        const xField = selected.add(C.object.x), yField = selected.add(C.object.y);
-        writableFloat(xField); writableFloat(yField);
-        const before = { x: numberAt(selected, C.object.x), y: numberAt(selected, C.object.y) };
-        result.object = selected.toString(); result.before = before; result.target = target;
-        if (request.mode === 'teleport') {
-            teleportCandy(selected, target, result);
-            result.success = true; movesExecuted++;
-            return;
-        }
-        // Reproduce only the verified two-float object setter; no unknown ABI/native call.
-        try {
-            mutationAttempted = true;
-            xField.writeFloat(target.x);
-            yField.writeFloat(target.y);
-        } catch (e) {
-            result.rollback = safe(() => { xField.writeFloat(before.x); yField.writeFloat(before.y); return true; });
-            throw e;
-        }
-        result.readback = position(selected);
-        result.success = true; movesExecuted++;
-    } catch (e) { result.error = String(e); }
-    finally { lastMove = result; event('move_white_result', result); }
 }
 function wallBlockMatches(pointer) {
     return C.wall_pass.neighbours.every(([offset, value, required]) =>
@@ -897,61 +804,6 @@ function safeU64(pointer) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error('uint64 outside safe integer range');
     return value;
 }
-function inspectSpawnArray(state) {
-    const S = C.spawn_probe;
-    const array = state.add(C.state.objects).readPointer(); requireClass(array, S.array_name);
-    const result = { array: address(array), candidate_layout: true,
-        semantics: 'allocated slots and indexed assignment; not an append count' };
-    result.capacity = safeU64(array.add(C.array.slots));
-    result.highest_index = safe(() => array.add(S.array_high).readS32());
-    result.live_counter = safe(() => safeU64(array.add(S.array_live)));
-    result.growth = safe(() => safeU64(array.add(S.array_growth)));
-    result.policy = safe(() => array.add(S.array_policy).readU8());
-    if (result.capacity > C.limits.slots) throw new Error('spawn array capacity exceeds scan limit');
-    const data = array.add(C.array.data).readPointer();
-    if (result.capacity && data.isNull()) throw new Error('null spawn array data');
-    result.data = data.toString(); result.observed_live = 0; result.free_slots_sample = [];
-    result.candy_count = 0; result.sample_candy = null;
-    for (let i = 0; i < result.capacity; i++) {
-        const object = data.add(i * Process.pointerSize).readPointer();
-        if (object.isNull()) {
-            if (result.free_slots_sample.length < S.free_samples) result.free_slots_sample.push(i);
-            continue;
-        }
-        result.observed_live++;
-        const id = identity(object);
-        if (!id.rtti || id.rtti.name !== C.candy.name) continue;
-        result.candy_count++;
-        if (result.sample_candy) continue;
-        result.sample_candy = { slot: i, ...id, position: position(object),
-            rarity: safe(() => object.add(C.candy.rarity).readS32()),
-            refcount: safe(() => object.add(S.refcount).readS32()), body: link(object, C.object.body),
-            body_factory_method: safe(() => {
-                const target = object.readPointer().add(S.body_factory_slot).readPointer();
-                const key = captureMethodCode(target, S.attach_bytes, S.instructions);
-                if (!key) throw new Error('body factory code budget exhausted');
-                return { vptr_byte_offset: S.body_factory_slot, target: address(target), candidate_only: true, code: methodCode.get(key) };
-            }),
-            registered_parent: safe(() => inspectCandyParent(object)),
-            attach_method: safe(() => {
-                const target = object.readPointer().add(S.attach_slot).readPointer();
-                const key = captureMethodCode(target, S.attach_bytes, S.instructions);
-                if (!key) throw new Error('attach code capture budget exhausted');
-                return { vptr_byte_offset: S.attach_slot, target: address(target), candidate_only: true, code: methodCode.get(key) };
-            }) };
-    }
-    result.live_counter_matches = typeof result.live_counter === 'number' ? result.live_counter === result.observed_live : null;
-    result.note = result.sample_candy ? 'No attach or array mutation performed; refcount ownership still needs analysis.' :
-        'No live Candy at probe time; rerun in a new level while objects are present.';
-    return result;
-}
-function captureEarlySpawnArray(state) {
-    if (state.add(C.state.phase).readS32() !== 1) return;
-    if (earlySpawnArray && earlySpawnArray.state === state.toString()) return;
-    const array = inspectSpawnArray(state);
-    if (array.sample_candy) earlySpawnArray = { time: Date.now(), state: state.toString(), array,
-        warning: 'Historical evidence only; never reuse these object pointers for native calls.' };
-}
 function inspectCandyParent(object) {
     requireClass(object, C.candy.name);
     const body = object.add(C.object.body).readPointer(); requireClass(body, C.candy_body_probe.body_name);
@@ -1017,16 +869,6 @@ function installAttachObserver(m) {
         });
         attachObservationStatus.status = 'listening';
     } catch (e) { attachObservationStatus.status = 'unavailable'; attachObservationStatus.error = String(e); }
-}
-function detachAttachObserverForSpawn() {
-    if (!attachObserver) return false;
-    attachObserver.detach();
-    attachObserver = null;
-    // Detach must be committed before reading the original prologue or invoking attach.
-    Interceptor.flush();
-    attachObservationStatus = { ...attachObservationStatus, status: 'detached_for_spawn',
-        reason: 'restore original code before strict native spawn signature checks' };
-    return true;
 }
 // Bounded read-only evidence. Never dereference a historical object after slot removal/reuse.
 let goldDiagnostics = { natural: [], spawned: [], note: 'Membership/removal is not proof of reward; compare HUD.' };
@@ -1188,510 +1030,6 @@ function followGold(state) {
         if(track.timeline.length>=11) {track.done=true;track.end='10s observation budget reached';}
     }
 }
-function stopGoldCycle(reason = 'user') {
-    if (goldCycle) { goldCycle.active = false; goldCycle.reason = reason; }
-    if (pendingGold && pendingGold.cycle) pendingGold = null;
-    return { spawn_cycle: goldCycle };
-}
-function startGoldCycle(reuseCollected = false) {
-    if(allGoldStatus.active) throw new Error('disable all-gold before experimental spawning');
-    if (!enabled) throw new Error('start module first');
-    if (latest && latest.phase_raw===1 && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
-    if (goldCycle || pendingGold || goldAttempted) throw new Error('fresh module required for bounded spawn cycle');
-    if(reuseCollected) {
-        if(!latest || latest.phase_raw!==1 || Date.now()-latest.time>C.spawn_gold.expiry_ms)
-            throw new Error('enter active level and collect a natural gold first');
-        collectedGoldTemplate(ptr(latest.state.address)); // Read-only eligibility before enabling the series.
-    }
-    goldCycle = { active: true, reuse_collected_id: reuseCollected, state: latest && latest.phase_raw===1 ? latest.state.address : null, armed_deadline: Date.now()+60000, attempted: 0, registered: 0,
-        limit: 100, interval_ms: 100, next: Date.now(), reason: null };
-    event('spawn_cycle_started', { ...goldCycle });
-    return { ...goldCycle, warning: 'Experimental: up to100 objects at a maximum10/sec; actual rate depends on update cost. HUD credit unconfirmed.' };
-}
-function tickGoldCycle(state) {
-    if (!goldCycle || !goldCycle.active) return;
-    if (!goldCycle.state) {
-        if(Date.now()>goldCycle.armed_deadline) {stopGoldCycle('level wait expired');return;}
-        if(state.add(C.state.phase).readS32()!==1 || state.add(C.state.paused).readU8()!==0) return;
-        goldCycle.state=state.toString();
-    }
-    if (state.toString() !== goldCycle.state || state.add(C.state.phase).readS32() !== 1) {
-        stopGoldCycle('state/phase changed'); return;
-    }
-    if (state.add(C.state.paused).readU8() !== 0 || pendingGold || Date.now() < goldCycle.next) return;
-    pendingGold = { state: goldCycle.state, time: Date.now(), cycle: true, reuseCollected: !!goldCycle.reuse_collected_id, armed: true, deadline: Date.now()+5000 };
-    goldCycle.attempted++;
-    goldCycle.next = Date.now() + goldCycle.interval_ms;
-}
-function requestGold() {
-    if(allGoldStatus.active) throw new Error('disable all-gold before experimental spawning');
-    if (!enabled) throw new Error('start module first');
-    if (goldCycle || goldAttempted || pendingGold) throw new Error('one spawn attempt per module; inspect dump before restarting');
-    const armed = !latest || latest.phase_raw !== 1;
-    if (!armed && Date.now()-latest.time>C.spawn_gold.expiry_ms) throw new Error('state snapshot stale');
-    pendingGold = { state: armed ? null : latest.state.address, time: Date.now(), armed,
-        deadline: Date.now() + (armed ? 60000 : C.spawn_gold.expiry_ms) };
-    return { queued: true, armed_for_next_level: armed, timeout_ms: armed ? 60000 : C.spawn_gold.expiry_ms, rarity: 4, continuous: false, warning: 'Experimental native spawn; check HUD, crash possible.' };
-}
-let allGoldHook = null;
-let allGoldStatus = {active:false,converted:0,seen:0,skipped_caller:0};
-function stopAllGold() {
-    allGoldStatus.active=false;
-    if(allGoldHook) {allGoldHook.detach();allGoldHook=null;Interceptor.flush();}
-    return { ...allGoldStatus, note:'Future descriptor conversion disabled; already-modified level records/Candy are not restored.' };
-}
-function allGoldRarityValue(m) {
-    const G=C.all_gold,seen=new Set();
-    let node=m.base.add(G.rarity_map).add(8).readPointer();
-    for(let i=0;!node.isNull() && i<64;i++) {
-        if(seen.has(node.toString()))throw new Error('rarity map cycle');seen.add(node.toString());
-        const key=node.add(0x1C).readS32();
-        if(key===G.key) {const value=node.add(0x20).readS32();if(value!==G.value)throw new Error('gold rarity mapping differs');return value;}
-        node=node.add(key>G.key?0:8).readPointer();
-    }
-    throw new Error('gold rarity key not found within budget; fallback not used');
-}
-function convertGoldDescriptor(entry,m) {
-    const G=C.all_gold;
-    if(entry.isNull() || entry.add(0x48).readS32()!==G.type) return null;
-    // Bounded experiment: stop converting once the explicit cap is reached.
-    const cap=allGoldStatus.limit;
-    if(Number.isInteger(cap) && cap>=0 && allGoldStatus.converted>=cap) return null;
-    const id=entry.add(0x20).readS32();if(id<0)return null;
-    allGoldRarityValue(m); // Resolve actual runtime map entry, never assume key==value or use sentinel.
-    const flags=entry.add(G.flags).readS32(),key=entry.add(G.rarity_key).readS32();
-    const next=flags|G.lookup_flag;
-    const record={id,old_key:key,new_key:G.key,old_flags:flags,new_flags:next,mapped_rarity:G.value,changed:key!==G.key||next!==flags};
-    if(!record.changed)return record;
-    for(const offset of [G.flags,G.rarity_key]) {
-        const field=entry.add(offset),r=Process.findRangeByAddress(field);
-        if(!r || !r.protection.includes('w') || Number(r.base.add(r.size).sub(field).toString())<4)throw new Error('descriptor field not writable');
-    }
-    try {
-        entry.add(G.rarity_key).writeS32(G.key);entry.add(G.flags).writeS32(next);
-        if(entry.add(G.rarity_key).readS32()!==G.key || entry.add(G.flags).readS32()!==next)throw new Error('descriptor rarity readback mismatch');
-    } catch(e) {
-        record.rollback=safe(()=>{entry.add(G.rarity_key).writeS32(key);entry.add(G.flags).writeS32(flags);return true;});
-        allGoldStatus.last_failed_record=record;throw e;
-    }
-    mutationAttempted=true;return record;
-}
-function allGoldLimit(limit) {
-    // Default is the authored count: converting more than the level provides is rejected by the server.
-    if(limit===undefined||limit===null) return authGoldCount();
-    if(!Number.isInteger(limit)||limit<0) throw new Error('all-gold limit must be a non-negative integer');
-    return limit;
-}
-function authGoldCount() {
-    for(let i=levelCensuses.length-1;i>=0;i--) {
-        const counts=levelCensuses[i].surviving_by_rarity;
-        const gold=counts&&counts[C.all_gold.key];
-        if(Number.isInteger(gold))return gold;
-    }
-    for(let i=sequenceProbe.snapshots.length-1;i>=0;i--) {
-        const inventory=sequenceProbe.snapshots[i].level&&sequenceProbe.snapshots[i].level.inventory;
-        if(!inventory||inventory.error||!inventory.rarity_by_key)continue;
-        const gold=inventory.rarity_by_key[C.all_gold.key];
-        if(Number.isInteger(gold))return gold;
-    }
-    throw new Error('authored gold count unknown; enter a level first or pass an explicit limit');
-}
-function enableAllGold(limit) {
-    if(!enabled) throw new Error('start module first');
-    limit=allGoldLimit(limit);
-    if(allGoldHook) return {...allGoldStatus};
-    if(pendingGold || (goldCycle && goldCycle.active)) throw new Error('stop experimental spawn series first');
-    const m=Process.findModuleByName(MEMORY_LAYOUT.module_name),G=C.all_gold;
-    if(!m) throw new Error('game module missing');
-    const target=m.base.add(G.descriptor_factory),range=Process.findRangeByAddress(target);
-    if(!range || !range.protection.includes('x') || !range.protection.includes('r'))throw new Error('descriptor factory unavailable');
-    const bytes=new Uint8Array(target.readByteArray(G.signature.length));
-    if(!G.signature.every((v,i)=>bytes[i]===v))throw new Error('all-gold descriptor signature mismatch');
-    allGoldStatus={active:true,mode:'descriptor_before_native_creation',converted:0,seen:0,skipped_caller:0,records:[],
-        limit,
-        note:'Converts up to the authored gold count only; IDs/counts unchanged. Live-confirmed: staying within the authored set avoids error11.'};
-    try {
-        allGoldHook=Interceptor.attach(target,{onEnter(args) {
-            if(!enabled || !allGoldStatus.active)return;
-            if(this.returnAddress.toString()!==m.base.add(G.caller).toString()){allGoldStatus.skipped_caller++;return;}
-            try {
-                const record=convertGoldDescriptor(args[0],m);if(!record)return;
-                allGoldStatus.seen++;if(record.changed)allGoldStatus.converted++;
-                if(allGoldStatus.records.length<20)allGoldStatus.records.push(record);
-            } catch(e) {allGoldStatus.error=String(e);allGoldStatus.active=false;event('all_gold_error',{error:String(e)});}
-        }});
-        Interceptor.flush();
-    } catch(e) {stopAllGold();allGoldStatus.error=String(e);throw e;}
-    event('all_gold_enabled',{...allGoldStatus});return {...allGoldStatus};
-}
-function requestGoldReuse() {
-    if(allGoldStatus.active) throw new Error('disable all-gold before experimental spawning');
-    if(!enabled || !latest || latest.phase_raw!==1 || Date.now()-latest.time>C.spawn_gold.expiry_ms)
-        throw new Error('enter active level and collect a natural gold first');
-    if(goldCycle || goldAttempted || pendingGold) throw new Error('fresh module required for single reuse-ID test');
-    pendingGold={state:latest.state.address,time:Date.now(),deadline:Date.now()+C.spawn_gold.expiry_ms,reuseCollected:true};
-    return {queued:true,reuse_collected_id:true,continuous:false,warning:'Duplicate accounting/server error possible; one test only.'};
-}
-function collectedGoldTemplate(state) {
-    const a=goldArrayContext(state),m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
-    for(const sample of goldDiagnostics.natural) {
-        const o=sample.object,c=o && o.contact,r=c && c.records && c.records.matches && c.records.matches[0];
-        if(sample.state!==state.toString() || o.rarity!==4 || !Number.isInteger(o.id) || o.id<0 ||
-            !r || r.id!==o.id || !c.captures || !c.captures.candy_matches || c.captures.context!==state.toString()) continue;
-        // Reacquire current nodes from the current state's tree, never the historical Candy pointer.
-        const records=diagnosticColumn(state,0x128,c.captures.column,0x50,o.id);
-        if(!records.node || records.matches.length || r.index>=records.count) continue;
-        const node=ptr(records.node),entry=node.add(0x28).readPointer().add(r.index*0x50);
-        if(entry.add(0x20).readS32()!==-1) continue;
-        const original=r.raw_hex.split(' ').map(b=>parseInt(b,16));
-        const actual=Array.from(new Uint8Array(entry.readByteArray(0x50)));
-        if(original.length!==0x50 || !actual.every((v,i)=>(i>=0x10&&i<0x14)||(i>=0x20&&i<0x24)||v===original[i])) continue;
-        let active=false;
-        const secondary=state.add(0x58).readPointer();requireClass(secondary,C.spawn_probe.array_name);
-        const count=safeU64(secondary.add(C.array.slots));if(count>C.limits.slots)throw new Error('reuse secondary array budget');
-        for(const scan of [a,{capacity:count,data:secondary.add(C.array.data).readPointer()}]) {
-            for(let i=0;i<scan.capacity;i++) {
-                const current=scan.data.add(i*8).readPointer();if(current.isNull())continue;
-                const id=identity(current);
-                if(id.rtti && id.rtti.name===C.candy.name && current.add(0x184).readS32()===o.id){active=true;break;}
-            }
-        }
-        if(active) continue;
-        const objects=diagnosticColumn(state,0x110,c.captures.column,8,'not-an-address');
-        if(!objects.node)continue;
-        const callbackVptr=m.base.add(0x202C8E0);
-        if(callbackVptr.add(0x30).readPointer().toString()!==m.base.add(0x14DB600).toString()) throw new Error('reuse callback vtable mismatch');
-        return {reuseId:o.id,recordFlags:r.flags,callbackVptr,e:{captures:c.captures,records:{node:records.node,matches:[{index:r.index}]},column_objects:objects}};
-    }
-    throw new Error('no verified collected natural gold record in current level; no ID guessed');
-}
-function fullGoldPlan(state, array68, reuseCollected = false) {
-    const a=goldArrayContext(state),m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
-    if(!m) throw new Error('game module missing');
-    // Verify the additional native entry points independently before mutation.
-    for(const [rva,bytes] of [[0x105B020,[0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x41,0x54,0x53]],
-        [0x105B0D0,[0x55,0x48,0x89,0xe5,0x41,0x56,0x53]],
-        [0x1618080,[0x55,0x48,0x89,0xe5,0x41,0x57,0x41,0x56,0x53,0x50]]]) {
-        const code=m.base.add(rva),r=Process.findRangeByAddress(code);
-        if(!r || !r.protection.includes('x') || !r.protection.includes('r')) throw new Error('full spawn code protection');
-        const actual=new Uint8Array(code.readByteArray(bytes.length));
-        if(!bytes.every((v,i)=>actual[i]===v)) throw new Error('full spawn signature mismatch '+rva.toString(16));
-    }
-    let template=reuseCollected ? collectedGoldTemplate(state) : null;
-    for(let i=0;!template && i<a.capacity;i++) {
-        const o=a.data.add(i*8).readPointer();if(o.isNull()) continue;
-        const id=identity(o);if(!id.rtti || id.rtti.name!==C.candy.name || o.add(C.candy.rarity).readS32()!==4) continue;
-        const e=safe(()=>goldContactEvidence(o));
-        if(e.captures && e.captures.context===state.toString() && e.captures.candy_matches &&
-            e.records && e.records.matches && e.records.matches.length===1 &&
-            e.column_objects && e.column_objects.node && e.contact_flag===0) {template={o,e};break;}
-    }
-    if(!template) throw new Error('no live uncollected gold with verified callback/column record; spawn before auto collection');
-    const e=template.e,recordNode=ptr(e.records.node),objectNode=ptr(e.column_objects.node);
-    function tail(node,stride) {
-        const begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer(),cap=node.add(0x38).readPointer();
-        const used=Number(end.sub(begin).toString()),free=Number(cap.sub(end).toString());
-        if(!Number.isSafeInteger(used)||used<0||used%stride||used/stride>1024||!Number.isSafeInteger(free)||free<0||free%stride||free/stride>1024)
-            throw new Error('column vector bounds invalid');
-        return end;
-    }
-    const recordEnd=tail(recordNode,0x50),objectEnd=tail(objectNode,8);
-    if(Number(recordEnd.sub(recordNode.add(0x28).readPointer()).toString())/0x50>=512 ||
-        Number(objectEnd.sub(objectNode.add(0x28).readPointer()).toString())/8>=1024)
-        throw new Error('column vector growth hard limit');
-    const source=recordNode.add(0x28).readPointer().add(e.records.matches[0].index*0x50);
-    if(source.add(0x48).readS32()!==0x2D) throw new Error('gold record type mismatch');
-    const array58=state.add(0x58).readPointer();requireClass(array58,C.spawn_probe.array_name);
-    if(array58.toString()===array68.toString()) throw new Error('gold containers unexpectedly alias');
-    const capacity=safeU64(array58.add(C.array.slots)),data=array58.add(C.array.data).readPointer();
-    if(capacity<1||capacity>C.limits.slots||data.isNull()) throw new Error('secondary container invalid');
-    let slot58=-1;for(let i=0;i<capacity;i++) if(data.add(i*8).readPointer().isNull()){slot58=i;break;}
-    if(slot58<0) {
-        const growth=safeU64(array58.add(0x30));
-        if(capacity+growth+1>C.limits.slots) throw new Error('secondary array growth budget exceeded');
-        slot58=capacity;
-    }
-    const counter=state.add(0x13C).readS32();
-    if(counter<0||counter>=0x7ffffffe) throw new Error('invalid ID counter');
-    if(reuseCollected && template.reuseId>counter) throw new Error('collected ID exceeds current counter');
-    // Counter monotonicity is corroborated against every bounded tree record.
-    const stack=[state.add(0x128).readPointer()],seen=new Set();let records=0;
-    while(stack.length) {
-        const n=stack.pop();if(n.isNull()) continue;
-        if(seen.has(n.toString())||seen.size>=128) throw new Error('ID tree cycle/budget');seen.add(n.toString());
-        stack.push(n.readPointer(),n.add(8).readPointer());
-        const b=n.add(0x28).readPointer(),end=n.add(0x30).readPointer(),size=Number(end.sub(b).toString());
-        if(!Number.isSafeInteger(size)||size<0||size%0x50||size/0x50>1024) throw new Error('ID vector bounds');
-        for(let off=0;off<size;off+=0x50) {if(++records>4096)throw new Error('ID scan budget');if(b.add(off+0x20).readS32()>counter)throw new Error('ID counter below existing record');}
-    }
-    const callbackVptr=template.callbackVptr || template.o.add(C.object.body).readPointer().add(0x70).readPointer().readPointer();
-    const destroyTarget=callbackVptr.add(0x20).readPointer(),destroyModule=Process.findModuleByAddress(destroyTarget),destroyRange=Process.findRangeByAddress(destroyTarget);
-    if(!destroyModule || destroyModule.name!==MEMORY_LAYOUT.module_name || !destroyRange || !destroyRange.protection.includes('x')) throw new Error('lambda inline destructor outside game code');
-    const recordGrow=recordEnd.toString()===recordNode.add(0x38).readPointer().toString();
-    const objectGrow=objectEnd.toString()===objectNode.add(0x38).readPointer().toString();
-    if(recordGrow || objectGrow) {
-        for(const rva of [0x14BCB80,0x1F26660,0x1F26640]) {
-            const code=m.base.add(rva),range=Process.findRangeByAddress(code);
-            if(!range || !range.protection.includes('r') || !range.protection.includes('x')) throw new Error('vector growth helper not readable executable');
-        }
-        if(recordGrow) {
-            const prefix=new Uint8Array(m.base.add(0x14BCB80).readByteArray(4));
-            if(![0x55,0x48,0x89,0xe5].every((v,i)=>prefix[i]===v)) throw new Error('record push_back prefix mismatch');
-        }
-    }
-    return {source,recordNode,recordEnd,objectNode,objectEnd,recordGrow,objectGrow,array58,slot58,counter,reuseCollected,recordFlags:template.recordFlags,id:reuseCollected ? template.reuseId : counter+1,
-        column:e.captures.column,callbackVptr,m};
-}
-function growGoldPointerVector(node,object,m,result) {
-    const begin=node.add(0x28).readPointer(),end=node.add(0x30).readPointer(),cap=node.add(0x38).readPointer();
-    const used=Number(end.sub(begin).toString()),bytes=Number(cap.sub(begin).toString());
-    if(!Number.isSafeInteger(used)||used<0||used!==bytes||used%8||used/8>=1024)
-        throw new Error('pointer vector grow bounds invalid');
-    const count=used/8,newCapacity=Math.min(1024,Math.max(count+1,count*2,8));
-    // This vector contains non-owning Candy pointers in the observed native path.
-    // Allocate/delete with the game's operator new/delete, never Frida Memory.alloc.
-    const allocate=new NativeFunction(m.base.add(0x1F26660),'pointer',['uint64']);
-    const release=new NativeFunction(m.base.add(0x1F26640),'void',['pointer']);
-    const fresh=allocate(newCapacity*8);
-    if(fresh.isNull()) throw new Error('pointer vector allocation failed');
-    for(let i=0;i<count;i++) fresh.add(i*8).writePointer(begin.add(i*8).readPointer());
-    fresh.add(count*8).writePointer(object);
-    node.add(0x28).writePointer(fresh);node.add(0x30).writePointer(fresh.add((count+1)*8));node.add(0x38).writePointer(fresh.add(newCapacity*8));
-    if(!begin.isNull()) release(begin);
-    result.object_vector_grew={before:count,capacity:newCapacity};
-}
-function completeGoldRegistration(plan,state,object,body,assign,result) {
-    const P=plan;
-    if(state.add(0x13C).readS32()!==P.counter ||
-        P.recordNode.add(0x30).readPointer().toString()!==P.recordEnd.toString() ||
-        P.objectNode.add(0x30).readPointer().toString()!==P.objectEnd.toString() ||
-        (P.slot58<safeU64(P.array58.add(C.array.slots)) && !P.array58.add(C.array.data).readPointer().add(P.slot58*8).readPointer().isNull())) throw new Error('full registration reservations changed');
-    const copy=new NativeFunction(P.m.base.add(0x105B020),'void',['pointer','pointer']);
-    const cleanup=new NativeFunction(P.m.base.add(0x105B0D0),'void',['pointer']);
-    const installCallback=new NativeFunction(P.m.base.add(0x1618080),'void',['pointer','pointer']);
-    // Build a libc++ inline std::function exactly as the observed addObstaclesInColumn path.
-    const temporary=Memory.alloc(0x30);
-    temporary.writePointer(P.callbackVptr);temporary.add(8).writePointer(state);
-    temporary.add(0x10).writeS32(P.column);temporary.add(0x18).writePointer(object);
-    temporary.add(0x20).writePointer(temporary);
-    installCallback(body,temporary);
-    const installed=body.add(0x70).readPointer();
-    if(installed.isNull() || installed.toString()===temporary.toString() ||
-        installed.readPointer().toString()!==P.callbackVptr.toString() ||
-        installed.add(8).readPointer().toString()!==state.toString() ||
-        installed.add(0x10).readS32()!==P.column || installed.add(0x18).readPointer().toString()!==object.toString()) throw new Error('callback copy readback mismatch');
-    // Match the original temporary-function disposal branch (inline destroy, not delete).
-    const destroy=new NativeFunction(P.callbackVptr.add(0x20).readPointer(),'void',['pointer']);
-    destroy(temporary);
-    result.registration_stage='callback_installed';
-    const local=Memory.alloc(0x50);copy(local,P.source);
-    local.add(0x20).writeS32(P.id);
-    if(P.reuseCollected) local.add(0x10).writeS32(P.recordFlags);
-    // Preserve the template descriptor/key/flags. Its original position belongs to this column.
-    if(P.recordGrow) {
-        const push=new NativeFunction(P.m.base.add(0x14BCB80),'pointer',['pointer','pointer']);
-        push(P.recordNode.add(0x28),local);
-        if(Number(P.recordNode.add(0x30).readPointer().sub(P.recordNode.add(0x28).readPointer()).toString())/0x50>1024)
-            throw new Error('record growth readback budget exceeded');
-        result.record_vector_grew=true;
-    } else {
-        copy(P.recordEnd,local);P.recordNode.add(0x30).writePointer(P.recordEnd.add(0x50));
-    }
-    cleanup(local);
-    if(!P.reuseCollected) state.add(0x13C).writeS32(P.id);
-    result.registration_stage='column_record_added';
-    assign(P.array58,object,P.slot58);
-    if(P.objectGrow) {
-        growGoldPointerVector(P.objectNode,object,P.m,result);
-    } else {P.objectEnd.writePointer(object);P.objectNode.add(0x30).writePointer(P.objectEnd.add(8));}
-    result.secondary_slot=P.slot58;result.column=P.column;result.id=P.id;
-    result.registration_stage='all_containers_added';
-}
-function performGold(state) {
-    if (!pendingGold) return;
-    const request = pendingGold;
-    if(request.armed && Date.now()<=request.deadline) {
-        if(request.state && request.state!==state.toString()) {
-            pendingGold=null;goldResult={success:false,native_started:false,error:'armed spawn state changed'};return;
-        }
-        if(state.add(C.state.phase).readS32()!==1 || state.add(C.state.paused).readU8()!==0) return;
-        if(request.next_check && Date.now()<request.next_check) return;
-        request.state=state.toString();request.next_check=Date.now()+250;
-    }
-    pendingGold = null;
-    const result = { time: Date.now(), success: false, collection_confirmed: false, rarity: 4, native_started: false };
-    try {
-        if (request.state !== state.toString() || Date.now() > (request.deadline || request.time+C.spawn_gold.expiry_ms)) throw new Error('spawn request stale/state changed');
-        requireClass(state, C.move_white.state_name);
-        if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0) throw new Error('run not active');
-        const context = heroMaskContext(state), S = C.spawn_probe, G = C.spawn_gold;
-        const heroBody = context.hero.add(C.object.body).readPointer();
-        const world = context.physics.add(C.teleport_white.world).readPointer();
-        // Generic Body registration writes owner at +0x10; corroborate this fresh Hero owner against world.
-        const parent = heroBody.add(S.body_parent).readPointer();
-        if (parent.isNull() || parent.add(S.parent_world).readPointer().toString() !== world.toString())
-            throw new Error('fresh Hero registered parent/world mismatch');
-        const array = state.add(C.state.objects).readPointer(); requireClass(array, S.array_name);
-        const capacity = safeU64(array.add(C.array.slots));
-        if (capacity < 1 || capacity > C.limits.slots) throw new Error('array capacity invalid');
-        const data = array.add(C.array.data).readPointer();
-        if (data.isNull()) throw new Error('null array data');
-        let slot = -1;
-        for (let i = 0; i < capacity; i++) if (data.add(i * Process.pointerSize).readPointer().isNull()) { slot = i; break; }
-        if (slot < 0) {
-            if(capacity+safeU64(array.add(0x30))+1>C.limits.slots) throw new Error('primary array growth budget exceeded');
-            slot=capacity;
-        }
-        const fullPlan = fullGoldPlan(state,array,!!request.reuseCollected);
-        result.reused_collected_id=!!request.reuseCollected;
-        result.full_registration = true;
-        result.attach_observer_detached = detachAttachObserverForSpawn();
-        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
-        for (const sig of G.signatures) {
-            if (!m || sig.rva < 0 || sig.rva + sig.bytes.length > m.size) throw new Error('spawn code outside module');
-            const code = m.base.add(sig.rva), range = Process.findRangeByAddress(code);
-            if (!range || !range.protection.includes('r') || !range.protection.includes('x') || Number(range.base.add(range.size).sub(code).toString()) < sig.bytes.length)
-                throw new Error('spawn code unreadable/nonexecutable');
-            const bytes = new Uint8Array(code.readByteArray(sig.bytes.length));
-            if (!sig.bytes.every((b,i) => bytes[i] === b)) {
-                result.signature_mismatch = { rva: '0x' + sig.rva.toString(16),
-                    first_difference: sig.bytes.findIndex((b,i) => bytes[i] !== b),
-                    expected_hex: sig.bytes.map(b => b.toString(16).padStart(2,'0')).join(' '),
-                    actual_hex: Array.from(bytes).map(b => b.toString(16).padStart(2,'0')).join(' ') };
-                throw new Error('spawn signature mismatch at ' + sig.rva.toString(16));
-            }
-        }
-        const direction = heroBody.add(C.move_white.direction).readS32();
-        if (direction !== 1 && direction !== -1) throw new Error('invalid Hero direction');
-        const target = { x: numberAt(context.hero,C.object.x) + direction*C.move_white.ahead, y: numberAt(context.hero,C.object.y) };
-        const factory = new NativeFunction(m.base.add(G.factory),'pointer',['int']);
-        const attach = new NativeFunction(m.base.add(G.attach),'void',['pointer','pointer',['float','float']]);
-        const assign = new NativeFunction(m.base.add(G.array_set),'void',['pointer','pointer','uint64']);
-        if (world.add(C.teleport_white.lock).readU8() & C.teleport_white.lock_mask) throw new Error('physics locked');
-        result.target = target; result.parent = parent.toString(); result.slot = slot;
-        goldAttempted = true; mutationAttempted = true; result.native_started = true;
-        const object = factory(G.rarity); result.object = object.toString();
-        result.factory_evidence = safe(() => goldObjectEvidence(object));
-        if (object.isNull()) throw new Error('factory returned null');
-        requireClass(object,C.candy.name);
-        if (object.add(C.candy.rarity).readS32() !== G.rarity) throw new Error('factory rarity mismatch');
-        if (!object.add(C.object.body).readPointer().isNull()) throw new Error('factory already has Body; refusing duplicate attach');
-        const vptr = object.readPointer();
-        if (vptr.add(S.attach_slot).readPointer().toString() !== m.base.add(G.attach).toString() ||
-            vptr.add(S.body_factory_slot).readPointer().toString() !== m.base.add(G.body_factory).toString()) throw new Error('spawn vtable mismatch');
-        const setter = vptr.add(C.method_probe.object_methods.position_set_candidate).readPointer();
-        if (setter.toString() !== m.base.add(G.object_setter).toString()) throw new Error('unexpected object position setter');
-        const setterBytes = new Uint8Array(setter.readByteArray(C.move_white.setter_bytes.length));
-        if (!C.move_white.setter_bytes.every((b,i)=>setterBytes[i]===b)) throw new Error('object position setter changed');
-        object.add(0x184).writeS32(fullPlan.id); // Body receives the ID during attach.
-        attach(object,parent,[target.x,target.y]);
-        result.attach_evidence = safe(() => goldObjectEvidence(object));
-        result.parent_check = inspectCandyParent(object);
-        if (!result.parent_check.world_matches || result.parent_check.parent !== parent.toString()) throw new Error('new Body parent/world mismatch');
-        const body = object.add(C.object.body).readPointer(), physics = body.add(C.hero_body.physics).readPointer();
-        result.physics_readback = { x: numberAt(physics,MEMORY_LAYOUT.tas.body.XF_PX)*C.candy_body_probe.scale,
-            y: numberAt(physics,MEMORY_LAYOUT.tas.body.XF_PY)*C.candy_body_probe.scale };
-        result.position_check = physicsPositionCheck(target,result.physics_readback);
-        if (!result.position_check.matches) throw new Error('new Body position mismatch');
-        const x = object.add(C.object.x), y = object.add(C.object.y); writableFloat(x); writableFloat(y);
-        x.writeFloat(target.x); y.writeFloat(target.y); // Verified trivial object setter, matching spawn wrapper.
-        if (state.add(C.state.objects).readPointer().toString() !== array.toString()) throw new Error('array changed during spawn');
-        const currentCapacity = safeU64(array.add(C.array.slots));
-        const currentData = array.add(C.array.data).readPointer();
-        if (slot > currentCapacity || (slot < currentCapacity && !currentData.add(slot*Process.pointerSize).readPointer().isNull())) throw new Error('reserved slot no longer free');
-        completeGoldRegistration(fullPlan,state,object,body,assign,result);
-        assign(array,object,slot); // Indexed assignment, NOT capacity+1 or an assumed append helper.
-        const registered = array.add(C.array.data).readPointer().add(slot*Process.pointerSize).readPointer();
-        if (registered.toString() !== object.toString()) throw new Error('array registration readback failed');
-        result.registered = true; result.success = true;
-        result.registered_evidence = safe(() => goldObjectEvidence(object));
-        if(goldDiagnostics.spawned.length<10) {
-            const evidence=result.registered_evidence;
-            const contact=evidence && evidence.contact;
-            const record=contact && contact.records && contact.records.matches && contact.records.matches[0];
-            const watch=record && contact.captures ? {id:record.id,column:contact.captures.column,index:record.index,
-                descriptor:record.raw_hex.split(' ').map(b=>parseInt(b,16)),next:Date.now(),done:false,timeline:[]} : null;
-            goldDiagnostics.spawned.push({
-                state:state.toString(),time:Date.now(),object:object.toString(),slot,
-                body:body.toString(),next:Date.now(),done:false,timeline:[],record_watch:watch,
-                stages:{factory:result.factory_evidence,attach:result.attach_evidence,registered:result.registered_evidence} });
-        }
-        result.note = 'Full registration experiment: new ID, column record, copied lambda and both containers. HUD credit still unconfirmed.';
-    } catch (e) {
-        result.error = String(e);
-        if(request.armed && !result.native_started && Date.now()<request.deadline &&
-            (result.error.includes('no live uncollected gold with verified callback/column record') ||
-                (request.reuseCollected && result.error.includes('no verified collected natural gold record')))) {
-            pendingGold=request;goldResult={...result,waiting_for_template:true};return;
-        }
-        if (result.native_started) result.warning = 'native spawn started; possible partial/orphan object. No guessed destructor, rollback or retry; restart game after failure.';
-    }
-    goldResult = result; event('spawn_gold_result',result);
-    if (request.cycle && goldCycle) {
-        if (!result.success) stopGoldCycle('spawn failed; inspect last_spawn_gold');
-        else {
-            goldCycle.registered++;
-            goldCycle.next=Date.now()+goldCycle.interval_ms;
-            if (goldCycle.attempted >= goldCycle.limit) stopGoldCycle('limit reached');
-        }
-    }
-}
-function requestSpawnProbe() {
-    if (!enabled || !latest || latest.phase_raw !== 1) throw new Error('start module and enter active Catacombs first');
-    if (Date.now() - latest.time > C.spawn_probe.expiry_ms) throw new Error('state snapshot stale');
-    if (pendingSpawnProbe) throw new Error('spawn probe already queued');
-    pendingSpawnProbe = { state: latest.state.address, time: Date.now() };
-    return { queued: true, read_only: true, spawn_enabled: false };
-}
-function performSpawnProbe(state) {
-    if (!pendingSpawnProbe) return;
-    const request = pendingSpawnProbe; pendingSpawnProbe = null;
-    spawnInspection = { time: Date.now(), state: state.toString(), read_only: true,
-        spawn_enabled: false, abi_verified: false, candidates: {} };
-    try {
-        if (Date.now() - request.time > C.spawn_probe.expiry_ms || request.state !== state.toString())
-            throw new Error('spawn probe expired/state changed');
-        requireClass(state, C.move_white.state_name);
-        if (state.add(C.state.phase).readS32() !== 1 || state.add(C.state.paused).readU8() !== 0)
-            throw new Error('run not active/unpaused');
-        const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
-        if (!m) throw new Error('game module missing');
-        for (const [role, candidate] of Object.entries(C.spawn_probe.candidates)) {
-            spawnInspection.candidates[role] = safe(() => {
-                if (!Number.isSafeInteger(candidate.rva) || candidate.rva < 0 || candidate.rva >= m.size)
-                    throw new Error('candidate outside game module');
-                const target = m.base.add(candidate.rva);
-                const key = captureMethodCode(target, candidate.bytes, C.spawn_probe.instructions);
-                if (!key) throw new Error('code capture budget exhausted; stop/start before probe');
-                return { target: address(target), candidate_only: true, code: methodCode.get(key) };
-            });
-        }
-        spawnInspection.array = safe(() => inspectSpawnArray(state));
-        spawnInspection.attach_observer = attachObservationStatus;
-        spawnInspection.attach_observations = attachObservations.slice();
-        spawnInspection.early_array = earlySpawnArray && earlySpawnArray.state === state.toString() ? earlySpawnArray : null;
-        spawnInspection.status = 'captured'; // Code records may individually contain read/decode errors.
-    } catch (e) { spawnInspection.status = 'failed'; spawnInspection.error = String(e); }
-    event('spawn_probe_result', { status: spawnInspection.status, error: spawnInspection.error });
-}
-function requestAltitude(mode) {
-    if (!enabled || !latest || !C.no_fall.enabled) throw new Error('start module and enter active Catacombs first');
-    if (latest.phase_raw !== 1 || Date.now() - latest.time > C.altitude_test.expiry_ms)
-        throw new Error('active state snapshot missing/stale');
-    if (mode === 'return' && (!fallBackup || fallBackup.originY === undefined)) throw new Error('use above before return-height');
-    pendingAltitude = { mode, state: latest.state.address, time: Date.now() };
-    return { queued: true, mode, warning: 'Manual vertical velocity test; check no_fall.altitude, return before finish.' };
-}
-function requestMove(mode = 'visual') {
-    if (C.auto_teleport.enabled) throw new Error('automatic teleport enabled; manual moves disabled');
-    if (mode === 'teleport' && teleportUsed) throw new Error('teleport already attempted; inspect dump before restarting module');
-    if (!enabled || !latest) throw new Error('start module and enter Catacombs first');
-    if (pendingMove) throw new Error('move already queued');
-    if (Date.now() - latest.time > C.move_white.expiry_ms) throw new Error('state snapshot stale');
-    pendingMove = { time: Date.now(), state: latest.state.address, mode };
-    event('move_white_queued', pendingMove);
-    return { queued: true, warning: 'One common object only; check HUD for actual collection.' };
-}
 let sequenceProbeHook=null;
 let sequenceSummaryCache=null;
 let levelCensuses=[];
@@ -1786,160 +1124,6 @@ function levelSummary(state) {
     if(sequenceSummaryCache.size>8)sequenceSummaryCache.delete(sequenceSummaryCache.keys().next().value);
     return out;
 }
-const managerSurvey={status:'not_run',read_only:true};
-let managerLocate={status:'not_run',read_only:true};
-function managerDescriptor(service) {
-    // Read-only survey of the EndlessMaze::Manager descriptor vector; nothing is modified.
-    const M=C.manager_survey,begin=service.add(M.descriptor_begin).readPointer();
-    const end=service.add(M.descriptor_end).readPointer();
-    const bytes=Number(end.sub(begin).toString());
-    if(!Number.isSafeInteger(bytes)||bytes<0||bytes%M.stride)throw new Error('descriptor vector bounds invalid');
-    const count=bytes/M.stride;
-    if(count>M.max_descriptors)throw new Error('descriptor vector budget exceeded');
-    const range=Process.findRangeByAddress(begin);
-    if(count&&(!range||!range.protection.includes('r')))throw new Error('descriptor vector not readable');
-    const by_rarity={},candies=[],sets=[],out={time:Date.now(),read_only:true,count,
-        note:'Manager descriptors are authored level data; +44 is the authored rarity and no separate expected field exists.'};
-    for(let i=0;i<count;i++) {
-        const d=begin.add(i*M.stride);
-        const rarity=d.add(M.rarity).readS32(),type=d.add(M.type).readS32();
-        // Recorded verbatim for later comparison; the meaning of these fields is NOT assumed.
-        if(sets.length<64)sets.push({index:i,set:d.add(M.set_field).readS32(),
-            extra_c:d.add(0xC).readS32(),extra_14:d.add(0x14).readS32(),type,rarity});
-        by_rarity[String(rarity)]=(by_rarity[String(rarity)]||0)+1;
-        if(type===M.candy_type&&candies.length<8)
-            candies.push({index:i,descriptor_id:d.add(M.record_id).readS32(),rarity,type,
-                flags:d.add(M.flags).readU8(),lookup_path:(d.add(M.flags).readU8()&M.lookup_bit)!==0});
-    }
-    out.rarity_histogram=by_rarity;out.candy_total=Object.values(by_rarity).reduce((n,v)=>n+v,0);
-    out.gold_descriptors=by_rarity['4']||0;out.candies=candies;
-    // Stage capacity: how many distinct authored sets the Manager can serve, and per-set sizes.
-    const per_set={};
-    for(const entry of sets) {
-        const key=String(entry.set);
-        per_set[key]=(per_set[key]||0)+1;
-    }
-    out.sets={distinct:Object.keys(per_set).length,sizes:per_set,
-        note:'Distinct set/column values seen in descriptor +0x11 low bits and +0xC/+0x14 fields are not interpreted here.'};
-    out.set_field_samples=sets.slice(0,16);
-    return out;
-}
-function parseSurveyAddress(value) {
-    const text=String(value||'');
-    // Accept any hex address in the label; the intent prefix is recommended but not required.
-    if(!/survey/i.test(text))return null;
-    // Prefer an explicit 0x-prefixed address; otherwise accept a bare hex run outside the word "survey".
-    const prefixed=/0x([0-9a-fA-F]{1,16})/.exec(text);
-    const stripped=text.replace(/survey/gi,' ');
-    const m=prefixed||/([0-9a-fA-F]{6,16})/.exec(stripped);
-    if(!m)return null;
-    const address=ptr(parseInt(m[1],16));
-    if(address.isNull())throw new Error('survey address must be non-null');
-    return address;
-}
-function locateManager() {
-    try { return locateManagerUnsafe(); }
-    catch(e) {
-        managerLocate={status:'unavailable',read_only:true,error:String(e),time:Date.now()};
-        return managerLocate;
-    }
-}
-function locateManagerUnsafe() {
-    // Bounded read-only search: heap objects whose vptr is the EndlessMaze::Manager vtable.
-    const M=C.manager_survey,m=Process.findModuleByName(MEMORY_LAYOUT.module_name);
-    if(!m)throw new Error('game module missing');
-    const symbol=m.base.add(M.vtable);
-    // Itanium ABI: the symbol RVA may point at the vtable header (offset-to-top, typeinfo).
-    // The runtime vptr then equals symbol+2 pointers, where typeinfo sits at vptr-8.
-    const candidates=[{offset:0,label:'runtime vptr at RVA'},
-                      {offset:2*Process.pointerSize,label:'runtime vptr after 16-byte vtable header'}];
-    const checked=[];
-    let vtable=null,vtableRva=null;
-    for(const candidate of candidates) {
-        const pointer=symbol.add(candidate.offset);
-        const name=safe(()=>nameAt(pointer.add(-Process.pointerSize).readPointer().add(C.rtti.name).readPointer()));
-        checked.push({rva:pointer.sub(m.base).toString(),layout:candidate.label,
-            typeinfo:safe(()=>pointer.add(-Process.pointerSize).readPointer().toString()),
-            name:name&&name.error?undefined:name,error:name&&name.error?String(name.error):undefined});
-        if(name&&!name.error&&String(name).includes(M.rtti_needle)) {vtable=pointer;vtableRva=pointer.sub(m.base);break;}
-    }
-    managerLocate.vtable_candidates=checked;
-    if(!vtable)throw new Error('no vptr layout at RVA '+M.vtable.toString(16)+' belongs to '+M.rtti_needle+
-        ' (checked: '+checked.map(c=>c.layout+' -> '+(c.name||c.error)).join('; ')+')');
-    managerLocate.vtable_rva=vtableRva.toString();
-    const ranges=Process.enumerateRanges('rw-');
-    if(ranges.length>M.scan_max_ranges)throw new Error('too many memory ranges to scan');
-    // Scan pattern is the little-endian pointer bytes, not a text address.
-    let pattern=BigInt(vtable.toString()),patternText='';
-    for(let i=0;i<Process.pointerSize;i++){patternText+=(i?' ':'')+(pattern&0xffn).toString(16).padStart(2,'0');pattern>>=8n;}
-    const needle=patternText;
-    let scanned=0,matches=[],stopped_by_budget=false;
-    const verified=[];
-    const verify=address=>{
-        const id=safe(()=>identity(address));
-        if(!id||id.error||!id.rtti)return null;
-        const name=String(id.rtti.name);
-        if(!name.includes(M.rtti_needle))return null;
-        // The vector can be freed concurrently; an unreadable candidate is simply not confirmed.
-        const probe=safe(()=>managerDescriptor(address));
-        if(!probe||probe.error||!probe.read_only)return null;
-        return {object:address.toString(),rtti:name,count:probe.count,
-            gold:probe.gold_descriptors,total:probe.candy_total};
-    };
-    // Verify while scanning: stop as soon as one object is fully confirmed.
-    const skipped_ranges=[];
-    outer:
-    for(const r of ranges) {
-        if(scanned>M.scan_max_bytes) {stopped_by_budget=true;break;}
-        if(!r.size||r.size>M.scan_max_range)continue;
-        scanned+=r.size;
-        // A heap range can be unmapped or resized between enumerate and scan; skip it, never abort.
-        let hits;
-        try { hits=Memory.scanSync(r.base,r.size,needle); }
-        catch(e) {
-            if(skipped_ranges.length<8)skipped_ranges.push({base:r.base.toString(),size:r.size,error:String(e)});
-            continue;
-        }
-        for(const hit of hits) {
-            matches.push(hit.address);
-            const ok=verify(hit.address);
-            if(ok) {verified.push(ok);break outer;}
-            if(matches.length>=M.scan_matches)break outer;
-        }
-    }
-    managerLocate={status:verified.length?'found':'unavailable',read_only:true,scanned_bytes:scanned,
-        vtable:vtable.toString(),vtable_rva:vtableRva.toString(),vtable_candidates:checked,
-        candidates:matches.length,verified,stopped_by_budget,skipped_ranges:skipped_ranges.length,
-        skipped_range_samples:skipped_ranges,time:Date.now()};
-    if(!verified.length)managerLocate.error='no verified '+M.rtti_needle+' object with a readable descriptor vector';
-    if(verified.length===1)managerLocate.chosen=verified[0].object;
-    return managerLocate;
-}
-function surveyManager(serviceAddress) {
-    // Explicit address only: the service locator is never scanned for.
-    try {
-        if(!serviceAddress) {
-            // Explicit height: located strictly by vtable, then surveyed. No guessing.
-            const located=locateManager();
-            if(located.error||!located.verified||!located.verified.length)throw new Error(located.error||'manager not located');
-            if(located.verified.length>1)throw new Error('multiple verified managers; pass an address explicitly');
-            serviceAddress=located.chosen;
-            managerSurvey.located=true;
-        }
-        const service=typeof serviceAddress==='string'?ptr(serviceAddress):serviceAddress;
-        const id=identity(service),needle=C.manager_survey.rtti_needle;
-        if(!id.rtti||!String(id.rtti.name).includes(needle))
-            throw new Error('unexpected class; expected '+needle);
-        managerSurvey.status='found';managerSurvey.service=service.toString();managerSurvey.rtti=id.rtti.name;
-        const survey=managerDescriptor(service);
-        managerSurvey.last=survey;managerSurvey.time=survey.time;delete managerSurvey.error;
-        event('manager_survey',{count:survey.count,gold:survey.gold_descriptors});
-        return managerSurvey;
-    } catch(e) {
-        managerSurvey.status='unavailable';managerSurvey.error=String(e);
-        return managerSurvey;
-    }
-}
 function sequencePayloadPrefix(payload) {
     // Bounded read-only prefix; the payload layout itself is not interpreted here.
     const S=C.sequence_probe,r=Process.findRangeByAddress(payload);
@@ -1956,8 +1140,7 @@ function captureSequenceInput(args,caller) {
     const out={time:Date.now(),caller:address(caller),action_arg:lowS32(args[2]),
         separate_int_arg:lowS32(args[4]),payload:args[1].toString(),counts_container:args[3].toString(),
         read_only:true,payload_prefix:safe(()=>sequencePayloadPrefix(args[1])),
-        all_gold:{active:allGoldStatus.active,mode:allGoldStatus.mode||null,converted:allGoldStatus.converted},
-        spawn_mode:goldCycle?{active:goldCycle.active,reuse_collected_id:!!goldCycle.reuse_collected_id,registered:goldCycle.registered}:null};
+        read_only_owner:true};
     // Derive ownership only from the actual builder argument, never cached latest-state pointers.
     const state=args[3].add(-S.state_counts);
     const owner=safe(()=>{requireClass(state,C.move_white.state_name);
@@ -2011,8 +1194,6 @@ function installSequenceProbe(m) {
     levelCensuses=[];
     levelCensusError=null;
     stageHistory=[];
-    managerSurvey.status='not_run';delete managerSurvey.last;delete managerSurvey.error;delete managerSurvey.service;delete managerSurvey.located;
-    managerLocate={status:'not_run',read_only:true};
     sequenceProbe.last_payload=null;
     try {
         if(S.builder<0 || S.builder+S.signature.length>m.size)throw new Error('sequence builder outside module');
@@ -2034,17 +1215,9 @@ function installSequenceProbe(m) {
         sequenceProbe.status='listening';
     } catch(e) {sequenceProbe.status='unavailable';sequenceProbe.error=String(e);}
 }
-function stop() { stopSequenceProbe(); stopAllGold(); stopGoldCycle('module stopped'); pendingGold = null; if (attachObserver) attachObserver.detach(); attachObserver = null; pendingSpawnProbe = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); pendingMove = null; enabled = false; if (hook) hook.detach(); hook = null; }
-function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), stages: stageStatus(), manager_survey: managerSurvey, manager_locate: managerLocate, all_gold: {...allGoldStatus}, gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, single_spawn_available: true, spawn_cycle_enabled: !!(goldCycle && goldCycle.active), spawn_cycle: goldCycle, spawn_gold_pending: pendingGold, spawn_gold_attempted: goldAttempted, last_spawn_gold: goldResult, attach_observer: attachObservationStatus, spawn_probe_pending: pendingSpawnProbe, spawn_probe_status: spawnInspection ? spawnInspection.status : 'not_requested', spawn_enabled: false, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, altitude_pending: pendingAltitude, no_fall: fallStatus, speed: {...speedTest, requested: sessionSpeed, multiplier: speedMultiplier}, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
-    teleport_used: teleportUsed, mutation_attempted: mutationAttempted, move_pending: pendingMove, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
-function mark(label) {
-    const text=String(label||'');
-    if(!/survey/i.test(text)) { event('user_mark', { label: text.slice(0, 160) }); return status(); }
-    const parsed=safe(()=>parseSurveyAddress(text));
-    const parsedAddress=parsed&&!parsed.error?parsed:null;
-    const result=surveyManager(parsedAddress||undefined);
-    return {mark:!!parsedAddress,survey:result,requested:parsedAddress?'address':'locate',status:status()};
-}
+function stop() { stopSequenceProbe(); if (attachObserver) attachObserver.detach(); attachObserver = null; restoreNoFall('stop'); restoreSpeed('stop'); restoreHeroMasks('stop'); restoreWalls('stop'); autoRun = null; autoSeen.clear(); enabled = false; if (hook) hook.detach(); hook = null; }
+function status() { return { sequence_probe: sequenceProbe, level_census: levelTrend(), stages: stageStatus(), gold_diagnostics: goldDiagnostics, enabled, error, calls, samples, skipped, resolution, attach_observer: attachObservationStatus, auto_rise_enabled: C.altitude_test.auto_rise, altitude_offset: C.altitude_test.up, no_fall: fallStatus, speed: {...speedTest, requested: sessionSpeed, multiplier: speedMultiplier}, hero_mask_test: maskTest, fixture_probe: fixtureReport, wall_pass: wallState, wall_events: wallEvents.slice(), auto_enabled: C.auto_teleport.enabled, auto_run: autoRun,
+    teleport_used: teleportUsed, mutation_attempted: mutationAttempted, last_move: lastMove, moves_executed: movesExecuted, method_code_retained: methodCode.size, last_sample_time: latest ? latest.time : null, events_retained: events.length }; }
 let speedMultiplier=1, sessionSpeed=null;
 function clampSpeed(value) {
     const S=C.speed;
@@ -2067,11 +1240,8 @@ function start(speed) {
 }
 function installModule() {
     if (enabled) return status();
-    pendingGold = null; goldResult = null; goldAttempted = false; goldCycle = null;
     goldDiagnostics = { natural: [], spawned: [], note: 'Read-only bounded snapshots; removal is not proof of reward.' };
-    pendingSpawnProbe = null; spawnInspection = null; earlySpawnArray = null;
     attachObservationStatus = null; attachObservations = [];
-    pendingAltitude = null;
     if (!fallBackup) fallStatus = null;
     if (!speedBackup) speedTest = null;
     if (!maskBackup) maskTest = null;
@@ -2079,11 +1249,10 @@ function installModule() {
     if (!wallPatch) { wallState = null; wallEvents = []; }
     error = null; calls = 0; samples = 0; skipped = 0; lastTime = null; latest = null;
     history = []; events = []; previous = new Map(); previousState = null; resolution = null; methodCode = new Map(); lifecycleCode = null;
-    pendingMove = null; lastMove = null; movesExecuted = 0; mutationAttempted = false; teleportUsed = false;
+    lastMove = null; movesExecuted = 0; mutationAttempted = false; teleportUsed = false;
     try {
         const m = Process.findModuleByName(MEMORY_LAYOUT.module_name);
         if (!m) throw new Error('game module not loaded');
-        moduleInfo = { name: m.name, base: m.base.toString(), size: m.size };
         const matches = new Map();
         for (const r of m.enumerateRanges('r-x'))
             for (const match of Memory.scanSync(r.base, r.size, C.signature)) matches.set(match.address.toString(), match.address);
@@ -2098,16 +1267,12 @@ function installModule() {
             try { sample(args[0]); } catch (e) { error = String(e); event('sample_error', { error }); }
         }, onLeave() {
             if (!enabled) return;
-            performSpawnProbe(this.updateState);
             applySpeed(this.updateState);
             applyHeroMasks(this.updateState);
             preventFall(this.updateState);
             try { captureNaturalGold(this.updateState); followGold(this.updateState); followGoldRecords(this.updateState); }
             catch(e) { goldDiagnostics.last_error={time:Date.now(),error:String(e)}; }
-            tickGoldCycle(this.updateState);
-            if (pendingGold) performGold(this.updateState);
-            else if (pendingMove) performMove(this.updateState);
-            else if (!(goldCycle && goldCycle.active)) autoTeleport(this.updateState);
+            autoTeleport(this.updateState);
         } });
         installAttachObserver(m);
         installSequenceProbe(m);
@@ -2116,21 +1281,21 @@ function installModule() {
     return status();
 }
 rpc.exports = {
-    // Single user-facing command surface: start(<speed 1..10>).
+    // The surface the Rust module uses: start(<speed 1..10>) and stop().
     start(speed) { return start(speed); },
-    // Inspection/support only (no gameplay modes).
-    status, mark(label) { return mark(label); },
-    managerSurvey(address) { return surveyManager(address); },
-    locateManager() { return locateManager(); },
+    stop() { stop(); return status(); },
+    // Read-only inspection windows used by tests/catacombs.test.js.
+    status,
     report() {
         if (!C.diagnostics) return { schema_version: 3, compact: true, diagnostic_only: !mutationAttempted,
-            ...status(), metadata: { time: Date.now(), module: moduleInfo,
+            ...status(), metadata: { time: Date.now(),
                 warning: 'Physics readback is not proof of collection; check HUD.' },
-            spawn_probe: spawnInspection, latest, events: events.slice() };
+            latest, events: events.slice() };
         return { schema_version: 2, diagnostic_only: !mutationAttempted, experimental_position_moves: true, ...status(),
-        metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
-            module: moduleInfo, candidate_profile: C.profile, offsets: C,
-            warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
-        spawn_probe: spawnInspection, lifecycle_candidates: lifecycleCode, method_code: Object.fromEntries(methodCode), latest, history: history.slice(), events: events.slice() }; },
-    stop() { stop(); return status(); },
+            metadata: { time: Date.now(), process_id: Process.id, arch: Process.arch,
+                candidate_profile: C.profile, offsets: C,
+                warning: 'Candidate fields, not validated ownership or collection. No server verification inferred.' },
+            lifecycle_candidates: lifecycleCode, method_code: Object.fromEntries(methodCode),
+            latest, history: history.slice(), events: events.slice() };
+    },
 };
