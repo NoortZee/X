@@ -168,6 +168,62 @@ class PhantomRemoteTests(unittest.TestCase):
                 self.assertNotIn('secret', result.stderr)
 
 
+class D8InterpreterTests(unittest.TestCase):
+    """`d8` from build-tools is a script with a `#!/bin/bash` shebang.
+
+    NixOS has no /bin/bash, so the kernel refuses to execute it; Phantom's build
+    script runs the path from $D8 directly and would die with "bad interpreter".
+    The installer has to hand it an executable file that works.
+    """
+
+    def resolve(self, d8, shim):
+        script = (ROOT / 'start/install.sh').read_text()
+        function = script.split('resolve_d8() {', 1)[1].split('\n}\n', 1)[0]
+        command = 'resolve_d8() {' + function + '\n}\nresolve_d8 "$1" "$2"'
+        return subprocess.run([shutil.which('bash'), '-c', command, 'resolve_d8', str(d8), str(shim)],
+                              capture_output=True, text=True)
+
+    def test_shim_substitutes_a_missing_bash_interpreter(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            d8 = root / 'sdk/build-tools/35.0.0/d8'
+            d8.parent.mkdir(parents=True)
+            # Same shape as the real wrapper: a shebang naming a bash that is not here.
+            d8.write_text('#!/nonexistent/bin/bash\nprintf "real d8 %s\\n" "$*"\n')
+            d8.chmod(0o755)
+            shim = root / 'bin/d8'
+            result = self.resolve(d8, shim)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            resolved = Path(result.stdout.strip())
+            self.assertNotEqual(resolved, d8)  # the SDK file itself is untouched
+            self.assertEqual(resolved, shim)
+            self.assertIn('#!/usr/bin/env bash', shim.read_text())
+            run = subprocess.run([resolved, '--release'], capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.stdout.strip(), 'real d8 --release')
+
+    def test_a_working_d8_is_returned_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            d8 = root / 'd8'
+            d8.write_text('#!/usr/bin/env bash\n[[ $1 == --version ]] && echo "d8 version 35.0.0"\n')
+            d8.chmod(0o755)
+            result = self.resolve(d8, root / 'bin/d8')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(Path(result.stdout.strip()), d8)
+            self.assertFalse((root / 'bin/d8').exists(), 'a healthy d8 must not be replaced')
+
+    def test_unrelated_failure_is_reported_instead_of_hidden(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            d8 = root / 'd8'
+            d8.write_text('#!/nonexistent/bin/bash\nexit 3\n')  # shim runs, d8 still fails
+            d8.chmod(0o755)
+            result = self.resolve(d8, root / 'bin/d8')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('does not work', result.stderr)
+
+
 class BuildEnvironmentSourceTests(unittest.TestCase):
     """Source-level guards for the NixOS build environment.
 
