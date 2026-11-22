@@ -330,9 +330,6 @@ fn do_calibrate(
     };
     let fps = cfg.orchestrator.nominal_fps.max(1.0);
     let mut leads = Vec::new();
-    // Задержка в кадрах — первичная величина: она не зависит от того, насколько
-    // nominal_fps совпал с реальным темпом. В миллисекунды переводится справочно.
-    let mut lead_frames_all: Vec<i64> = Vec::new();
     let mut tap_ms = Vec::new();
 
     for i in 0..10 {
@@ -392,7 +389,6 @@ fn do_calibrate(
                 let lead_frames = cf - cur;
                 let lead_ms = (lead_frames as f64) * 1000.0 / fps;
                 leads.push(lead_ms);
-                lead_frames_all.push(lead_frames);
                 println!(
                     "[{i}] cur={cur} → change@{cf} lead_frames={lead_frames} lead≈{lead_ms:.1}ms tap={:.1}ms",
                     tr.duration_ms
@@ -415,24 +411,11 @@ fn do_calibrate(
         leads[0],
         leads[n - 1]
     );
-    lead_frames_all.sort_unstable();
-    let med_fr = lead_frames_all[n / 2];
-    let p95_fr = lead_frames_all[((n as f64 * 0.95) as usize).min(n - 1)];
-    println!(
-        "в кадрах:  min={}  med={med_fr}  p95={p95_fr}  max={}",
-        lead_frames_all[0],
-        lead_frames_all[n - 1]
-    );
-    println!("           (мс выше пересчитаны через nominal {fps:.0} fps — справочно)");
     if !tap_ms.is_empty() {
         tap_ms.sort_by(|a, b| a.total_cmp(b));
         println!("tap_ms: med={:.1}ms", tap_ms[tap_ms.len() / 2]);
     }
-    println!("\nРекомендация: predict_lead_frames: {med_fr}");
-    println!("  Тап уйдёт на {med_fr} кадр(а) раньше цели, и отклик придётся на целевой кадр.");
-    println!("  Значение в кадрах не зависит от темпа; predict_lead_ms для этого не годится —");
-    println!("  он переводится в кадры через nominal_fps, который может не совпасть с реальным.");
-    println!("\n⚠ калибровка шумит (FPS-джиттер). Дефолт 0 сохраняет прежнее поведение: тап на целевом кадре.");
+    println!("\n⚠ калибровка шумит (FPS-джиттер). Дефолт predict_lead_ms=0 — работает лучше.");
 }
 
 fn do_dry_run(replay_path: &Path) {

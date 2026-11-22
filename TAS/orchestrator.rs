@@ -8,21 +8,10 @@ use thiserror::Error;
 use crate::config::Config;
 use crate::frida_agent::{AgentError, PlayState, TasAgent};
 use crate::phantom::PhantomBridge;
-use crate::replay::{build_plan, find_anchor, FrameTimeline, PlanStep, Replay};
+use crate::replay::{build_plan, find_anchor, PlanStep, Replay};
 
 pub const OVERSHOOT_TOLERANCE: i64 = 10;
 pub const MISSED: i64 = -99999;
-
-/// Тапать ли сейчас.
-///
-/// Вынесено из цикла `fire_async`, чтобы главное свойство правки можно было
-/// проверить тестом, а не рассуждением: при `lead_frames = 0` и
-/// `trigger_at_ms = 0` условие сводится к `frames_to_go <= 0` при любом
-/// положительном темпе — то есть ведёт себя ровно как прежняя формула
-/// `frames_to_go * 1000 / fps <= 0`, независимо от источника `ttm_ms`.
-pub fn should_fire(frames_to_go: i64, lead_frames: i64, ttm_ms: f64, trigger_at_ms: f64) -> bool {
-    frames_to_go <= lead_frames || ttm_ms <= trigger_at_ms
-}
 
 #[derive(Error, Debug)]
 pub enum ReplayError {
@@ -127,7 +116,6 @@ pub struct Orchestrator<'c> {
     tap_x: i32,
     tap_y: i32,
     jc_baseline: Option<u64>,
-    timeline: FrameTimeline,
 }
 
 impl<'c> Orchestrator<'c> {
@@ -142,7 +130,6 @@ impl<'c> Orchestrator<'c> {
             tap_x,
             tap_y,
             jc_baseline: None,
-            timeline: FrameTimeline::from_values(&replay.timeline_ns),
         })
     }
 
@@ -202,12 +189,11 @@ impl<'c> Orchestrator<'c> {
         let o = &self.cfg.orchestrator;
         let wall_limit_s = effective_wall_timeout(o.wall_timeout_s, o.nominal_fps, plan);
         eprintln!(
-            "INFO orch: playSetup: anchor={}@{} jumps={} lead={:.0}ms/{}fr check={}ms retry={} overshoot_tol={} jc_baseline={:?} wall_limit_s={}",
+            "INFO orch: playSetup: anchor={}@{} jumps={} lead={:.0}ms check={}ms retry={} overshoot_tol={} jc_baseline={:?} wall_limit_s={}",
             anchor_kind,
             anchor_rec,
             plan.len(),
             o.predict_lead_ms,
-            o.predict_lead_frames.max(0),
             o.post_tap_check_ms,
             o.retry_on_miss,
             OVERSHOOT_TOLERANCE,
@@ -215,17 +201,6 @@ impl<'c> Orchestrator<'c> {
             wall_limit_s
                 .map(|v| format!("{v:.0}"))
                 .unwrap_or_else(|| "none".into())
-        );
-        // Темп воспроизведения: измеренный по записи или номинальный.
-        eprintln!(
-            "INFO orch: frame tempo: {}",
-            match self.timeline.samples() {
-                0 | 1 => format!("nominal {} fps (timeline_ns unusable)", o.nominal_fps),
-                n => format!(
-                    "measured from timeline_ns ({n} samples), nominal {} fps only outside it",
-                    o.nominal_fps
-                ),
-            }
         );
         eprintln!("INFO orch: tap position: ({}, {})", self.tap_x, self.tap_y);
 
@@ -251,27 +226,9 @@ impl<'c> Orchestrator<'c> {
                 phantom,
                 aborted,
                 step,
-                anchor_rec,
                 if i == 0 { Some(&initial_state) } else { None },
             )?;
             fire_log.push(fr);
-
-            // Пауза на проверку отклика после тапа блокирует конвейер. Если она
-            // длиннее интервала до следующего прыжка, следующий тап уйдёт с
-            // опозданием — предупреждаем заранее, вместо молчаливого overshoot.
-            if let Some(next) = plan.get(i + 1) {
-                let per_frame_ms = 1000.0 / o.nominal_fps.max(1.0);
-                let gap_ms = self
-                    .timeline
-                    .ms_between(step.rec_frame, next.rec_frame)
-                    .unwrap_or_else(|| (next.rec_frame - step.rec_frame) as f64 * per_frame_ms);
-                if gap_ms > 0.0 && (o.post_tap_check_ms as f64) > gap_ms {
-                    eprintln!(
-                        "WARN orch: jumps idx={}→{} разделены {gap_ms:.0}ms, а post_tap_check_ms={} — следующий тап может уйти с опозданием",
-                        step.idx, next.idx, o.post_tap_check_ms
-                    );
-                }
-            }
         }
 
         let verify_bf = if verify_body {
@@ -413,15 +370,11 @@ impl<'c> Orchestrator<'c> {
         phantom: &mut PhantomBridge,
         aborted: &AtomicBool,
         jump: &PlanStep,
-        anchor_rec: i64,
         initial_state: Option<&PlayState>,
     ) -> Result<FireRecord, ReplayError> {
         let o = &self.cfg.orchestrator;
         let fps = o.nominal_fps.max(1.0);
         let trigger_at_ms = o.predict_lead_ms + o.predict_margin_ms;
-        // Упреждение в кадрах не зависит от темпа: 0 даёт прежнее условие
-        // «тап на целевом кадре», большее значение тапает заранее.
-        let lead_frames = o.predict_lead_frames.max(0);
         let poll_dur = Duration::from_millis(o.poll_interval_ms.max(1));
         let stall_dur = Duration::from_secs(2);
 
@@ -511,16 +464,8 @@ impl<'c> Orchestrator<'c> {
                 });
             }
 
-            // Кадр записи, соответствующий текущему игровому кадру: та же
-            // формула, что агент использует для сверки body-состояния.
-            let rec_cur = anchor_rec + (cur - anchor);
-            // Темп берём из измеренной карты записи. Вне её диапазона или без
-            // карты остаёмся на прежней формуле с nominal_fps.
-            let ttm_ms = match self.timeline.ms_between(rec_cur, jump.rec_frame) {
-                Some(ms) if ms > 0.0 => ms,
-                _ => (frames_to_go as f64) * 1000.0 / fps,
-            };
-            if should_fire(frames_to_go, lead_frames, ttm_ms, trigger_at_ms) {
+            let ttm_ms = (frames_to_go as f64) * 1000.0 / fps;
+            if ttm_ms <= trigger_at_ms {
                 break (cur, target_frame);
             }
 
@@ -678,51 +623,5 @@ mod tests {
         assert!((eff - 960.0).abs() < 1e-6);
         assert!(effective_wall_timeout(Some(0.0), 60.0, &plan).is_none());
         assert!(effective_wall_timeout(None, 60.0, &plan).is_none());
-    }
-
-    #[test]
-    fn zero_frame_lead_reproduces_the_previous_trigger() {
-        // Прежнее условие: ttm_ms = frames_to_go * 1000 / fps, срабатывание при
-        // ttm_ms <= 0. Новое при lead_frames = 0 обязано дать тот же результат
-        // при любом темпе — иначе правка меняла бы поведение по умолчанию.
-        for fps in [1.0_f64, 24.0, 30.0, 60.0, 144.0] {
-            for frames_to_go in -5_i64..=8 {
-                let ttm_ms = frames_to_go as f64 * 1000.0 / fps;
-                let before = ttm_ms <= 0.0;
-                let after = should_fire(frames_to_go, 0, ttm_ms, 0.0);
-                assert_eq!(before, after, "fps={fps} frames_to_go={frames_to_go}");
-            }
-        }
-    }
-
-    #[test]
-    fn measured_tempo_does_not_move_the_trigger_without_lead() {
-        // Тот же вывод, но для измеренного темпа: пока упреждение нулевое,
-        // точка срабатывания не зависит от миллисекунд на кадр.
-        for frames_to_go in -2_i64..=6 {
-            for per_frame_ms in [4.0_f64, 16.666_666, 33.3, 60.0, 250.0] {
-                let ttm_ms = frames_to_go as f64 * per_frame_ms;
-                assert_eq!(
-                    should_fire(frames_to_go, 0, ttm_ms, 0.0),
-                    frames_to_go <= 0,
-                    "per_frame_ms={per_frame_ms} frames_to_go={frames_to_go}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn frame_lead_fires_early_and_is_tempo_independent() {
-        // Упреждение 2 кадра: тап на 2 кадра раньше цели при любом темпе.
-        // Время до цели берётся строго положительным — иначе сработала бы
-        // вторая половина условия, а не упреждение.
-        for ttm_ms in [16.7_f64, 33.3, 120.0] {
-            assert!(should_fire(2, 2, ttm_ms, 0.0), "ttm_ms={ttm_ms}");
-            assert!(should_fire(1, 2, ttm_ms, 0.0), "ttm_ms={ttm_ms}");
-            assert!(should_fire(0, 2, ttm_ms, 0.0), "ttm_ms={ttm_ms}");
-            assert!(!should_fire(3, 2, ttm_ms, 0.0), "ttm_ms={ttm_ms}");
-        }
-        // Нулевое время до цели срабатывает и без упреждения — прежнее поведение.
-        assert!(should_fire(3, 2, 0.0, 0.0));
     }
 }
