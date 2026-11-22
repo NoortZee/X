@@ -24,22 +24,12 @@ pub enum PhantomError {
     Connect(std::io::Error),
     #[error("phantom server closed connection on ping (not listening behind adb forward?)")]
     DeadServer,
-    // A failed tap is reported through `TapResult::error`, not as a Result error;
-    // keep the variant for callers that still surface it as a typed error.
-    #[allow(dead_code)]
-    #[error("tap failed: {0}")]
-    Tap(String),
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct TapResult {
     pub ok: bool,
     pub duration_ms: f64,
-    pub sync_mode: String,
-    pub slot: u8,
-    pub x: i32,
-    pub y: i32,
     pub error: Option<String>,
 }
 
@@ -183,10 +173,6 @@ impl PhantomBridge {
                 return TapResult {
                     ok: false,
                     duration_ms: t0.elapsed().as_secs_f64() * 1000.0,
-                    sync_mode: self.sync_mode.clone(),
-                    slot: self.slot,
-                    x,
-                    y,
                     error: Some(e.to_string()),
                 };
             }
@@ -195,10 +181,6 @@ impl PhantomBridge {
                     return TapResult {
                         ok: true,
                         duration_ms: t0.elapsed().as_secs_f64() * 1000.0,
-                        sync_mode: self.sync_mode.clone(),
-                        slot: self.slot,
-                        x,
-                        y,
                         error: None,
                     };
                 }
@@ -219,10 +201,6 @@ impl PhantomBridge {
                     return TapResult {
                         ok: false,
                         duration_ms: t0.elapsed().as_secs_f64() * 1000.0,
-                        sync_mode: self.sync_mode.clone(),
-                        slot: self.slot,
-                        x,
-                        y,
                         error: Some(e.to_string()),
                     };
                 }
@@ -232,10 +210,6 @@ impl PhantomBridge {
         TapResult {
             ok: false,
             duration_ms: t0.elapsed().as_secs_f64() * 1000.0,
-            sync_mode: self.sync_mode.clone(),
-            slot: self.slot,
-            x,
-            y,
             error: Some("tap retries exhausted".into()),
         }
     }

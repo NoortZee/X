@@ -118,9 +118,6 @@ pub struct FridaConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
-    #[allow(dead_code)]
-    #[serde(default = "d_info")]
-    pub level: String,
     #[serde(default = "d_logs")]
     pub log_dir: String,
 }
@@ -128,7 +125,6 @@ pub struct LoggingConfig {
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            level: "INFO".into(),
             log_dir: "logs".into(),
         }
     }
@@ -145,7 +141,6 @@ impl Config {
 }
 
 fn d_async() -> String { "async".into() }
-fn d_info() -> String { "INFO".into() }
 fn d_logs() -> String { "logs".into() }
 fn d_1() -> u64 { 1 }
 fn d_1_usize() -> usize { 1 }

@@ -40,7 +40,6 @@ pub struct Replay {
     pub body_frames: Vec<Value>,
     #[serde(default)]
     pub timeline_ns: Vec<Value>,
-    pub rng_log: Option<Vec<Value>>,
 
     #[serde(skip)]
     pub recovered: bool,
@@ -59,7 +58,6 @@ pub struct PlanStep {
     pub idx: usize,
     pub rec_frame: i64,
     pub frame_delta: i64,
-    pub snap: Value,
 }
 
 pub fn find_anchor(events: &[ReplayEvent], body_frames: &[Value]) -> Option<(String, i64)> {
@@ -91,11 +89,6 @@ pub fn build_plan(events: &[ReplayEvent], anchor_rec_frame: i64) -> Vec<PlanStep
             idx,
             rec_frame: j.frame,
             frame_delta: (j.frame - anchor_rec_frame).max(0),
-            snap: if j.snap.is_null() {
-                empty_obj()
-            } else {
-                j.snap.clone()
-            },
         })
         .collect()
 }
@@ -353,7 +346,6 @@ fn recover_from_header_frames(text: &str) -> Option<Replay> {
         events,
         body_frames: Vec::new(),
         timeline_ns: Vec::new(),
-        rng_log: None,
         recovered: true,
         recovered_jumps: abs_frames.len(),
         recovered_delta_mode: is_delta,

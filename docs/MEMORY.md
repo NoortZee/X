@@ -16,7 +16,7 @@
 | `stones.parser_aob`, `parser_fallback` | Сигнатура и резервный RVA парсера соперника |
 | `stones.rival_fields` | Смещения, имена и типы чтения полей соперника |
 | `stones.rival_n_items`, `rival_items_ptr` | Количество элементов и указатель списка |
-| `stones.item_fields`, `item_size`, `item_stride`, `item_first_ptr` | Поля камня и раскладка списка указателей |
+| `stones.item_fields`, `item_stride`, `item_first_ptr` | Поля камня и раскладка списка указателей |
 | `platform` | Имя libc, структура времени и номер syscall x86_64 |
 
 Константы протокола Phantom, FNV-хеша и IEEE-754 — не адреса памяти; они остаются рядом со своими алгоритмами.

@@ -174,7 +174,6 @@ fn do_record(
     };
     let body = agent.detect_get_body_frames().unwrap_or_default();
     let tl = agent.detect_get_frame_ns_timeline().unwrap_or_default();
-    let rng = agent.detect_get_rng_log().unwrap_or(None);
 
     let (kind, anchor) = match find_anchor(&events, &body) {
         Some((k, f)) => (Some(k), Some(f)),
@@ -189,10 +188,6 @@ fn do_record(
         events,
         body_frames: body,
         timeline_ns: tl,
-        rng_log: rng.map(|mut v| {
-            v.truncate(2000);
-            v
-        }),
         ..Default::default()
     };
 

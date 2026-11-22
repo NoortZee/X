@@ -23,19 +23,12 @@ pub enum ReplayError {
     Aborted,
 }
 
-#[allow(dead_code)]
+/// Per-jump outcome: only what the report and the console line actually read.
 #[derive(Debug, Clone)]
 pub struct FireRecord {
-    pub idx: usize,
-    pub abs_frame: i64,
-    pub target_frame: i64,
     pub frame_error: i64,
     pub tap_ack_ms: f64,
-    pub tap_x: i32,
-    pub tap_y: i32,
     pub tap_count: u32,
-    pub snap_before: Value,
-    pub snap_after: Value,
     pub note: String,
 }
 
@@ -361,16 +354,9 @@ impl<'c> Orchestrator<'c> {
                     baseline
                 );
                 return Some(FireRecord {
-                    idx: jump.idx,
-                    abs_frame: ej.frame,
-                    target_frame,
                     frame_error: ej.frame - target_frame,
                     tap_ack_ms: 0.0,
-                    tap_x: self.tap_x,
-                    tap_y: self.tap_y,
                     tap_count: 0,
-                    snap_before: jump.snap.clone(),
-                    snap_after: Self::snap_at_frame(agent, ej.frame + 1),
                     note: "covered_by_user_tap".into(),
                 });
             }
@@ -446,16 +432,9 @@ impl<'c> Orchestrator<'c> {
                     jump.idx, cur, target_frame
                 );
                 return Ok(FireRecord {
-                    idx: jump.idx,
-                    abs_frame: -1,
-                    target_frame,
                     frame_error: MISSED,
                     tap_ack_ms: 0.0,
-                    tap_x: self.tap_x,
-                    tap_y: self.tap_y,
                     tap_count: 0,
-                    snap_before: jump.snap.clone(),
-                    snap_after: json!({}),
                     note: "game_stalled".into(),
                 });
             }
@@ -478,16 +457,9 @@ impl<'c> Orchestrator<'c> {
                     jump.idx, cur, target_frame, overshoot, OVERSHOOT_TOLERANCE
                 );
                 return Ok(FireRecord {
-                    idx: jump.idx,
-                    abs_frame: -1,
-                    target_frame,
                     frame_error: MISSED,
                     tap_ack_ms: 0.0,
-                    tap_x: self.tap_x,
-                    tap_y: self.tap_y,
                     tap_count: 0,
-                    snap_before: jump.snap.clone(),
-                    snap_after: json!({}),
                     note: "skipped_past_target".into(),
                 });
             }
@@ -505,16 +477,9 @@ impl<'c> Orchestrator<'c> {
                     jump.idx, cur, target_frame
                 );
                 return Ok(FireRecord {
-                    idx: jump.idx,
-                    abs_frame: -1,
-                    target_frame,
                     frame_error: MISSED,
                     tap_ack_ms: 0.0,
-                    tap_x: self.tap_x,
-                    tap_y: self.tap_y,
                     tap_count: 0,
-                    snap_before: jump.snap.clone(),
-                    snap_after: json!({}),
                     note: "deadline_skipped".into(),
                 });
             }
@@ -594,16 +559,9 @@ impl<'c> Orchestrator<'c> {
                 jump.idx, target_frame, total_taps, total_tap_ms
             );
             return Ok(FireRecord {
-                idx: jump.idx,
-                abs_frame: -1,
-                target_frame,
                 frame_error: MISSED,
                 tap_ack_ms: total_tap_ms,
-                tap_x: self.tap_x,
-                tap_y: self.tap_y,
                 tap_count: total_taps,
-                snap_before: jump.snap.clone(),
-                snap_after: json!({}),
                 note: "missed_no_jumpfn".into(),
             });
         }
@@ -642,16 +600,9 @@ impl<'c> Orchestrator<'c> {
         );
 
         Ok(FireRecord {
-            idx: jump.idx,
-            abs_frame: fired_frame,
-            target_frame,
             frame_error,
             tap_ack_ms: total_tap_ms,
-            tap_x: self.tap_x,
-            tap_y: self.tap_y,
             tap_count: total_taps,
-            snap_before: jump.snap.clone(),
-            snap_after,
             note: "async_no_gate".into(),
         })
     }
@@ -667,7 +618,6 @@ mod tests {
             idx: 0,
             rec_frame: 36000,
             frame_delta: 36000, // 600s @ 60fps
-            snap: Value::Null,
         }];
         let eff = effective_wall_timeout(Some(300.0), 60.0, &plan).unwrap();
         assert!((eff - 960.0).abs() < 1e-6);

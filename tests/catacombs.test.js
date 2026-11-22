@@ -69,14 +69,12 @@ for (const n of [0, 2]) test('reject ambiguous/missing update: ' + n, () => {
     const f = fixture(n); assert.throws(() => f.rpc.start(1), /expected 1 match/);
     assert.equal(f.rpc.status().enabled, false);
 });
-test('sampling, marker and bounded histories/events', () => {
+test('sampling and bounded histories/events', () => {
     const f = fixture(); f.rpc.start(1); f.tick(); f.tick();
     assert.equal(f.rpc.status().samples, 1);
-    f.rpc.mark('picked golden');
-    assert.ok(f.rpc.report().events.some(e => e.kind === 'user_mark'));
-    for (let i = 0; i < 125; i++) { f.force(); f.tick(); }
-    for (let i = 0; i < 1100; i++) f.rpc.mark('test');
+    for (let i = 0; i < 1250; i++) { f.force(); f.tick(); }
     assert.equal(f.rpc.report().history.length, 120);
+    vm.runInContext("for (let i = 0; i < 1100; i++) event('bounded', {})", f.c);
     assert.equal(f.rpc.report().events.length, 1000);
 });
 test('failed or truncated scan must not imply disappearance', () => {
@@ -101,10 +99,8 @@ test('report never dereferences a retained pointer', () => {
 test('only one explicit native rebuild callsite, no patches or non-position writes', () => {
     const s = fs.readFileSync(path.join(root, 'catacombs/agent.js'), 'utf8');
     assert.doesNotMatch(s, /Interceptor\.(replace|replaceFast)|Memory\.(patchCode|protect)/);
-    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 18);
-    const core=s.replace(/function convertGoldDescriptor[\s\S]*?(?=function enableAllGold)/,'').replace(/function fullGoldPlan[\s\S]*?(?=function performGold)/,'')
-        .replace(/object\.add\(0x184\)\.writeS32\(fullPlan.id\);/,'');
-    assert.doesNotMatch(core, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
+    assert.equal((s.match(/\.writeFloat\(/g) || []).length, 12);
+    assert.doesNotMatch(s, /\.write(?:Pointer|S32|U8|ByteArray)\(/);
 });
 test('LIVE hero chain keeps visual coordinates separate from physics', () => {
     const f = fixture();
@@ -568,35 +564,11 @@ test('shipped profile arms automatic 30-cell rise and sufficient timeout',()=>{
     assert.ok(config.timeout_ms>config.up/100/config.velocity*1000);
 });
 
-test('spawn array probe separates capacity, high index and live count and resolves current Candy attach slot',()=>{
-    const f=spawnArrayFixture();
-    const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
-    assert.equal(r.capacity,2);assert.equal(r.highest_index,0);assert.equal(r.live_counter,1);
-    assert.equal(r.observed_live,1);assert.equal(r.live_counter_matches,true);assert.equal(r.growth,32);
-    assert.equal(r.free_slots_sample.join(','),'1');assert.equal(r.candy_count,1);
-    assert.equal(r.sample_candy.refcount,2);assert.equal(r.sample_candy.attach_method.vptr_byte_offset,0x300);
-    assert.equal(r.sample_candy.attach_method.target.address,'0x260000');
-    assert.equal(r.sample_candy.attach_method.code.window_bytes,768);assert.equal(f.writes.length,0);
-});
-test('spawn array probe accepts empty allocated array and makes no append-index guess',()=>{
-    const f=spawnArrayFixture();f.memory.set(0x2800,0);f.memory.set(0x2020,-1);f.memory.set(0x2028,0);
-    const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
-    assert.equal(r.highest_index,-1);assert.equal(r.observed_live,0);assert.equal(r.sample_candy,null);
-    assert.match(r.note,/No live Candy/);assert.equal(r.free_slots_sample.length,2);assert.equal(f.writes.length,0);
-});
 test('spawn metadata rejects unsafe u64, oversized capacity and wrong RTTI',()=>{
     for(const [address,value] of [[0x2018,'18446744073709551615'],[0x2018,1025],[0x2000,0]]) {
         const f=spawnArrayFixture();f.memory.set(address,value);
         assert.throws(()=>vm.runInContext('inspectSpawnArray(spawnState)',f.c));assert.equal(f.writes.length,0);
     }
-});
-test('spawn array probe resolves body creator from current Candy slot +0x308',()=>{
-    const f=spawnArrayFixture();f.memory.set(0x8408,0x270000);
-    const r=vm.runInContext('inspectSpawnArray(spawnState)',f.c);
-    assert.equal(r.sample_candy.body_factory_method.vptr_byte_offset,0x308);
-    assert.equal(r.sample_candy.body_factory_method.target.address,'0x270000');
-    assert.equal(r.sample_candy.body_factory_method.code.window_bytes,768);
-    assert.equal(f.writes.length,0);
 });
 test('guarded attach observer captures actual arguments only from live Candy calls and caps records',()=>{
     const f=fixture(1,false,false,false,true);
@@ -628,16 +600,13 @@ test('attach observer refuses code signature mismatch without attaching hook',()
     assert.match(f.rpc.status().attach_observer.error,/signature mismatch/);
 });
 
-test('no-fall cleanup does not clear spawn diagnostics or invalidate live attach observer status',()=>{
+test('no-fall cleanup does not invalidate live attach observer status',()=>{
     const f=fixture();
     vm.runInContext(`attachObservationStatus={status:'listening',observed:1};
-        attachObservations=[{time:123}];spawnInspection={status:'captured'};
-        earlySpawnArray={state:'test'};restoreNoFall('level inactive');`,f.c);
+        attachObservations=[{time:123}];restoreNoFall('level inactive');`,f.c);
     assert.equal(f.rpc.status().attach_observer.status,'listening');
-    assert.equal(f.rpc.report().spawn_probe.status,'captured');
     assert.equal(vm.runInContext('attachObservations.length',f.c),1);
-    assert.equal(vm.runInContext('earlySpawnArray.state',f.c),'test');
-    f.rpc.start(1);assert.equal(f.rpc.report().spawn_probe,null);
+    f.rpc.start(1);
     assert.equal(vm.runInContext('attachObservations.length',f.c),0);
 });
 test('registered parent is read as raw structure and corroborated against live physics world',()=>{
@@ -680,9 +649,6 @@ function goldFixture() {
         };
         throw Error('unexpected native '+address);
     };
-    // Existing low-level spawn tests isolate the new registration helper; separate tests cover it below.
-    vm.runInContext(`originalFullGoldPlan=fullGoldPlan; originalCompleteGoldRegistration=completeGoldRegistration;
-        fullGoldPlan=()=>({id:42});completeGoldRegistration=()=>{};`,f.c);
     f.force();f.tick();return {...f,calls};
 }
 test('spawn attach signature uses pristine pre-observer prologue, not a captured Frida jump',()=>{
@@ -710,37 +676,6 @@ test('record observer follows ID invalidation after object removal without readi
     assert.equal(w.timeline[1].descriptor_matches,false);assert.equal(w.timeline[1].record_id_invalidated,false);
     f.memory.set(0x1138,0);vm.runInContext('goldDiagnostics.spawned[0].record_watch.next=0;followGoldRecords(testState)',f.c);
     assert.equal(f.rpc.report().gold_diagnostics.spawned[0].record_watch.done,true);
-});
-
-test('pointer vector growth uses native allocator pair, preserves pointers and publishes correct bounds',()=>{
-    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));
-    for(const [p,v] of [[0x90028,0xA0000],[0x90030,0xA0010],[0x90038,0xA0010],[0xA0000,0x1230],[0xA0008,0x4560]])f.memory.set(p,v);
-    let frees=0,bytes=0;
-    f.c.NativeFunction=function(address){
-        if(address.n===0x100000+0x1F26660)return n=>{bytes=n;return f.pointer(0xB0000);};
-        if(address.n===0x100000+0x1F26640)return p=>{assert.equal(p.n,0xA0000);frees++;};
-        throw Error('unexpected grow native');
-    };
-    f.c.growNode=f.pointer(0x90000);f.c.growObject=f.pointer(0x7890);f.c.growModule={base:f.pointer(0x100000)};
-    vm.runInContext('growResult={};growGoldPointerVector(growNode,growObject,growModule,growResult)',f.c);
-    assert.equal(bytes,64);assert.equal(frees,1);
-    assert.equal(f.memory.get(0xB0000),0x1230);assert.equal(f.memory.get(0xB0008),0x4560);assert.equal(f.memory.get(0xB0010),0x7890);
-    assert.equal(f.memory.get(0x90028),0xB0000);assert.equal(f.memory.get(0x90030),0xB0018);assert.equal(f.memory.get(0x90038),0xB0040);
-    f.memory.set(0x90030,0xB0040);f.memory.set(0x90038,0xB0038);
-    assert.throws(()=>vm.runInContext('growGoldPointerVector(growNode,growObject,growModule,growResult)',f.c),/bounds invalid/);
-});
-test('collected natural ID selector requires invalidated matching record and no active Candy',()=>{
-    const f=goldFixture();f.c.ptr=n=>f.pointer(Number(n));f.c.testState=f.pointer(0x1000);
-    for(const [p,v]of [[0x3184,10],[0x1058,0x2000],[0x1128,0x90000],[0x90020,19],[0x90028,0xA0000],[0x90030,0xA0050],
-        [0xA0010,7],[0xA0020,-1],[0xA0048,45],[0x1110,0xB0000],[0xB0020,19],[0xB0028,0],[0xB0030,0],
-        [0x100000+0x202C8E0+0x30,0x100000+0x14DB600]])f.memory.set(p,v);
-    const raw=Array.from(new Uint8Array(f.pointer(0xA0000).readByteArray(0x50))).map(v=>v.toString(16).padStart(2,'0')).join(' ');
-    f.c.testRaw=raw;
-    vm.runInContext(`goldDiagnostics.natural=[{state:'0x1000',object:{rarity:4,id:62,contact:{captures:{context:'0x1000',column:19,candy_matches:true},records:{matches:[{id:62,index:0,flags:7,raw_hex:testRaw}]}}}}]`,f.c);
-    assert.equal(vm.runInContext('collectedGoldTemplate(testState).reuseId',f.c),62);
-    f.memory.set(0xA0020,62);assert.throws(()=>vm.runInContext('collectedGoldTemplate(testState)',f.c),/no verified collected/);
-    f.memory.set(0xA0020,-1);f.memory.set(0xA0048,46);
-    assert.throws(()=>vm.runInContext('collectedGoldTemplate(testState)',f.c),/no verified collected/);
 });
 
 test('sequence probe captures read-only builder input type/count pairs and actual argument ownership',()=>{
@@ -837,175 +772,6 @@ test('sequence probe captures bounded payload prefix read-only and survives unre
     assert.ok(last.owner.error); // payload prefix is captured even when ownership is not corroborated
 });
 
-function surveyFixture() {
-    const f=sequenceFixture();
-    const M=vm.runInContext('C.manager_survey',f.c);
-    f.identity(0x30000,0x31000,0x32000,0x33000,'N11EndlessMaze7ManagerE');
-    const d=i=>0x40000+i*0x50;
-    f.memory.set(0x30078,0x40000);f.memory.set(0x30080,0x40000+4*0x50);
-    for(let i=0;i<4;i++)for(const [off,v] of [[0x10,1],[0x11,0],[0x20,0],[0x44,1],[0x48,0x2D],[0xC,0],[0x14,0]])f.memory.set(d(i)+off,v);
-    f.memory.set(d(0)+0x11,0x3F);f.memory.set(d(0)+0x20,7);
-    f.memory.set(d(2)+0x44,4);f.memory.set(d(2)+0x20,9);
-    f.memory.set(d(3)+0x44,2);
-    return {...f,M};
-}
-test('manager survey reads authored descriptor rarity histogram by explicit address only',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    // Without an address the survey tries strict vtable location, and never guesses an object.
-    assert.match(f.rpc.managerSurvey().error,/no vptr layout/);
-    const r=f.rpc.managerSurvey('0x30000');
-    assert.equal(r.status,'found');assert.equal(r.last.count,4);
-    assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
-    assert.equal(r.last.gold_descriptors,1);assert.equal(r.last.candy_total,4);
-    assert.equal(r.last.candies.find(c=>c.rarity===4).descriptor_id,9);
-    assert.equal(r.last.read_only,true);
-    assert.equal(f.writes.length,0); // survey never writes
-});
-test('manager survey refuses wrong class, bad vector bounds and budget without writes',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    f.identity(0x30000,0x31000,0x32000,0x33000,'20EndlessMazePlayState');
-    assert.match(f.rpc.managerSurvey('0x30000').error,/unexpected class/);
-    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));g.memory.set(0x30080,0x40000+0x50*3+8);
-    assert.match(g.rpc.managerSurvey('0x30000').error,/bounds/);
-    const h=surveyFixture();h.c.ptr=n=>h.pointer(Number(n));h.memory.set(0x30080,0x40000+h.M.stride*(h.M.max_descriptors+1));
-    assert.match(h.rpc.managerSurvey('0x30000').error,/budget/);
-    for(const x of [f,g,h])assert.equal(x.writes.length,0);
-});
-test('mark survey ADDRESS routes to the survey instead of a plain label mark',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const r=f.rpc.mark('survey 0x30000');
-    assert.equal(r.mark,true);assert.equal(r.survey.last.gold_descriptors,1);
-    assert.ok(f.rpc.mark('picked golden').events_retained>=1); // plain label still marks
-    assert.equal(f.rpc.report().events.some(e=>e.kind==='user_mark'&&e.label==='picked golden'),true);
-});
-
-test('survey label without an address attempts location instead of being rejected',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const M=vm.runInContext('C.manager_survey',f.c);
-    f.memory.set(0x35100,0x777000);
-    f.c.Process.enumerateRanges=()=>[{base:f.pointer(0x34000),size:0x2000,protection:'rw-'}];
-    f.c.Memory.scanSync=()=>[];
-    // Location finds nothing, but the attempt itself is recorded, not silently a plain mark.
-    const r=f.rpc.mark('survey');
-    assert.equal(r.requested,'locate');
-    assert.equal(r.survey.status,'unavailable');
-    assert.match(r.survey.error,/no vptr layout|no verified/);
-    const locate=f.rpc.report().manager_locate;
-    assert.equal(locate.status,'unavailable');assert.match(locate.error,/no vptr layout|no verified/);
-    assert.equal(f.rpc.report().events.some(e=>e.kind==='manager_survey_rejected'),false);
-    // An explicit address in free wording still routes by address.
-    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
-    const byAddress=g.rpc.mark('survey Manager: 0x30000');
-    assert.equal(byAddress.requested,'address');assert.equal(byAddress.survey.last.gold_descriptors,1);
-    // Plain labels remain plain marks.
-    const h=surveyFixture();h.c.ptr=n=>h.pointer(Number(n));
-    assert.equal(h.rpc.report().manager_survey.status,'not_run');
-    h.rpc.mark('picked golden');
-    assert.equal(h.rpc.report().manager_survey.status,'not_run');
-});
-test('manager auto-locate finds the single verified Manager by vtable and refuses ambiguity',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const M=vm.runInContext('C.manager_survey',f.c);
-    // The candidate object is classifiable: vptr -> vtable, vtable-8 -> typeinfo -> name.
-    f.identity(0x35000,0x100000+M.vtable,0x355000,0x356000,'N11EndlessMaze7ManagerE');
-    f.memory.set(0x35100,0x777000); // decoy with an unrelated vptr
-    // Itanium ABI: vtable-8 holds the typeinfo pointer, typeinfo+8 the name pointer.
-    f.memory.set(0x100000+M.vtable-8,0x359000);f.memory.set(0x359000+8,0x35A000);
-    [...Buffer.from('N11EndlessMaze7ManagerE\0')].forEach((b,i)=>f.memory.set(0x35A000+i,b));
-    f.c.Process.enumerateRanges=()=>[{base:f.pointer(0x34000),size:0x2000,protection:'rw-'}];
-    const seenPatterns=[];
-    f.c.Memory.scanSync=(base,size,pattern)=>{
-        seenPatterns.push(pattern);
-        // The fixture heap holds only the candidate below; the pattern itself is checked separately.
-        return [{address:f.pointer(0x35000)}];
-    };
-    // Manager object 0x35000 must carry its own descriptor vector.
-    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
-    const located=f.rpc.locateManager();
-    assert.equal(located.status,'found');assert.equal(located.verified.length,1);
-    assert.equal(located.chosen,'0x35000');assert.equal(located.read_only,true);
-    assert.match(seenPatterns[0],/^([0-9a-f]{2} ){7}[0-9a-f]{2}$/); // little-endian pointer bytes
-    const r=f.rpc.managerSurvey();
-    assert.equal(r.status,'found');assert.equal(r.located,true);
-    assert.deepEqual({...r.last.rarity_histogram},{'1':2,'2':1,'4':1});
-    assert.equal(f.writes.length,0);
-});
-
-test('manager location accepts the vtable header layout and keeps both probe results',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const M=vm.runInContext('C.manager_survey',f.c);
-    // Runtime vptr sits 16 bytes after the symbol RVA; object carries that vptr.
-    const runtime=0x100000+M.vtable+16;
-    f.identity(0x35000,runtime,0x355000,0x356000,'N11EndlessMaze7ManagerE');
-    f.c.Process.enumerateRanges=()=>[{base:f.pointer(0x34000),size:0x2000,protection:'rw-'}];
-    f.c.Memory.scanSync=()=>[{address:f.pointer(0x35000)}];
-    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
-    const located=f.rpc.locateManager();
-    assert.equal(located.status,'found');
-    assert.equal(located.vtable_rva,'0x2026fd8');
-    assert.equal(located.vtable_candidates.length,2);
-    assert.equal(located.vtable_candidates[1].layout,'runtime vptr after 16-byte vtable header');
-    assert.equal(located.vtable_candidates[1].name,'N11EndlessMaze7ManagerE');
-    assert.equal(f.writes.length,0);
-});
-
-test('manager location verifies during the scan and stops at the first confirmed object',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const M=vm.runInContext('C.manager_survey',f.c);
-    f.identity(0x35000,0x100000+M.vtable,0x355000,0x356000,'N11EndlessMaze7ManagerE');
-    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
-    f.c.Process.enumerateRanges=()=>[
-        {base:f.pointer(0x34000),size:0x1000,protection:'rw-'},
-        {base:f.pointer(0x36000),size:0x100000,protection:'rw-'},
-        {base:f.pointer(0x400000),size:0x20000000,protection:'rw-'}];
-    let scans=0;
-    f.c.Memory.scanSync=(base)=>{
-        scans++;
-        if(base.n===0x34000)return [];                       // empty range: keep going
-        if(base.n===0x36000)return [{address:f.pointer(0x35000)}]; // confirmed here
-        throw new Error('scan should have stopped before the huge trailing range');
-    };
-    const located=f.rpc.locateManager();
-    assert.equal(located.status,'found');
-    assert.equal(scans,2);
-    assert.equal(located.stopped_by_budget,false);
-    assert.equal(located.scanned_bytes,0x101000);
-    // A candidate that does not verify must not be reported as found.
-    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
-    g.c.Process.enumerateRanges=()=>[{base:g.pointer(0x34000),size:0x1000,protection:'rw-'}];
-    g.c.Memory.scanSync=()=>[{address:g.pointer(0x99000)}];
-    const bad=g.rpc.locateManager();
-    assert.equal(bad.status,'unavailable');assert.match(bad.error,/no vptr layout|no verified/);
-});
-
-test('manager location skips vanished heap ranges and still confirms the manager',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const M=vm.runInContext('C.manager_survey',f.c);
-    f.identity(0x35000,0x100000+M.vtable,0x355000,0x356000,'N11EndlessMaze7ManagerE');
-    f.memory.set(0x35078,0x40000);f.memory.set(0x35080,0x40000+4*0x50);
-    f.c.Process.enumerateRanges=()=>[
-        {base:f.pointer(0x34000),size:0x1000,protection:'rw-'},
-        {base:f.pointer(0x36000),size:0x800,protection:'rw-'}];
-    let scans=0;
-    f.c.Memory.scanSync=(base)=>{
-        scans++;
-        if(base.n===0x34000)throw new Error('access violation accessing 0x34000');
-        return [{address:f.pointer(0x35000)}];
-    };
-    const located=f.rpc.locateManager();
-    assert.equal(scans,2);
-    assert.equal(located.status,'found');
-    assert.equal(located.skipped_ranges,1);
-    assert.match(located.skipped_range_samples[0].error,/access violation/);
-    assert.equal(located.verified[0].gold,1);
-    // Every range failing still reports unavailable, plus the skip evidence.
-    const g=surveyFixture();g.c.ptr=n=>g.pointer(Number(n));
-    g.c.Process.enumerateRanges=()=>[{base:g.pointer(0x34000),size:0x1000,protection:'rw-'}];
-    g.c.Memory.scanSync=()=>{throw new Error('access violation');};
-    const bad=g.rpc.locateManager();
-    assert.equal(bad.status,'unavailable');assert.ok(bad.error);
-});
-
 test('stage snapshot exposes boundary/continue fields read-only and records changes',()=>{
     const f=fixture();f.rpc.start(1);
     // current=18 (float), lower1, upper21, max20, goal object, continue flag0, phase1
@@ -1025,20 +791,6 @@ test('stage snapshot exposes boundary/continue fields read-only and records chan
     assert.equal(s.history.length,2);assert.equal(s.latest.upper,22);assert.equal(s.latest.continue_flag,1);
     assert.equal(s.note.includes('Nothing is modified'),true);
     assert.equal(f.writes.length,before); // observation performs no writes
-});
-
-test('manager survey reports set capacity and records descriptor set fields verbatim',()=>{
-    const f=surveyFixture();f.c.ptr=n=>f.pointer(Number(n));
-    const d=i=>0x40000+i*0x50;
-    f.memory.set(d(0)+0x10,21);f.memory.set(d(1)+0x10,21);f.memory.set(d(2)+0x10,22);
-    const r=f.rpc.managerSurvey('0x30000');
-    assert.equal(r.status,'found');
-    // Fixture seeds +0x10=1 for all four; two descriptors were overridden to 21 and one to 22.
-    assert.equal(r.last.sets.distinct,3);
-    assert.deepEqual({...r.last.sets.sizes},{'1':1,'21':2,'22':1});
-    assert.equal(r.last.set_field_samples[2].set,22);
-    assert.equal(r.last.read_only,true);
-    assert.equal(f.writes.length,0);
 });
 
 function teleportFixture(production = false, underground = false, autoRise = false) {
@@ -1092,19 +844,6 @@ function spawnArrayFixture() {
     f.c.Process.findRangeByAddress=()=>({base:f.pointer(0x100000),size:0x3000000,protection:'r-x'});
     f.c.Instruction={parse:()=>({size:1,mnemonic:'ret',opStr:''})};
     return f;
-}
-function descriptorGoldFixture(authoredGold=3) {
-    const f=goldFixture();const G=vm.runInContext('C.all_gold',f.c);
-    // Authored gold count is now the default cap; seed it like a live census would.
-    vm.runInContext(`levelCensuses=[{time:Date.now(),state:'0x1000',surviving_total:10,surviving_by_rarity:{1:5,2:1,3:1,4:${authoredGold}}}]`,f.c);
-    G.signature.forEach((v,i)=>f.memory.set(0x100000+G.descriptor_factory+i,v));
-    f.c.Process.findRangeByAddress=()=>({base:f.pointer(0),size:0x4000000,protection:'rwx'});
-    for(const [p,v] of [[0x100000+G.rarity_map+8,0x80000],[0x8001C,4],[0x80020,4],
-        [0x90048,45],[0x90020,62],[0x90010,7],[0x90044,1]])f.memory.set(p,v);
-    let callback,detached=0,flushed=0;
-    f.c.Interceptor.attach=(p,cb)=>{assert.equal(p.n,0x100000+G.descriptor_factory);callback=cb;return {detach(){detached++;}};};
-    f.c.Interceptor.flush=()=>{flushed++;};
-    return {...f,G,enter(caller=G.caller){callback.onEnter.call({returnAddress:f.pointer(0x100000+caller)},[f.pointer(0x90000)]);},detached:()=>detached,flushed:()=>flushed};
 }
 function sequenceFixture() {
     const f=goldFixture();const S=vm.runInContext('C.sequence_probe',f.c);

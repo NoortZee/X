@@ -11,7 +11,6 @@ const RIVAL_FIELDS = MEMORY_LAYOUT.stones.rival_fields;
 const RIVAL_N_ITEMS_OFF = MEMORY_LAYOUT.stones.rival_n_items;
 const RIVAL_ITEMS_PTR_OFF = MEMORY_LAYOUT.stones.rival_items_ptr;
 const ITEM_FIELDS = MEMORY_LAYOUT.stones.item_fields;
-const ITEM_SIZE = MEMORY_LAYOUT.stones.item_size;
 const ITEM_STRIDE = MEMORY_LAYOUT.stones.item_stride;
 const ITEM_FIRST_PTR = MEMORY_LAYOUT.stones.item_first_ptr;
 
@@ -34,7 +33,6 @@ try { _init(); } catch (e) { send({ type: 'fatal', msg: String(e) }); }
 const RIVALS_LOG_MAX = 50;
 let _rival_seq = 0;
 let _rivals = [];
-let _last_rival_addr = null;
 let _hooks = [];
 
 // sanity-check первых N rival_update
@@ -43,15 +41,8 @@ let _sanity_checks_done = 0;
 let _sanity_suspect_count = 0;
 let _sanity_invalid_reported = false;
 
-function _readItem(addr, includeHex) {
+function _readItem(addr) {
     const out = { addr: addr.toString() };
-    if (includeHex) {
-        try {
-            const raw = new Uint8Array(addr.readByteArray(ITEM_SIZE));
-            out.raw_hex = Array.from(raw).map(x =>
-            x.toString(16).padStart(2, '0')).join(' ');
-        } catch (_) { out.raw_hex = null; }
-    }
     try { out.rating = addr.add(ITEM_FIELDS.rating).readS32(); } catch (_) { out.rating = null; }
     try { out.slot   = addr.add(ITEM_FIELDS.slot).readS32();   } catch (_) { out.slot = null; }
     try { out.flag   = addr.add(ITEM_FIELDS.flag).readU8();    } catch (_) { out.flag = null; }
@@ -59,7 +50,7 @@ function _readItem(addr, includeHex) {
     return out;
 }
 
-function _readRival(p, includeHex) {
+function _readRival(p) {
     const out = { addr: p.toString() };
     for (const [off, tag, t] of RIVAL_FIELDS) {
         try {
@@ -83,7 +74,7 @@ function _readRival(p, includeHex) {
                         out.stones.push({ i, err: 'null' });
                         continue;
                     }
-                    out.stones.push(_readItem(it, !!includeHex));
+                    out.stones.push(_readItem(it));
                 } catch (e) {
                     out.stones.push({ i, err: String(e) });
                 }
@@ -207,7 +198,7 @@ function installHooks() {
                                      try {
                                          const p = this.self;
                                          if (!p || p.isNull()) return;
-                                         const snap = _readRival(p, false);
+                                         const snap = _readRival(p);
                                          _rival_seq++;
                                          snap.seq = _rival_seq;
                                          _last_rival_addr = p;
@@ -266,10 +257,6 @@ function getRivalsSince(sinceSeq) {
     return { ok: true, seq: _rival_seq, count: rivals.length, rivals };
 }
 
-function readAt(addrStr) {
-    return { ok: true, ..._readRival(ptr(addrStr), true) };
-}
-
 function resetLog() {
     _rivals.length = 0;
     return true;
@@ -282,6 +269,5 @@ rpc.exports = {
     getLastRival:   () => getLastRival(),
     getRivalsLog:   () => getRivalsLog(),
     getRivalsSince: (s) => getRivalsSince(s),
-    readAt:         (a) => readAt(a),
     resetLog:       () => resetLog(),
 };
