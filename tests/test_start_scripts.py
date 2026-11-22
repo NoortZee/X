@@ -6,6 +6,7 @@ import ast
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -167,6 +168,54 @@ class PhantomRemoteTests(unittest.TestCase):
                 self.assertNotIn('secret', result.stderr)
 
 
+class BuildEnvironmentSourceTests(unittest.TestCase):
+    """Source-level guards for the NixOS build environment.
+
+    The release build sits far past the point the dependency tests execute, so
+    these pin the two lines that decide whether `cargo build` can work on NixOS
+    at all: the nix-shell package set and the launcher's prerequisite list.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.install = (ROOT / 'start/install.sh').read_text(encoding='utf-8')
+        cls.launcher = (ROOT / 'start/start.sh').read_text(encoding='utf-8')
+
+    def nix_shell_packages(self):
+        lines = self.install.splitlines()
+        index = next(i for i, line in enumerate(lines) if 'nix-shell -p ' in line)
+        text = lines[index].split('nix-shell -p ', 1)[1]
+        while text.rstrip().endswith('\\'):
+            index += 1
+            text = text.rstrip()[:-1] + ' ' + lines[index]
+        return text.split('--run')[0].split()
+
+    def test_nix_shell_provides_a_linker_and_libclang(self):
+        packages = self.nix_shell_packages()
+        # Rust links through `cc`; the clang package does not provide it.
+        self.assertIn('gcc', packages)
+        # frida-sys runs bindgen 0.72, which needs LIBCLANG_PATH from libclang.
+        self.assertIn('libclang', packages)
+        self.assertIn('clang', packages)
+        for toolchain in ('cargo', 'rustc'):
+            self.assertIn(toolchain, packages)
+
+    def test_procps_is_not_installed_on_any_distribution(self):
+        # `ps` is used nowhere on the host, so no package list should carry it.
+        self.assertNotRegex(self.install, r'\bprocps(-ng)?\b')
+        self.assertNotRegex(self.install, r'\bps:procps\b')
+
+    def test_launcher_declares_every_non_coreutils_prerequisite(self):
+        loop = re.search(r'for cmd in ([^;]+); do', self.launcher)
+        self.assertIsNotNone(loop)
+        required = loop[1].split()
+        # sed is a separate upstream package and parses `adb shell wm size`.
+        self.assertIn('sed', required)
+        self.assertIn('adb', required)
+        for command in required:
+            self.assertRegex(self.launcher, rf'\b{re.escape(command)}\b')
+
+
 @unittest.skipIf(os.geteuid() == 0, 'Installer intentionally refuses root')
 class InstallerDependencyTests(unittest.TestCase):
     """Execute the real dependency-selection prefix, with an isolated mock PATH."""
@@ -248,11 +297,12 @@ elif name == 'nix':
         install = commands[-1]
         self.assertEqual(install[:4], ['pacman', '-S', '--needed', '--noconfirm'])
         for package in ('android-tools', 'base-devel', 'pkgconf', 'clang', 'llvm', 'openssl',
-                        'python', 'python-pip', 'python-yaml', 'jdk17-openjdk', 'procps-ng'):
+                        'python', 'python-pip', 'python-yaml', 'jdk17-openjdk'):
             self.assertIn(package, install)
         self.assertNotIn('python3-venv', install)
         self.assertNotIn('shellcheck', install)
         self.assertNotIn('konsole', install)
+        self.assertNotIn('procps-ng', install)  # `ps` is used nowhere on the host
         self.assertEqual(len(commands), 2)  # sudo -v and the targeted install only
         for command in commands:
             if command[0] == 'pacman':
@@ -267,6 +317,7 @@ elif name == 'nix':
         self.assertEqual(commands[2][:3], ['apt-get', 'install', '-y'])
         self.assertIn('python3-venv', commands[2])
         self.assertIn('openjdk-17-jdk-headless', commands[2])
+        self.assertNotIn('procps', commands[2])  # `ps` is used nowhere on the host
         self.assertIn('JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64', result.stdout)
 
     def test_pacman_preferred_if_both_commands_exist(self):
@@ -308,8 +359,9 @@ elif name == 'nix':
         attrs = self.nix_command(commands)
         for attr in ('android-tools', 'gnumake', 'gcc', 'pkg-config', 'clang', 'llvm',
                      'git', 'curl', 'unzip', 'xz', 'python3', 'jdk17',
-                     'util-linux', 'procps', 'findutils', 'cargo', 'rustc'):
+                     'util-linux', 'findutils', 'cargo', 'rustc'):
             self.assertIn(f'nixpkgs#{attr}', attrs)
+        self.assertNotIn('nixpkgs#procps', attrs)  # `ps` is used nowhere on the host
         # Every argument is a store path spec, never a bare attribute.
         self.assertTrue(all(a.startswith('nixpkgs#') for a in attrs), attrs)
         self.assertEqual(len(commands), 2)  # sudo -v and the profile install only

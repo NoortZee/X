@@ -18,7 +18,8 @@ fi
 [[ $# -le 1 ]] || fail 'Too many arguments; use --help.'
 [[ $EUID != 0 ]] || fail 'Run without sudo.'
 [[ "$DEVICE" =~ ^[0-9.]+:[0-9]+$ ]] || fail 'TAS_ADB_DEVICE must be an IPv4 address:port.'
-for cmd in adb sudo waydroid python3 timeout flock realpath setsid; do
+# sed is a separate package, not coreutils: the `adb shell wm size` parsing needs it.
+for cmd in adb sudo waydroid python3 timeout flock realpath setsid sed; do
     command -v "$cmd" >/dev/null || fail "Missing $cmd; run start/install.sh."
 done
 CONFIG="$(realpath -e -- "${1:-$ROOT/config.yaml}")"
