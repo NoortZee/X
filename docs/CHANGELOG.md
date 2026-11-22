@@ -1,3 +1,24 @@
+## Без выпуска — NixOS: сборка Rust идёт в mkShell, а не в `nix-shell -p`
+
+Следующий запуск `./start/install.sh` на NixOS прошёл d8 и упал на сборке `frida-sys`:
+
+```
+frida-build: core devkit not found, downloading from https://github.com/frida/frida/releases/download/17.16.4/frida-core-devkit-17.16.4-linux-x86_64.tar.xz
+thread 'main' panicked at bindgen-0.72.1/lib.rs:616:27:
+Unable to find libclang: "couldn't find any valid shared libraries matching: ['libclang.so', 'libclang-*.so', ...]"
+Installation failed at line 406.
+```
+
+`nix-shell -p libclang` (как и `nix shell`) только добавляет бинарники в `PATH` и не запускает setup-хуки. Пакет `libclang` собственного хука не имеет — `LIBCLANG_PATH` и `BINDGEN_EXTRA_CLANG_ARGS` экспортирует `rustPlatform.bindgenHook`, поэтому `bindgen 0.72` искал `libclang.so` в пустом списке. Вторая мина того же шага: `frida-core.h` начинается с `#include <glib.h>`, заголовки GLib лежат в `dev`-выходе, а `nix-shell -p` его не даёт — сборка упала бы на следующем шаге.
+
+- Сборка на NixOS переведена на настоящий `mkShell` через `nix develop --impure --expr …`: `nativeBuildInputs = [ pkg-config rustPlatform.bindgenHook ]` (хук выставляет `LIBCLANG_PATH` и `BINDGEN_EXTRA_CLANG_ARGS`, pkg-config наполняет `PKG_CONFIG_PATH`), `buildInputs = [ cargo rustc gcc clang openssl glib gnumake ]`. `--impure` нужен для `builtins.getFlake`/`currentSystem`, flakes включаются `--extra-experimental-features`, как и раньше.
+- cflags GLib дописываются в `BINDGEN_EXTRA_CLANG_ARGS` внутри `--command bash -c`, то есть уже после `postHook` шелла: значение хука сохраняется (`${BINDGEN_EXTRA_CLANG_ARGS:-}`), а не перезаписывается. Экранирование `\$(pkg-config …)` в установщике обязательно — иначе команда выполнилась бы до запуска nix.
+- `needs_cargo_build` и остальные шаги не менялись; на Arch/Ubuntu ветка `cargo build --release` прежняя.
+
+Тесты: `BuildEnvironmentSourceTests` переписан под новую форму (6 тестов). Проверяется состав `mkShell` (наличие `bindgenHook`, `pkg-config`, `gcc`, `clang`, `openssl`, `glib`, `gnumake`), отсутствие `nix-shell` в установщике, обязательные `mkShell` + `develop --impure` + `currentSystem`, наличие cflags GLib и сохранение аргументов хука. Отдельный тест исполняет настоящий фрагмент команды с макетами `nix`/`pkg-config`/`cargo`, поэтому проверяется вся цепочка кавычек: установщик → nix → bash → cargo, а на выходе ожидается `-I/glib/include FROM-HOOK`. Мутации (убрать `bindgenHook`, убрать `glib`, убрать `--impure`, снять экранирование `$(pkg-config …)`, выбросить `${BINDGEN_EXTRA_CLANG_ARGS:-}`) роняют ровно свои тесты.
+
+Итого 53 python-теста, все проходят (было 50); `node --test` 75/75; `bash -n` для обоих скриптов. **Не проверено:** настоящего NixOS и nixpkgs в этой среде нет, поэтому `nix develop` и `cargo build` не запускались — вывод о `LIBCLANG_PATH`/GLib основан на исходниках nixpkgs (`pkgs/build-support/rust/hooks/default.nix`, `glib`/`clang` derivation) и на тексте паники bindgen.
+
 ## Без выпуска — NixOS: сборка phantom-server.jar больше не падает на `d8`
 
 Реальный запуск `./start/install.sh` на NixOS доходил до сборки Android-компонента и падал:

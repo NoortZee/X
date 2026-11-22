@@ -228,33 +228,88 @@ class BuildEnvironmentSourceTests(unittest.TestCase):
     """Source-level guards for the NixOS build environment.
 
     The release build sits far past the point the dependency tests execute, so
-    these pin the two lines that decide whether `cargo build` can work on NixOS
-    at all: the nix-shell package set and the launcher's prerequisite list.
+    these pin the lines that decide whether `cargo build` can work on NixOS at
+    all: the mkShell used for the build and the launcher's prerequisite list.
     """
 
     @classmethod
     def setUpClass(cls):
         cls.install = (ROOT / 'start/install.sh').read_text(encoding='utf-8')
         cls.launcher = (ROOT / 'start/start.sh').read_text(encoding='utf-8')
+        cls.shell = re.search(r"<<'NIX'[^\n]*\n(.*?)\nNIX\n", cls.install, re.S)[1]
 
-    def nix_shell_packages(self):
-        lines = self.install.splitlines()
-        index = next(i for i, line in enumerate(lines) if 'nix-shell -p ' in line)
-        text = lines[index].split('nix-shell -p ', 1)[1]
-        while text.rstrip().endswith('\\'):
-            index += 1
-            text = text.rstrip()[:-1] + ' ' + lines[index]
-        return text.split('--run')[0].split()
+    def shell_list(self, name):
+        """Entries of `name = [ ... ];` inside the mkShell expression.
 
-    def test_nix_shell_provides_a_linker_and_libclang(self):
-        packages = self.nix_shell_packages()
+        `pkgs.rustPlatform.bindgenHook` is returned as its last component so the
+        assertions can name the attribute the way nixpkgs does.
+        """
+        body = re.search(rf'{name}\s*=\s*\[(.*?)\];', self.shell, re.S)[1]
+        return [entry.rsplit('.', 1)[-1]
+                for entry in re.findall(r'[\w.-]+', re.sub(r'#.*', '', body))]
+
+    def test_build_shell_provides_a_linker_and_a_libclang_hook(self):
+        native = self.shell_list('nativeBuildInputs')
+        build = self.shell_list('buildInputs')
+        # bindgen finds libclang only through LIBCLANG_PATH, and `nix-shell -p`
+        # runs no setup hooks at all: the hook has to be an actual input.
+        self.assertIn('bindgenHook', native)
+        self.assertIn('pkg-config', native)
         # Rust links through `cc`; the clang package does not provide it.
-        self.assertIn('gcc', packages)
-        # frida-sys runs bindgen 0.72, which needs LIBCLANG_PATH from libclang.
-        self.assertIn('libclang', packages)
-        self.assertIn('clang', packages)
-        for toolchain in ('cargo', 'rustc'):
-            self.assertIn(toolchain, packages)
+        self.assertIn('gcc', build)
+        self.assertIn('clang', build)
+        for package in ('cargo', 'rustc', 'openssl', 'glib', 'gnumake'):
+            self.assertIn(package, build)
+
+    def test_build_shell_is_a_flake_shell_not_a_bare_nix_shell(self):
+        # `nix-shell -p` only extends PATH, so no hook can export LIBCLANG_PATH.
+        self.assertNotRegex(self.install, r'(?m)^\s*nix-shell\b')
+        self.assertIn('mkShell', self.shell)
+        self.assertIn('nix --extra-experimental-features', self.install)
+        self.assertRegex(self.install, r'nix \S+ .*develop --impure')
+        # getFlake/currentSystem need --impure; without it nix refuses the expression.
+        self.assertIn('builtins.currentSystem', self.shell)
+
+    def test_build_exports_glib_cflags_to_bindgen(self):
+        # frida-core.h starts with #include <glib.h>, so clang needs glib's cflags,
+        # and the bindgen hook's own BINDGEN_EXTRA_CLANG_ARGS knows nothing of them.
+        # The export has to happen after the shell's postHook ran, hence --command.
+        command = self.install.split('--command bash -c', 1)[1].split('\n    else', 1)[0]
+        self.assertIn('BINDGEN_EXTRA_CLANG_ARGS', command)
+        self.assertIn('pkg-config --cflags glib-2.0 gobject-2.0 gio-2.0', command)
+        # The hook's own value must be kept, not discarded.
+        self.assertIn('${BINDGEN_EXTRA_CLANG_ARGS:-}', command)
+
+    def test_build_command_expands_cflags_in_the_shell_not_in_the_installer(self):
+        # The installer must pass the export through for the inner bash to expand:
+        # an unescaped $(pkg-config ...) would run before nix even starts. The real
+        # fragment is executed here with mock nix/cargo/pkg-config, so the quoting
+        # chain (installer -> nix -> bash -> cargo) is exercised end to end.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bindir = root / 'bin'
+            bindir.mkdir()
+            # nix develop ... --command <argv...>: run the command it was given.
+            (bindir / 'nix').write_text(
+                '#!/usr/bin/env bash\n'
+                'while [[ $1 != --command ]]; do shift; done\n'
+                'shift\nexec "$@"\n')
+            (bindir / 'pkg-config').write_text('#!/bin/sh\necho "-I/glib/include"\n')
+            (bindir / 'cargo').write_text('#!/bin/sh\nprintf "%s\\n" "$BINDGEN_EXTRA_CLANG_ARGS"\n')
+            for name in ('nix', 'pkg-config', 'cargo'):
+                (bindir / name).chmod(0o755)
+            fragment = self.install.split("        read -r -d '' shell <<'NIX'", 1)[1]
+            fragment = "read -r -d '' shell <<'NIX'" + fragment
+            fragment = fragment.split('--command bash -c', 1)[0] + '--command bash -c' + \
+                fragment.split('--command bash -c', 1)[1].split('\n    else', 1)[0]
+            result = subprocess.run(
+                [shutil.which('bash'), '-c', f'ROOT={root!s}\n{fragment}'],
+                capture_output=True, text=True,
+                env={**os.environ, 'PATH': f'{bindir}:{os.environ["PATH"]}',
+                     'BINDGEN_EXTRA_CLANG_ARGS': 'FROM-HOOK'})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # glib's cflags come first, the hook's own args are preserved.
+            self.assertEqual(result.stdout.split(), ['-I/glib/include', 'FROM-HOOK'])
 
     def test_procps_is_not_installed_on_any_distribution(self):
         # `ps` is used nowhere on the host, so no package list should carry it.

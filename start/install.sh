@@ -401,10 +401,31 @@ if needs_cargo_build; then
         # NixOS keeps pkg-config files and C headers in `dev` outputs that a user
         # profile does not expose, so build inside a shell that has them instead
         # of relying on the linked binaries alone.
-        #   gcc      — Rust links through `cc`, which the clang package does not provide
-        #   libclang — frida-sys runs bindgen 0.72, whose setup hook exports LIBCLANG_PATH
-        nix-shell -p cargo rustc gcc clang libclang pkg-config openssl gnumake \
-            --run "cd $(printf '%q' "$ROOT") && cargo build --release"
+        #
+        # `nix-shell -p`/`nix shell` only put binaries on PATH: the libclang
+        # package ships no setup hook, so LIBCLANG_PATH stays unset and bindgen
+        # cannot find libclang.so. rustPlatform.bindgenHook is that setup hook.
+        # A real mkShell runs it (postHook), and pkg-config puts every input into
+        # PKG_CONFIG_PATH. gcc stays for `cc`, Rust's linker.
+        read -r -d '' shell <<'NIX' || true
+let
+  pkgs = (builtins.getFlake "nixpkgs").legacyPackages.${builtins.currentSystem};
+in
+pkgs.mkShell {
+  nativeBuildInputs = [ pkgs.pkg-config pkgs.rustPlatform.bindgenHook ];
+  buildInputs = [
+    pkgs.cargo pkgs.rustc pkgs.gcc pkgs.clang pkgs.openssl pkgs.glib pkgs.gnumake
+  ];
+}
+NIX
+        # frida-core.h starts with #include <glib.h>, and the hook builds
+        # BINDGEN_EXTRA_CLANG_ARGS from the compiler flags alone, so glib's own
+        # cflags have to be prepended. This runs after the shell's hooks, so the
+        # hook cannot overwrite it; the values are expanded by the inner bash.
+        nix --extra-experimental-features 'nix-command flakes' develop --impure \
+            --expr "$shell" --command bash -c \
+            "export BINDGEN_EXTRA_CLANG_ARGS=\"\$(pkg-config --cflags glib-2.0 gobject-2.0 gio-2.0) \${BINDGEN_EXTRA_CLANG_ARGS:-}\" &&
+             cd $(printf '%q' "$ROOT") && exec cargo build --release"
     else
         cargo build --release
     fi
