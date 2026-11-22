@@ -152,11 +152,6 @@ pub struct OrchestratorConfig {
     pub nominal_fps: f64,
     #[serde(default)]
     pub predict_lead_ms: f64,
-    /// Упреждение в кадрах: тапать, когда до целевого кадра осталось столько.
-    /// В отличие от `predict_lead_ms` не зависит от темпа и не требует перевода
-    /// «кадры → миллисекунды». `0` — прежнее поведение (тап на целевом кадре).
-    #[serde(default)]
-    pub predict_lead_frames: i64,
     #[serde(default)]
     pub predict_margin_ms: f64,
     #[serde(default = "d_3")]
