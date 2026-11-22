@@ -34,7 +34,7 @@ Linux x86_64 с CachyOS/Arch Linux, Ubuntu/Debian или NixOS, `sudo`, уже �
 4. Получает `NoortZee/phantom_keymaper` на закреплённом коммите `bc4f338488f03f229e9a9812e4b48baee56a45d8` и собирает **Android-компонент `phantom-server.jar`**, необходимый TAS. Десктопный mapper/GUI для работы TAS не нужен и не устанавливается.
 5. Скачивает модифицированный сервер из релиза `x86` репозитория `NoortZee/phantom-frida`, проверяет закреплённый SHA-256 архива, выбирает ELF x86_64 и устанавливает его под именем `sysmon`. Обычный upstream frida-server вместо него не используется.
 6. Создаёт отдельный Python venv с версией клиента Frida из `third_party/frida-rust/frida-sys/FRIDA_VERSION`.
-7. Выполняет `cargo build --release`, только если бинарник отсутствует или старше исходников (`TAS`, `catacombs`, `stones`, `memory`, `third_party`, `Cargo.toml`, `Cargo.lock`). На NixOS сборка идёт внутри `nix-shell -p cargo rustc pkg-config openssl clang gnumake`: pkg-config-файлы и заголовки лежат в `dev`-выходах, которых профиль пользователя не даёт.
+7. Выполняет `cargo build --release`, только если бинарник отсутствует или старше исходников (`TAS`, `catacombs`, `stones`, `memory`, `third_party`, `Cargo.toml`, `Cargo.lock`). На NixOS сборка идёт внутри `mkShell` (`nix develop`): pkg-config-файлы и заголовки лежат в `dev`-выходах, которых профиль пользователя не даёт, а `rustPlatform.bindgenHook` выставляет `LIBCLANG_PATH`. Голый `nix-shell -p` для этого не годится — он только правит `PATH` и не запускает setup-хуки.
 
 Каждый шаг 2–7 перед установкой проверяет свой путь назначения и целостность файла: sha256-сайдкар рядом с артефактом, `classes.dex` внутри `phantom-server.jar`, ELF64 x86_64 для `sysmon`, импорт закреплённой версии `frida` в venv. Целое — пропускается с явным сообщением, повреждённое — переустанавливается с `WARN`.
 
@@ -66,6 +66,29 @@ Installation failed at line 281. TAS was not started.
 `d8` в `build-tools` — это не бинарник, а shell-обёртка с шебангом `#!/bin/bash`; на NixOS такого пути нет, и ядро отказывается запускать файл ещё до Java. Установщик это распознаёт: если `d8` не запускается, а интерпретатор из его шебанга — `bash`, которого нет в системе, рядом создаётся исполняемая обёртка `${XDG_DATA_HOME:-$HOME/.local/share}/kot-tas/bin/d8`, которая вызывает тот же самый скрипт через `bash` установщика. Сам SDK не изменяется, а в логе появляется строка `d8: /bin/bash is missing; using the ... shim for ...`. Если причина другая (не Java, не права, битый SDK), установщик падает с явной ошибкой, а не подменяет файл.
 
 На Arch/Ubuntu правка ничего не меняет: рабочий `d8` используется как есть.
+
+### Ошибка `Unable to find libclang` / `frida-core.h: No such file` при сборке
+
+Так выглядит падение `bindgen` на NixOS:
+
+```
+frida-build: core devkit not found, downloading from https://github.com/frida/frida/releases/...
+thread 'main' panicked at bindgen-0.72.1/lib.rs:616:27:
+Unable to find libclang: "couldn't find any valid shared libraries matching: ['libclang.so', ...],
+set the `LIBCLANG_PATH` environment variable ..."
+```
+
+Причина: `nix-shell -p libclang` (и `nix shell`) только добавляет бинарники в `PATH` — setup-хуки не запускаются. Пакет `libclang` своего хука не имеет: `LIBCLANG_PATH` экспортирует `rustPlatform.bindgenHook`. Установщик собирает проект в настоящем `mkShell` (`nix develop --impure --expr …`), где подключены `rustPlatform.bindgenHook`, `pkg-config`, `gcc`, `clang`, `openssl`, `glib` и `gnumake`. Дополнительно `frida-core.h` начинается с `#include <glib.h>`, поэтому в `BINDGEN_EXTRA_CLANG_ARGS` добавляются cflags `glib-2.0 gobject-2.0 gio-2.0` — уже после хуков, чтобы их не перезаписало.
+
+Если сборка падает с другой ошибкой clang, проверьте вручную:
+
+```bash
+nix --extra-experimental-features 'nix-command flakes' develop --impure --expr \
+  'let pkgs = (builtins.getFlake "nixpkgs").legacyPackages.${builtins.currentSystem};
+   in pkgs.mkShell { nativeBuildInputs = [ pkgs.pkg-config pkgs.rustPlatform.bindgenHook ];
+                     buildInputs = [ pkgs.cargo pkgs.rustc pkgs.gcc pkgs.clang pkgs.openssl pkgs.glib ]; }' \
+  --command bash -c 'echo "$LIBCLANG_PATH"; pkg-config --cflags glib-2.0'
+```
 
 Проверьте координаты и настройки Telegram в `config.yaml`: пример содержит фиктивный токен. Для отключения уведомлений установите `telegram.enabled: false`.
 
