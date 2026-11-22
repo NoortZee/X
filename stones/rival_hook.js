@@ -201,7 +201,6 @@ function installHooks() {
                                          const snap = _readRival(p);
                                          _rival_seq++;
                                          snap.seq = _rival_seq;
-                                         _last_rival_addr = p;
                                          _rivals.push(snap);
                                          if (_rivals.length > RIVALS_LOG_MAX)
                                              _rivals.shift();

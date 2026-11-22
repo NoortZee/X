@@ -1,11 +1,21 @@
+## Без выпуска — исправлена регрессия `stones`: `ReferenceError: '_last_rival_addr'`
+
+Регрессия внесена предыдущей чисткой. Из `stones/rival_hook.js` удалили объявление `let _last_rival_addr = null;` как «write-only»: анализатор строил граф достижимости по ссылкам-чтениям, а запись `_last_rival_addr = p;` в `onLeave` осталась в файле. В `'use strict'` присваивание несуществующему имени даёт `ReferenceError`, который `onLeave` ловит своим `try/catch` и отправляет в `type: 'err'` — поэтому хук вставал (`hooked at 0x…`), а снапшот не сохранялся и не отправлялся: подбор камней в LIVE-режиме перестал работать.
+
+- `stones/rival_hook.js`: удалено присваивание `_last_rival_addr = p;` (значение действительно никто не читал — `getLastRival` берёт последний элемент `_rivals`). Файл 273 → 272 строки.
+- `tests/memory_layout.test.js`: два новых теста. Первый дёргает `installHooks()` и прогоняет `onLeave` на фиктивной структуре соперника — проверяет, что `err`-сообщений нет и `getRivalsSince(0)` вернул снапшот с камнями. Второй вызывает все RPC-экспорты трёх агентов и падает на любом `ReferenceError`. Оба проверены мутацией: с возвращённой строкой `_last_rival_addr = p;` первый падает, с подставленной записью в `playState` падает второй.
+- Причина была системной, поэтому проверены все агенты: статический проход по AST на ссылки без объявления даёт 0 для `TAS/agent.js`, `catacombs/agent.js`, `stones/rival_hook.js`, `memory/offsets.js`.
+
+Исправлена фактическая ошибка в предыдущей записи: `_last_rival_addr` не был удалён вместе с `readAt`/`includeHex` — удалено было только объявление, и `catacombs/agent.js` после чистки 1301 строк, а не 1287.
+
 ## Без выпуска — удалён недостижимый код (агенты, карта памяти, Rust)
 
 Критерий удаления — недостижимость, а не «экспериментальность»: точка входа либо отсутствует, либо триггер уже некому поставить.
 
 Агенты (проверено разбором AST от точек входа `rpc.exports`, которые реально вызывает Rust):
 - `TAS/agent.js` 992 → 768 строк. Удалены libc-хуки RNG/времени (`installRngHooks`/`installTimeHooks`/`installLibcHooks`/`detach*`) — их никто не устанавливал, поэтому `_rngLog`/`_timeLog` всегда были пусты; frame gate (`setFrameGate`/`waitForGate`/`releaseGate`/`gateStatus`, помеченный «в async не используется»); `compareTwoRecordings`; `detectGetBodyHash`/`detectGetTimeLog`; экспорт `pumpFrame`/`pumpReset`/`pumpPause`/`pumpResume`/`pumpStep`/`pumpDbgStats` и методы `pump.pause/resume/step` вместе с веткой паузы в кадровом хуке. RPC-поверхность теперь ровно та, что вызывает `TAS/frida_agent.rs`.
-- `catacombs/agent.js` 2136 → 1287 строк. Удалены опись Manager (`surveyManager`/`locateManager`/`locateManagerUnsafe`/`managerDescriptor`/`parseSurveyAddress`), `mark`, `report`-метаданные модуля, весь gold-путь (`startGoldCycle`/`tickGoldCycle`/`stopGoldCycle`/`stopAllGold`/`requestGold*`/`enableAllGold`/`allGold*`/`authGoldCount`/`convertGoldDescriptor`/`performGold`/`fullGoldPlan`/`completeGoldRegistration`/`collectedGoldTemplate`/`growGoldPointerVector`), `performSpawnProbe`/`inspectSpawnArray`/`captureEarlySpawnArray`, `performMove`/`requestMove` и ручная ветка `altitude`. Триггеры (`pendingGold`/`pendingSpawnProbe`/`pendingMove`/`pendingAltitude`/`goldCycle`) ставились только удалёнными функциями, то есть ветки не исполнялись никогда. `status`/`report` оставлены как read-only окно для `tests/catacombs.test.js`.
-- `stones/rival_hook.js` 287 → 273 строки: удалены `readAt` и цепочка `includeHex`/`raw_hex` вместе с `_last_rival_addr`.
+- `catacombs/agent.js` 2136 → 1301 строк. Удалены опись Manager (`surveyManager`/`locateManager`/`locateManagerUnsafe`/`managerDescriptor`/`parseSurveyAddress`), `mark`, `report`-метаданные модуля, весь gold-путь (`startGoldCycle`/`tickGoldCycle`/`stopGoldCycle`/`stopAllGold`/`requestGold*`/`enableAllGold`/`allGold*`/`authGoldCount`/`convertGoldDescriptor`/`performGold`/`fullGoldPlan`/`completeGoldRegistration`/`collectedGoldTemplate`/`growGoldPointerVector`), `performSpawnProbe`/`inspectSpawnArray`/`captureEarlySpawnArray`, `performMove`/`requestMove` и ручная ветка `altitude`. Триггеры (`pendingGold`/`pendingSpawnProbe`/`pendingMove`/`pendingAltitude`/`goldCycle`) ставились только удалёнными функциями, то есть ветки не исполнялись никогда. `status`/`report` оставлены как read-only окно для `tests/catacombs.test.js`.
+- `stones/rival_hook.js` 287 → 272 строки: удалены `readAt` и цепочка `includeHex`/`raw_hex`. Объявление `_last_rival_addr` удалено ошибочно — см. запись выше.
 
 Карта памяти (`memory/offsets.js`):
 - Удалены секции `catacombs.manager_survey` и `catacombs.all_gold` и ключ `stones.item_size` — после чистки агентов их не читает ни один агент.
@@ -15,7 +25,7 @@ Rust (значения, которые записывались, но не чи�
 - `PhantomError::Tap` (не конструировался), `TapResult.{sync_mode,slot,x,y}`, `JumpLogEntry.{idx,t}`, `FireRecord.{idx,abs_frame,target_frame,tap_x,tap_y,snap_before,snap_after}`, `PlanStep.snap`, `LoggingConfig.level` (вместе с ключом в `config.example.yaml`), `Replay.rng_log` и `detect_get_rng_log` — цепочка к удалённому JS-экспорту.
 - `#[allow(dead_code)]` в `TAS/phantom.rs` и `TAS/frida_agent.rs` сняты вместе с самими полями; `#![allow(dead_code)]` в `TAS/main.rs` оставлен.
 
-Тесты: `tests/catacombs.test.js` 82 → 68 (удалены 14 тестов удалённых подсистем, 3 переписаны на живое поведение, из `goldFixture` убрана заглушка `fullGoldPlan`, инвариант «только `writeFloat`» пересчитан 18 → 12). Все 68 проходят, `tests/memory_layout.test.js` 5/5. Rust-тесты и сборка в этой среде недоступны (нет cargo/rustc, `static.rust-lang.org` закрыт): правки Rust проверены только разбором AST (ast-grep, узлов ERROR нет) и поиском ссылок. `tests/test_start_scripts.py` — 5 падений в `InstallerDependencyTests`, те же на чистом HEAD до правок.
+Тесты: `tests/catacombs.test.js` 82 → 68 (удалены 14 тестов удалённых подсистем, 3 переписаны на живое поведение, из `goldFixture` убрана заглушка `fullGoldPlan`, инвариант «только `writeFloat`» пересчитан 18 → 12). Все 68 проходят, `tests/memory_layout.test.js` 5/5 (теперь 7/7). Rust-тесты и сборка в этой среде недоступны (нет cargo/rustc, `static.rust-lang.org` закрыт): правки Rust проверены только разбором AST (ast-grep, узлов ERROR нет) и поиском ссылок. `tests/test_start_scripts.py` — 5 падений в `InstallerDependencyTests`, те же на чистом HEAD до правок.
 
 ## Без выпуска — install.sh: config первым, пропуск целых зависимостей, чистые варнинги сборки
 
