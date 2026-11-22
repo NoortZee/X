@@ -131,14 +131,14 @@ case "$PACKAGE_MANAGER" in
         # Use existing sync databases. System upgrades and mirror maintenance belong to the user.
         sudo pacman -S --needed --noconfirm android-tools base-devel pkgconf clang llvm openssl \
             git curl ca-certificates unzip xz python python-pip python-yaml \
-            jdk17-openjdk util-linux procps-ng
+            jdk17-openjdk util-linux
         export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
         ;;
     apt-get)
         sudo apt-get update
         sudo apt-get install -y adb build-essential pkg-config libclang-dev clang libssl-dev \
             git curl ca-certificates unzip xz-utils python3 python3-venv python3-yaml \
-            openjdk-17-jdk-headless util-linux procps
+            openjdk-17-jdk-headless util-linux
         export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
         ;;
     nix)
@@ -146,7 +146,7 @@ case "$PACKAGE_MANAGER" in
         nix_install \
             adb:android-tools make:gnumake cc:gcc pkg-config:pkg-config clang:clang \
             llvm-config:llvm git:git curl:curl unzip:unzip xz:xz python3:python3 \
-            javac:jdk17 flock:util-linux ps:procps find:findutils \
+            javac:jdk17 flock:util-linux find:findutils \
             cargo:cargo rustc:rustc
         # No hardcoded /usr/lib/jvm path exists here; resolve what nix linked in.
         JAVA_HOME="$(java_home_from_javac)" \
@@ -364,7 +364,9 @@ if needs_cargo_build; then
         # NixOS keeps pkg-config files and C headers in `dev` outputs that a user
         # profile does not expose, so build inside a shell that has them instead
         # of relying on the linked binaries alone.
-        nix-shell -p cargo rustc pkg-config openssl clang gnumake \
+        #   gcc      — Rust links through `cc`, which the clang package does not provide
+        #   libclang — frida-sys runs bindgen 0.72, whose setup hook exports LIBCLANG_PATH
+        nix-shell -p cargo rustc gcc clang libclang pkg-config openssl gnumake \
             --run "cd $(printf '%q' "$ROOT") && cargo build --release"
     else
         cargo build --release
