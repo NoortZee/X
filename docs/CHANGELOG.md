@@ -104,6 +104,13 @@
 
 ### Мелкое
 
+- `.gitignore` приведён в порядок и разбит по разделам: секреты (`config.yaml` и
+  любые его копии — `install.sh` делает `.broken.<дата>`, ручные бэкапы `.bak.<время>`),
+  сборка (`/target/`), рантайм (`/logs/`, `/replays/`, `/diag/`, `nohup.out`, `*.log`),
+  кэши (`.cache`, `__pycache__`, `.aider*`, `.mimocode`) и файлы редакторов/ОС.
+  Проверено `git ls-files -ci --exclude-standard` — под игнор не попал ни один
+  отслеживаемый файл, включая `config.example.yaml` и фикстуры `tests/fixtures/`.
+
 - `logging.log_dir` заменён секцией `replays`; старый ключ читается с
   предупреждением. `start/start.sh` экспортирует `KOT_TAS_ADB_DEVICE`, а контракт
   `tests/test_tap_scaling.py` («launcher экспортирует ровно те `KOT_TAS_*`, которые
