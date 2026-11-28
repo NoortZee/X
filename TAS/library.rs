@@ -915,3 +915,49 @@ mod shot_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+#[cfg(test)]
+mod readme_tests {
+    use super::*;
+    use crate::replay::{save_replay_md, Meta, Replay, ReplayEvent, SCHEMA};
+
+    /// В `replays/` теперь лежит и README: каталог версионируется вместе с кодом.
+    /// Посторонние файлы верхнего уровня не должны ломать список.
+    #[test]
+    fn top_level_readme_does_not_break_the_listing() {
+        let root = std::env::temp_dir().join(format!("kot_tas_readme_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "# записи прогонов\n").unwrap();
+
+        let empty = format_replays(&root, None, true);
+        assert_eq!(empty, vec!["реплеев нет — сначала record".to_string()]);
+
+        let dir = root.join("17794082");
+        std::fs::create_dir_all(&dir).unwrap();
+        let replay = Replay {
+            meta: Meta {
+                schema: SCHEMA,
+                base: Some(17_794_082),
+                layout: Some("394ec424".into()),
+                variant: Some(1),
+                anchor: Some("first_hero_update@1".into()),
+                jumps: 1,
+                ..Default::default()
+            },
+            anchor_frame: Some(1),
+            anchor_kind: Some("first_hero_update".into()),
+            events: vec![
+                ReplayEvent { frame: 1, name: "first_hero_update".into() },
+                ReplayEvent { frame: 31, name: "jump".into() },
+            ],
+            ..Default::default()
+        };
+        save_replay_md(&dir.join("20260101-000001(1).md"), &replay).unwrap();
+
+        let listing = format_replays(&root, None, true).join("\n");
+        assert!(listing.contains("17794082"), "{listing}");
+        assert!(!listing.contains("не читаются"), "README не должен считаться битым: {listing}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

@@ -167,6 +167,7 @@ if [[ ! "$SCREEN_W" =~ ^[0-9]+$ || ! "$SCREEN_H" =~ ^[0-9]+$ ]] ||
     (( SCREEN_W < 320 || SCREEN_H < 320 )); then
     fail "Cannot read Waydroid display size; 'adb shell wm size' said: ${WM_RAW:-<empty>}"
 fi
+export KOT_TAS_ADB_DEVICE="$DEVICE"
 export KOT_TAS_SCREEN_WIDTH="$SCREEN_W"
 export KOT_TAS_SCREEN_HEIGHT="$SCREEN_H"
 echo "Waydroid display: ${SCREEN_W}x${SCREEN_H}; tap coordinates scale to it."

@@ -104,12 +104,19 @@
 
 ### Мелкое
 
-- `.gitignore` приведён в порядок и разбит по разделам: секреты (`config.yaml` и
-  любые его копии — `install.sh` делает `.broken.<дата>`, ручные бэкапы `.bak.<время>`),
-  сборка (`/target/`), рантайм (`/logs/`, `/replays/`, `/diag/`, `nohup.out`, `*.log`),
-  кэши (`.cache`, `__pycache__`, `.aider*`, `.mimocode`) и файлы редакторов/ОС.
+- `.gitignore` разбит по разделам: секреты (`config.yaml` и любые его копии —
+  `install.sh` делает `.broken.<дата>`, ручные бэкапы `.bak.<время>`), сборка
+  (`/target/`), рантайм (`/logs/`, `/diag/`, `nohup.out`, `*.log`), кэши
+  (`.cache`, `__pycache__`, `.aider*`, `.mimocode`) и файлы редакторов/ОС.
   Проверено `git ls-files -ci --exclude-standard` — под игнор не попал ни один
   отслеживаемый файл, включая `config.example.yaml` и фикстуры `tests/fixtures/`.
+- `replays/` версионируется: записи и кадры пушатся. Добавлены `.gitattributes`
+  (`*.png binary`) и `replays/README.md`; список реплеев не считает посторонние
+  файлы верхнего уровня битыми (`top_level_readme_does_not_break_the_listing`).
+- Переиспользование кадра не зависит от порядка: раскладка печатается перед
+  записью, повторно читается при пустом ответе, а если прояснилась к концу —
+  берётся готовый кадр и удаляется дубль (`adopt_existing_shot`, тест
+  `late_layout_adopts_the_existing_screenshot`).
 
 - `logging.log_dir` заменён секцией `replays`; старый ключ читается с
   предупреждением. `start/start.sh` экспортирует `KOT_TAS_ADB_DEVICE`, а контракт
