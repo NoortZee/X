@@ -1,11 +1,16 @@
-# локальный конфиг с секретами
+# локальный конфиг с секретами и его резервные копии
+# (install.sh делает config.yaml.broken.<дата>, ручные бэкапы — *.bak.<время>)
 config.yaml
+config.yaml.*
 
 # rust build artifacts
 /target/
 
 # runtime-артефакты
 logs/
+/replays/
+# диагностические дампы (stones raw)
+/diag/
 
 # local tooling caches and Python test bytecode
 /.cache/

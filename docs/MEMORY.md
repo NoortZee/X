@@ -17,6 +17,10 @@
 | `stones.rival_fields` | Смещения, имена и типы чтения полей соперника |
 | `stones.rival_n_items`, `rival_items_ptr` | Количество элементов и указатель списка |
 | `stones.item_fields`, `item_stride`, `item_first_ptr` | Поля камня и раскладка списка указателей |
+| `stones.rival_probe` | Окно read-only дампа ответа соперника: скаляры, строки, вложенные сообщения, repeated-поля, указатель `Dungeon` |
+| `protocol.dungeon.header`, `protocol.dungeon.probe` | Заголовок `Dungeon` (`seed` = f5) и окна дампа ловушек для `stones raw` |
+| `protocol.dungeon.load_dungeon` | `GameScene2::loadDungeon(self, Dungeon*)` — момент, когда уровень собран; единственный достоверный признак «какая база на экране» |
+| `protocol.request_wrapper.SINGLEPLAYER_RESULT`, `MULTIPLAYER_RESULT` | Результат забега (поля 11/12): отправляется в конце уровня, используется как «с уровня ушли» |
 | `platform` | Имя libc, структура времени и номер syscall x86_64 |
 
 Константы протокола Phantom, FNV-хеша и IEEE-754 — не адреса памяти; они остаются рядом со своими алгоритмами.

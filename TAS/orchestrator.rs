@@ -48,6 +48,14 @@ pub struct TapStatsMs {
     pub max: f64,
 }
 
+/// Отклонение фактического тапа от целевого времени для планов в миллисекундах.
+#[derive(Debug, Clone)]
+pub struct MsStats {
+    pub min: f64,
+    pub med: f64,
+    pub max: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlayReport {
     pub jumps_planned: usize,
@@ -60,6 +68,8 @@ pub struct PlayReport {
     pub tap_stats_ms: TapStatsMs,
     pub verify_body_frames: Value,
     pub elapsed_s: f64,
+    /// Заполнено только для планов, заданных временем (`+400ms`).
+    pub ms_stats: Option<MsStats>,
 }
 
 pub fn effective_wall_timeout(configured_raw: Option<f64>, nominal_fps: f64, plan: &[PlanStep]) -> Option<f64> {
@@ -142,19 +152,31 @@ impl<'c> Orchestrator<'c> {
         let (anchor_kind, anchor_rec) = find_anchor(&self.replay.events, &self.replay.body_frames)
             .ok_or_else(|| ReplayError::Msg("no anchor".into()))?;
         let plan = build_plan(&self.replay.events, anchor_rec);
-        if plan.is_empty() {
+        let ms_plan: Vec<i64> = self.replay.ms_steps.clone();
+        if plan.is_empty() && ms_plan.is_empty() {
             return Err(ReplayError::Msg("no jumps".into()));
         }
 
+        // Покадровый эталон имеет смысл только для покадрового плана.
         let verify_body = self.cfg.orchestrator.verify_body_frames
-            && !self.replay.body_frames.is_empty();
-        let setup = agent.play_setup(&self.replay.events, &self.replay.body_frames, verify_body)?;
+            && !self.replay.body_frames.is_empty()
+            && ms_plan.is_empty();
+        let setup = agent.play_setup(
+            &self.replay.events,
+            &self.replay.body_frames,
+            verify_body,
+            &ms_plan,
+        )?;
         if setup.get("ok").and_then(|v| v.as_bool()) != Some(true) {
             return Err(ReplayError::Msg(format!("playSetup failed: {setup}")));
         }
 
         // Guarantee play_stop() runs regardless of Ok / Err / Ctrl+C
-        let res = self.run_inner(agent, phantom, aborted, &anchor_kind, anchor_rec, &plan, verify_body);
+        let res = if ms_plan.is_empty() {
+            self.run_inner(agent, phantom, aborted, &anchor_kind, anchor_rec, &plan, verify_body)
+        } else {
+            self.run_ms(agent, phantom, aborted, &ms_plan)
+        };
         if let Err(e) = agent.play_stop() {
             eprintln!("WARN orch: play_stop cleanup failed: {e}");
         }
@@ -276,6 +298,161 @@ impl<'c> Orchestrator<'c> {
             },
             verify_body_frames: verify_bf,
             elapsed_s: wall0.elapsed().as_secs_f64(),
+            ms_stats: None,
+        })
+    }
+
+    /// Прогон по стенным часам: шаг `+400ms` означает тап через 400 мс после
+    /// старта уровня, без пересчёта в кадры.
+    ///
+    /// Это второй путь исполнения рядом с покадровым `run_inner`/`fire_async`:
+    /// общего у них только сам тап (`phantom.tap`) и проверка «прыжок случился»
+    /// через журнал `jumpFn`. Объединять их в один цикл не стоит — условия
+    /// взведения принципиально разные (кадр против часов).
+    ///
+    /// Точность ограничена опросом `poll_interval_ms` и задержкой тапа, поэтому
+    /// фактическое отклонение печатается и попадает в отчёт.
+    fn run_ms(
+        &mut self,
+        agent: &mut TasAgent<'_>,
+        phantom: &mut PhantomBridge,
+        aborted: &AtomicBool,
+        steps: &[i64],
+    ) -> Result<PlayReport, ReplayError> {
+        if let Err(e) = phantom.connect() {
+            eprintln!("WARN orch: phantom pre-connect failed: {e}");
+        }
+        let o = &self.cfg.orchestrator;
+        let wall0 = Instant::now();
+        let initial = self.wait_playing(agent, aborted)?;
+        let base_ms = initial.elapsed_ms.unwrap_or(0.0);
+        eprintln!(
+            "INFO orch: план в миллисекундах: шагов {} (якорь уже прошёл {base_ms:.1} мс, lead={:.0} мс)",
+            steps.len(),
+            o.predict_lead_ms
+        );
+
+        let t0 = Instant::now();
+        let elapsed_ms = || base_ms + t0.elapsed().as_secs_f64() * 1000.0;
+
+        let mut fired = 0usize;
+        let mut missed = 0usize;
+        let mut errors: Vec<f64> = Vec::new();
+        let mut taps: Vec<f64> = Vec::new();
+        let mut retries = 0usize;
+
+        for (idx, offset) in steps.iter().enumerate() {
+            if let Some(limit) = o.wall_timeout_s.filter(|v| v.is_finite() && *v > 0.0) {
+                if wall0.elapsed().as_secs_f64() > limit {
+                    return Err(ReplayError::Msg(format!(
+                        "wall_timeout (ms-план, шагов пройдено {idx}/{})",
+                        steps.len()
+                    )));
+                }
+            }
+            let target_ms = *offset as f64;
+            let fire_at = target_ms - o.predict_lead_ms;
+            loop {
+                if aborted.load(Ordering::SeqCst) {
+                    return Err(ReplayError::Aborted);
+                }
+                let remain = fire_at - elapsed_ms();
+                if remain <= 0.0 {
+                    break;
+                }
+                if remain > 5.0 {
+                    thread::sleep(Duration::from_millis((remain - 2.0) as u64));
+                } else if remain > 1.0 {
+                    thread::sleep(Duration::from_micros(500));
+                } else {
+                    std::hint::spin_loop();
+                }
+            }
+
+            let jc_before = agent.pump_jump_count()?;
+            let mut landed = false;
+            let max_attempts = if o.retry_on_miss { 2 } else { 1 };
+            for attempt in 1..=max_attempts {
+                let tr = phantom.tap(self.tap_x, self.tap_y);
+                if !tr.ok {
+                    return Err(ReplayError::Msg(format!(
+                        "phantom tap failed: {}",
+                        tr.error.unwrap_or_default()
+                    )));
+                }
+                taps.push(tr.duration_ms);
+                if attempt > 1 {
+                    retries += 1;
+                }
+                let hit = elapsed_ms();
+                let deadline = Instant::now() + Duration::from_millis(o.post_tap_check_ms.max(20));
+                loop {
+                    thread::sleep(Duration::from_millis(5));
+                    if let Ok(jumps) = agent.pump_jump_log_since(jc_before) {
+                        if !jumps.is_empty() {
+                            landed = true;
+                            break;
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
+                if landed {
+                    errors.push(hit - target_ms);
+                    eprintln!(
+                        "INFO orch: ms idx={idx} target={target_ms:.0}ms hit={hit:.1}ms err={:+.1}ms tap={:.2}ms attempt={attempt}",
+                        hit - target_ms,
+                        tr.duration_ms
+                    );
+                    break;
+                }
+                if attempt < max_attempts {
+                    eprintln!(
+                        "WARN orch: ms idx={idx} target={target_ms:.0}ms — прыжка нет, повтор"
+                    );
+                }
+            }
+            if landed {
+                fired += 1;
+            } else {
+                missed += 1;
+                eprintln!("WARN orch: ms idx={idx} target={target_ms:.0}ms — пропущено");
+            }
+        }
+
+        let durations = if taps.is_empty() { vec![0.0] } else { taps.clone() };
+        let (min, med, max) = (
+            errors.iter().copied().fold(f64::INFINITY, f64::min),
+            median_f64(&errors),
+            errors.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+        Ok(PlayReport {
+            jumps_planned: steps.len(),
+            jumps_fired: fired,
+            jumps_missed: missed,
+            covered_by_user_tap: 0,
+            retries,
+            wall_limit_s: o.wall_timeout_s,
+            frame_error_stats: FrameErrorStats {
+                min: None,
+                med: None,
+                max: None,
+                abs_med: None,
+                abs_max: None,
+            },
+            tap_stats_ms: TapStatsMs {
+                min: durations.iter().copied().fold(f64::INFINITY, f64::min),
+                med: median_f64(&durations),
+                max: durations.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            },
+            verify_body_frames: json!({}),
+            elapsed_s: wall0.elapsed().as_secs_f64(),
+            ms_stats: Some(MsStats {
+                min: if min.is_finite() { min } else { 0.0 },
+                med,
+                max: if max.is_finite() { max } else { 0.0 },
+            }),
         })
     }
 

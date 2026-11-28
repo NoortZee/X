@@ -600,7 +600,7 @@ const BODY = MEMORY_LAYOUT.tas.body;
     // Play (NO jumpFn)
     // ------------------------------------------------------------
     let play = { phase: 'idle', anchorFrame: null, anchorRecFrame: null,
-        anchorKind: null, plan: [], waitForFirstUpdate: false };
+        anchorKind: null, plan: [], waitForFirstUpdate: false, anchorNs: null };
         const _playHooks = [];
 
         function playSetup(events, opts) {
@@ -618,9 +618,12 @@ const BODY = MEMORY_LAYOUT.tas.body;
             pump.clearPlaybackBody();
             pump.resetHero();
 
+            // План в миллисекундах: шаги заданы временем от старта уровня, а не
+            // кадрами. Кадры тогда не используются вовсе.
+            const msSteps = Array.isArray(opts.ms_steps) ? opts.ms_steps.slice() : [];
             const allJumps = events.filter(e => e.name === 'jump')
             .sort((a, b) => a.frame - b.frame);
-            if (!allJumps.length) return { ok: false, error: 'no_jumps' };
+            if (!allJumps.length && !msSteps.length) return { ok: false, error: 'no_jumps' };
 
             const unfreezeEvent = events
             .filter(e => e.name === 'unfreeze' || e.name === 'unfreeze_attack')
@@ -645,12 +648,14 @@ const BODY = MEMORY_LAYOUT.tas.body;
                 return { ok: false, error: 'no_anchor' };
             }
 
-            const plan = allJumps.map((e, i) => ({
-                idx: i,
-                rec_frame: e.frame,
-                frame_delta: Math.max(0, e.frame - anchorRecFrame),
-                                                 snap: e.snap || {},
-            }));
+            const plan = msSteps.length
+                ? msSteps.map((ms, i) => ({ idx: i, ms: ms }))
+                : allJumps.map((e, i) => ({
+                    idx: i,
+                    rec_frame: e.frame,
+                    frame_delta: Math.max(0, e.frame - anchorRecFrame),
+                    snap: e.snap || {},
+                }));
 
             let bodyMapSize = 0;
             if (verifyBody && bodyFramesIn && bodyFramesIn.length) {
@@ -669,6 +674,9 @@ const BODY = MEMORY_LAYOUT.tas.body;
                     }
                     play.phase = 'playing';
                     play.anchorFrame = pump.frame();
+                    // Момент старта по монотонным часам: от него считаются шаги
+                    // в миллисекундах, без пересчёта в кадры.
+                    play.anchorNs = nowNs();
                     if (bodyMapSize > 0) pump.setPlaybackAnchor(play.anchorFrame, anchorRecFrame);
                     send({ type: 'play_armed', anchor: play.anchorFrame,
                         anchorRec: anchorRecFrame, kind: anchorKind,
@@ -679,6 +687,7 @@ const BODY = MEMORY_LAYOUT.tas.body;
                     if (!isValidHeroStrict(hero)) return;
                     play.phase = 'playing';
                     play.anchorFrame = f;
+                    play.anchorNs = nowNs();
                     if (bodyMapSize > 0) pump.setPlaybackAnchor(f, anchorRecFrame);
                     send({ type: 'play_armed', anchor: f, anchorRec: anchorRecFrame,
                         kind: anchorKind, count: plan.length, body_verify: bodyMapSize });
@@ -694,9 +703,13 @@ const BODY = MEMORY_LAYOUT.tas.body;
         }
 
         function playState() {
+            const now = nowNs();
             return { phase: play.phase, anchor: play.anchorFrame,
                 anchorRec: play.anchorRecFrame, kind: play.anchorKind,
-                plan: play.plan, frame: pump._frame };
+                plan: play.plan, frame: pump._frame,
+                anchor_ns: play.anchorNs, now_ns: now,
+                elapsed_ms: play.anchorNs === null ? null
+                    : (now - play.anchorNs) / 1e6 };
         }
         function playStop() {
             for (const h of _playHooks) { try { h.detach(); } catch (_) {} }

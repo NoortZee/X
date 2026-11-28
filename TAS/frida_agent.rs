@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{mpsc, Arc, LazyLock, Mutex};
 
 use frida::{
     Device, DeviceManager, Frida, Message, Script, ScriptHandler, ScriptOption, Session,
@@ -52,10 +52,17 @@ pub struct PlayState {
     pub phase: String,
     pub anchor: Option<i64>,
     pub frame: Option<i64>,
+    /// Сколько миллисекунд прошло от старта уровня (якоря) на момент опроса.
+    /// Нужно шагам, заданным временем: они исполняются по стенным часам.
+    #[serde(default)]
+    pub elapsed_ms: Option<f64>,
 }
 
 struct TasHandler {
     fatal: Arc<AtomicBool>,
+    /// Одноразовый сигнал «первый апдейт персонажа случился»: по нему запись
+    /// снимает скриншот базы, пока уровень ещё в исходном состоянии.
+    first_hero: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
 impl ScriptHandler for TasHandler {
@@ -72,6 +79,22 @@ impl ScriptHandler for TasHandler {
                 }
                 if t == "fatal" {
                     self.fatal.store(true, Ordering::SeqCst);
+                }
+                if t == "event" {
+                    let is_first_hero = msg
+                        .payload
+                        .get("ev")
+                        .and_then(|ev| ev.get("name"))
+                        .and_then(|n| n.as_str())
+                        .map(|n| n == "first_hero_update")
+                        .unwrap_or(false);
+                    if is_first_hero {
+                        if let Ok(mut slot) = self.first_hero.lock() {
+                            if let Some(tx) = slot.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                    }
                 }
             }
             Message::Log(log) => {
@@ -126,6 +149,7 @@ pub struct TasAgent<'a> {
     script: Script<'a>,
     pump_installed: bool,
     pub fatal: Arc<AtomicBool>,
+    first_hero: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
 impl<'a> TasAgent<'a> {
@@ -139,8 +163,10 @@ impl<'a> TasAgent<'a> {
         let mut opts = ScriptOption::default();
         let mut script = session.create_script(&src, &mut opts)?;
         let fatal = Arc::new(AtomicBool::new(false));
+        let first_hero: Arc<Mutex<Option<mpsc::Sender<()>>>> = Arc::new(Mutex::new(None));
         script.handle_message(TasHandler {
             fatal: fatal.clone(),
+            first_hero: first_hero.clone(),
         })?;
         script.load()?;
 
@@ -148,6 +174,7 @@ impl<'a> TasAgent<'a> {
             script,
             pump_installed: false,
             fatal,
+            first_hero,
         };
         me.rpc("detectInstall", None)?;
         Ok(me)
@@ -168,6 +195,13 @@ impl<'a> TasAgent<'a> {
         Ok(())
     }
 
+    /// Взвести одноразовый сигнал на первый апдейт персонажа.
+    pub fn arm_first_hero_shot(&mut self, tx: mpsc::Sender<()>) {
+        if let Ok(mut slot) = self.first_hero.lock() {
+            *slot = Some(tx);
+        }
+    }
+
     pub fn detect_start(&mut self) -> Result<(), AgentError> {
         self.rpc("detectStart", None)?;
         Ok(())
@@ -185,12 +219,6 @@ impl<'a> TasAgent<'a> {
             .map_err(|e| AgentError::BadResponse("detectGetBodyFrames".into(), e.to_string()))
     }
 
-    pub fn detect_get_frame_ns_timeline(&mut self) -> Result<Vec<Value>, AgentError> {
-        let v = self.rpc("detectGetFrameNsTimeline", None)?;
-        serde_json::from_value(v).map_err(|e| {
-            AgentError::BadResponse("detectGetFrameNsTimeline".into(), e.to_string())
-        })
-    }
 
     pub fn pump_jump_count(&mut self) -> Result<u64, AgentError> {
         let v = self.rpc("pumpJumpCount", None)?;
@@ -215,12 +243,16 @@ impl<'a> TasAgent<'a> {
         events: &[ReplayEvent],
         body_frames: &[Value],
         verify_body: bool,
+        ms_steps: &[i64],
     ) -> Result<Value, AgentError> {
-        let opts = if verify_body {
+        let mut opts = if verify_body {
             json!({ "verify_body": true, "body_frames": body_frames })
         } else {
             json!({ "verify_body": false })
         };
+        if !ms_steps.is_empty() {
+            opts["ms_steps"] = json!(ms_steps);
+        }
         self.rpc("playSetup", Some(json!([events, opts])))
     }
 

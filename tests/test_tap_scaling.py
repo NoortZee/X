@@ -81,10 +81,19 @@ class LauncherAndRustAgreementTests(unittest.TestCase):
             self.assertRegex(self.launcher, rf'export {name}=')
 
     def test_rust_reads_exactly_the_names_the_launcher_exports(self):
-        exported = set(re.findall(r'export (KOT_TAS_SCREEN_[A-Z]+)=', self.launcher))
-        self.assertEqual(exported, {'KOT_TAS_SCREEN_WIDTH', 'KOT_TAS_SCREEN_HEIGHT'})
-        for name in sorted(exported):
+        exported = set(re.findall(r'export (KOT_TAS_[A-Z_]+)=', self.launcher))
+        self.assertEqual(
+            exported,
+            {
+                'KOT_TAS_SCREEN_WIDTH',
+                'KOT_TAS_SCREEN_HEIGHT',
+                # серийник adb для скриншота реплея: launcher экспортирует, config читает
+                'KOT_TAS_ADB_DEVICE',
+            },
+        )
+        for name in ('KOT_TAS_SCREEN_WIDTH', 'KOT_TAS_SCREEN_HEIGHT'):
             self.assertIn(f'env_dim("{name}")', self.config_rs)
+        self.assertIn('std::env::var("KOT_TAS_ADB_DEVICE")', self.config_rs)
         # No stale name survives on either side.
         for name in set(re.findall(r'KOT_TAS_[A-Z_]+', self.launcher + self.config_rs)) - exported:
             self.fail(f'unexpected KOT_TAS_ variable: {name}')

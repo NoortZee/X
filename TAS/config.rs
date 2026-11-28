@@ -1,3 +1,4 @@
+use crate::base::config::BaseConfig;
 use crate::stones::config::{StonesConfig, TelegramConfig};
 
 use serde::Deserialize;
@@ -25,13 +26,18 @@ pub struct Config {
     #[serde(default, deserialize_with = "screen_or_default")]
     pub screen: ScreenConfig,
     #[serde(default)]
+    pub base: BaseConfig,
+    #[serde(default)]
     pub stones: StonesConfig,
     #[serde(default)]
     pub telegram: TelegramConfig,
     pub orchestrator: OrchestratorConfig,
     pub frida: FridaConfig,
     #[serde(default)]
-    pub logging: LoggingConfig,
+    pub replays: ReplaysConfig,
+    /// Устаревшая секция `logging`: читается только ради совместимости.
+    #[serde(default)]
+    pub logging: Option<LoggingConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,16 +181,74 @@ pub struct FridaConfig {
     pub package: String,
 }
 
+/// Устаревшая секция: каталог логов. Оставлена, чтобы старый config.yaml не
+/// ломал запуск; при загрузке переносится в `replays.dir` с предупреждением.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
     #[serde(default = "d_logs")]
     pub log_dir: String,
 }
 
-impl Default for LoggingConfig {
+/// Скриншот базы делается снаружи игры (`adb exec-out screencap -p`), поэтому
+/// кадр — это ровно то, что видит дисплей, а не пересобранное окно хоста.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenshotConfig {
+    #[serde(default = "d_true")]
+    pub enabled: bool,
+    /// Серийник adb; пусто — единственное подключённое устройство.
+    #[serde(default)]
+    pub adb_device: String,
+    #[serde(default = "d_5000")]
+    pub timeout_ms: u64,
+}
+
+impl Default for ScreenshotConfig {
     fn default() -> Self {
         Self {
-            log_dir: "logs".into(),
+            enabled: true,
+            adb_device: String::new(),
+            timeout_ms: 5000,
+        }
+    }
+}
+
+impl ScreenshotConfig {
+    /// Серийник adb: из конфига, иначе из `KOT_TAS_ADB_DEVICE` — ровно то
+    /// значение, с которым `start/start.sh` подключает Waydroid.
+    pub fn resolved_device(&self) -> String {
+        let direct = self.adb_device.trim();
+        if !direct.is_empty() {
+            return direct.to_string();
+        }
+        std::env::var("KOT_TAS_ADB_DEVICE")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default()
+    }
+}
+
+/// Каталог реплеев и политика хранения.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplaysConfig {
+    #[serde(default = "d_replays")]
+    pub dir: String,
+    /// Сколько последних прогонов держать на одну базу (папку).
+    #[serde(default = "d_keep")]
+    pub keep_per_base: usize,
+    /// Чем открывать PNG реплея по команде: имя программы в PATH.
+    #[serde(default = "d_viewer")]
+    pub viewer: String,
+    #[serde(default)]
+    pub screenshot: ScreenshotConfig,
+}
+
+impl Default for ReplaysConfig {
+    fn default() -> Self {
+        Self {
+            dir: "replays".into(),
+            keep_per_base: 10,
+            viewer: "xdg-open".into(),
+            screenshot: ScreenshotConfig::default(),
         }
     }
 }
@@ -195,7 +259,22 @@ impl Config {
             return Err(ConfigError::NotFound(path.display().to_string()));
         }
         let raw = std::fs::read_to_string(path)?;
-        Ok(serde_yaml::from_str(&raw)?)
+        let mut cfg: Config = serde_yaml::from_str(&raw)?;
+        if let Some(legacy) = cfg.logging.take() {
+            if cfg.replays.dir == ReplaysConfig::default().dir {
+                eprintln!(
+                    "WARN config: секция logging.log_dir устарела — переношу в replays.dir ({:?})",
+                    legacy.log_dir
+                );
+                cfg.replays.dir = legacy.log_dir;
+            } else {
+                eprintln!(
+                    "WARN config: секция logging устарела и игнорируется (replays.dir={:?})",
+                    cfg.replays.dir
+                );
+            }
+        }
+        Ok(cfg)
     }
 }
 
@@ -211,6 +290,11 @@ where
 
 fn d_async() -> String { "async".into() }
 fn d_logs() -> String { "logs".into() }
+fn d_replays() -> String { "replays".into() }
+fn d_true() -> bool { true }
+fn d_keep() -> usize { 10 }
+fn d_viewer() -> String { "xdg-open".into() }
+fn d_5000() -> u64 { 5000 }
 fn d_1() -> u64 { 1 }
 fn d_1_usize() -> usize { 1 }
 fn d_3() -> u64 { 3 }

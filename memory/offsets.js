@@ -66,6 +66,22 @@ const MEMORY_LAYOUT = {
         item_fields: { rating: 0x18, slot: 0x1C, flag: 0x20, cnt: 0x24 },
         item_stride: 8,
         item_first_ptr: 8,
+        // Дамп ответа сервера целиком (только чтение). Нужен, чтобы увидеть, какие
+        // поля RivalDungeon реально приходят: id подземелья, ловушки, seed. Пока
+        // состав данных не подтверждён живьём, формат реплея на него не опирается.
+        rival_probe: {
+            dwords: { from: 0x10, count: 40 },        // сырое окно s32/u32
+            strings: [[0x60, 'field1'], [0x68, 'field7']],
+            messages: [[0x78, 'guild'], [0x80, 'door']],
+            repeated: [[0x18, 'items'], [0x30, 'trap_upgrades'], [0x48, 'trap_costumes']],
+            dungeon_ptr: 0x70,
+            string_hex: 24,                           // байт std::string на поле
+            string_ptr_bytes: 64,                     // байт по указателям std::string
+            msg_dwords: 16,                           // dwords внутри вложенного сообщения
+            submit_dwords: 40,                        // dwords внутри исходящего сообщения
+            wrapper_dwords: 80,                       // dwords обёртки Request: поля 0..41
+            max_repeated: 64,
+        },
     },
     catacombs: {
         sequence_probe: { builder: 0xE54DA0, snapshots: 32, nodes: 64,
@@ -146,6 +162,47 @@ const MEMORY_LAYOUT = {
         limits: { sample_ms: 500, slots: 1024, declared_slots: 16384,
             events: 1000, history: 120, name_bytes: 128, methods: 4 },
     },
+    // ---------------------------------------------------------------------
+    // Mystic Realm (ивентовый режим: 60 секунд на сбор колб-реагентов).
+    //
+    // Состояние режима — MysticRealmPlayState: пер-кадровый update найден по
+    // vtable (typeinfo 0x2015770, слот 17 совпадает с EndlessMazePlayState).
+    // Раскладка объекта/тела — та же, что у Candy: колбы используют тело
+    // EndlessMazeCandyBody, поэтому телепорт делается так же (запись stored x/y
+    // + destroy/rebuild тела). Подробности: mystic/README.md.
+    mystic: {
+        // MergePartialFromCodedStream тут не нужен: хук ставится на update(state, dt).
+        // У протобуф-парсеров и апдейтов общий пролог, поэтому RVA проверяется.
+        update: { rva: 0x1468CC0,
+            prologue: '55 48 89 E5 41 57 41 56 41 54 53 48 83 EC 50 48 89 FB' },
+        destroy: 0x1615CB0,          // удаление тела + tail-call на recreate
+        // Спавн колб устроен так: игра создаёт реагент в 0x16079e0 (ctor 0x15bc350
+        // + копия координат источника + регистрация в сцене). Клонирование через
+        // эту точку пробовали — клоны появляются, но в награду не идут, поэтому
+        // режим `spawn` из модуля убран; адреса оставлены как справка.
+        state_class: '20MysticRealmPlayState',
+        reagent_class: '18MysticRealmReagent',
+        reagent_vtable: 0x2048F18,   // vptr объекта колбы: дешёвый фильтр в списке
+        body_class: '20EndlessMazeCandyBody',
+        hero_class: '4Hero',
+        // timer — оставшееся время забега (float, секунды): update вычитает из
+        // него dt (0x1468e82..0x1468e8f) и сравнивает с нулём, завершая забег.
+        state: { world: 0x40, objects: 0x68, paused: 0x88, phase: 0x138, timer: 0x1E0 },
+        world: { hero: 0x18 },
+        array: { data: 0x10, count: 0x18 },
+        object: { x: 0x34, y: 0x38, body: 0x198, rarity: 0x1F0 },
+        hero_body: { direction: 0x9C, physics: 0x20 },
+        body: { physics: 0x20, stored_x: 0x38, stored_y: 0x3C, owner: 0xB8 },
+        physics_world: { world: 0x58, lock: 0x19298, lock_mask: 2 },
+        physics_position: { x: 0x0C, y: 0x10, scale: 100 },
+        // close_px: колба ближе этого к точке сбора не трогается (её и так подберут).
+        // batch: сколько колб переставлять за один тик. Сразу после старта забега в
+        // уровне уже есть ~8 колб, поэтому первый тик забирает пачку; дальше прирост
+        // всё равно упирается в спавн (~1/с). 8 ребилдов подряд — один хич ~80 мс.
+        teleport: { ahead: 12, interval_ms: 50, delay_ms: 100, close_px: 24, batch: 8,
+            tolerance: 0.05 },
+        limits: { slots: 1024, events: 20 },
+    },
     platform: {
         libc: 'libc.so',
         clock_monotonic: 1,
@@ -153,6 +210,94 @@ const MEMORY_LAYOUT = {
         time_struct_size: 16,
         time_seconds: 0,
         time_subseconds: 8,
+    },
+
+    // ---------------------------------------------------------------------
+    // Протокол KTProtocol: функции отправки/сериализации, обёртка Request,
+    // геометрия арены. Используется модулями base и stones.
+    // Адреса проверены на 2.84.2 x86_64. Сигнатуры — с маскированием
+    // rip-relative и immediate-байтов, чтобы находить функции после апдейта.
+    // Подробности: base/README.md, analysis/report/DUNGEON_SAVE_FLOW.md.
+    protocol: {
+        signatures: {
+            SUBMIT: '55 48 89 E5 41 57 41 56 41 54 53 48 ?? ?? ?? 41 89 CC 49 89 D6 48 89 F3 49 89',
+            DELTA_BUILDER: '55 48 89 E5 41 57 41 56 53 48 ?? ?? ?? ?? ?? ?? 49 89 F7 48 89 FB 48 8D BD 38',
+            SERIALIZE_TO_ARRAY: 'FF 25 ?? ?? ?? ?? 68 98 00 00 00 E9',
+            REQUEST_WRITER: '55 48 89 E5 41 57 41 56 53 50 48 89 F3 49 89 FE F6 ?? ?? ?? 74 ?? 41 8B B6 AC',
+            MATCHMAKING_BUILDER: '55 48 89 E5 41 57 41 56 41 54 53 48 ?? ?? ?? ?? ?? ?? 41 89 D7 48 89 F3 49 89 FE 48 8D BD 30 FB FF FF',
+            CTX_GETTER: '55 48 89 E5 53 50 0F B6 05 ?? ?? ?? ?? 84 C0 74 ?? 48 8B 05 ?? ?? ?? ?? 48 ?? ?? ?? 5B 5D',
+        },
+        fallback: {
+            SUBMIT: 0xE47A00,          // (ctx, Request*, handler*, flags)
+            DELTA_BUILDER: 0xE4C280,   // (ctx, deltaSrc*) — ChangeDungeonObject
+            SERIALIZE_TO_ARRAY: 0x1F26F90,
+            REQUEST_WRITER: 0x1F1F020,
+            MATCHMAKING_BUILDER: 0xE48CF0,   // (ctx, handler, bool) — Request_MatchMaking
+            LEAGUE_RIVAL_CTOR: 0xEF5C90,     // Request_GetLeagueRivalDungeon (size 0x28)
+            PANEL_TICK: 0x139F038,           // диспетчер состояний панели соперника (self)
+            WRAPPER_CTOR: 0xF13F60,          // KTProtocol::Request (size 0x4B0)
+            ALLOC: 0x1F26660,                // operator new(size)
+            CTX_GETTER: 0xE47090,            // () -> ctx протокольного клиента
+        },
+        request_wrapper: {
+            HAS_BITS: 0x10,
+            FIELD10_CONFIRM: 0x60,     // ConfirmDungeon
+            FIELD30_DELTA: 0x100,      // ChangeDungeonObject
+            MATCHMAKING: 0x50,         // Request_MatchMaking (поле 8)
+            LEAGUE_RIVAL: 0x138,       // Request_GetLeagueRivalDungeon — следующий соперник лиги
+            START_ATTACK: 0x78,        // Request_StartAttack (поле 13) — заход в базу
+            // Результат забега: клиент отправляет его в конце уровня, поэтому это
+            // признак «с уровня ушли» (поле = 0x10 + 8*N).
+            SINGLEPLAYER_RESULT: 0x68, // Request_SingleplayerAttackResult (поле 11)
+            MULTIPLAYER_RESULT: 0x70,  // Request_MultiplayerAttackResult (поле 12)
+            ATTEMPT_STARTED: 0x120,    // Request_AttemptStarted (поле 34)
+            SIZE: 0x4B0,
+        },
+        vtable: {
+            REQUEST: 0x1F61C70,
+            CONFIRM_RESPONSE: 0x1F64970,
+        },
+        // Геометрия арены: координаты в протоколе — пиксели, шаг сетки 64.
+        grid: {
+            CELL_PX: 64,
+            WIDTH: 896,
+            HEIGHT: 448,
+        },
+        // Макет подземелья в памяти: protobuf-сообщение Dungeon и его парсеры.
+        // Нужно модулю base для режима reset (все объекты в одну точку, только
+        // в клиенте). Подробности: base/README.md, analysis/report/SAVE_PACKET_FULL.md.
+        dungeon: {
+            // MergePartialFromCodedStream сообщения Dungeon (this = Dungeon*).
+            // У protobuf-парсеров общий пролог, поэтому AOB-сигнатура не уникальна:
+            // адрес берётся по RVA, а пролог проверяется перед установкой хука.
+            parser: { rva: 0x105C7C0,
+                prologue: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 68 49 89 F6' },
+            vtable: 0x1F70598,       // vtable Dungeon: защита от записи в чужую структуру
+            obstacles: {
+                count: 0x20, rep: 0x28,   // f1 repeated Dungeon_Obstacle
+                max: 64,                  // предохранитель: больше в базе не бывает
+                x: 0x18, y: 0x1C,         // f2/f3 — те же координаты, что в дельте
+                slot: 0x20, type: 0x48,
+            },
+            // GameScene2::loadDungeon(self=GameScene2*, dungeon=Dungeon*) — построение
+            // уровня. Это единственный момент, когда достоверно известно, КАКАЯ база
+            // загружена: свой данж приходит с сервера один раз при старте игры и
+            // больше не разбирается, поэтому «последний разбор» — не то же самое,
+            // что «база на экране».
+            // Найдено по ссылке на строку "GameScene2::loadDungeon with physics %1"
+            // (ref 0x10897c1 -> вход 0x1089780). Дельта до setDungeonAndMode
+            // (0x1089540) равна 0x240 — как в анализе (0x10815d0 -> 0x1081810),
+            // а пролог setDungeonAndMode раскладывает (self, Dungeon*, mode, params)
+            // по rdi/rsi/edx/rcx. Пролог сверяется перед установкой хука.
+            load_dungeon: { rva: 0x1089780,
+                prologue: '55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 48 48 89 FB 48 89 75 B8' },
+            // Заголовок Dungeon как есть (наблюдение, ничего не пишется).
+            // seed (f5) — 32-битный идентификатор раскладки: в живом
+            // ConfirmDungeon он приходил как f6.f5 = 142614553.
+            header: { f2: 0x30, f4: 0x34, seed: 0x38, f6: 0x3C, f7: 0x40, mode: 0x44 },
+            probe: { dwords: { from: 0x10, count: 16 }, obstacle_dwords: 16 },
+            default_point: { x: 448, y: 224 },
+        },
     },
 };
 

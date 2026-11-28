@@ -42,21 +42,53 @@ impl SkipCoords {
     }
 }
 
+/// Как запрашивать следующего соперника.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkipVia {
+    /// Вызвать игровой сборщик Request_MatchMaking через frida: быстро, но экран
+    /// не обновляется (клиент обновит его при повторном входе в базу).
+    Agent,
+    /// Тап по кнопке next через phantom (старое поведение).
+    Tap,
+}
+
+impl Default for SkipVia {
+    /// По умолчанию тап: только он обновляет экран (обработчик панели
+    /// пересоздаётся, подставить его повторно нельзя — падает клиент).
+    fn default() -> Self {
+        SkipVia::Tap
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct StonesConfig {
+    /// Чем скипать: `agent` (по умолчанию, игровой вызов) или `tap`.
+    #[serde(default)]
+    pub skip_via: SkipVia,
     pub skip_on_no_match: Option<SkipCoords>,
-    #[serde(default = "d_80")]
-    pub skip_wait_ms: u64,
-    #[serde(default = "d_120", alias = "skip_delay_ms")]
-    pub burst_interval_ms: u64,
     #[serde(default = "d_5000")]
     pub stall_timeout_ms: u64,
-    #[serde(default = "d_500")]
-    pub burst_pause_every: u64,
-    #[serde(default = "d_3000")]
-    pub burst_pause_ms: u64,
     #[serde(default = "d_10")]
     pub tap_fail_abort: u32,
+    /// Останавливать тапы, если игра начала заход в базу (тап улетел в дверь).
+    #[serde(default = "d_true")]
+    pub abort_on_attack: bool,
+    /// agent-режим: на MATCH обновить экран — окно принудительного flag=0 плюс
+    /// один тап next. Клиент сам запросит ТЕКУЩЕГО соперника (flag=0 не листает),
+    /// поэтому матч не теряется.
+    #[serde(default = "d_true")]
+    pub sync_ui_on_match: bool,
+    /// Длительность окна принудительного flag=0, мс.
+    #[serde(default = "d_3000")]
+    pub sync_window_ms: u64,
+    /// Завершать LIVE после MATCH и возвращаться в меню.
+    #[serde(default = "d_true")]
+    pub exit_after_match: bool,
+    /// Задержка перед выходом: клиент должен успеть получить ответ и обновить
+    /// экран (окно flag=0 ещё активно), иначе тап не перехватится.
+    #[serde(default = "d_2500")]
+    pub exit_delay_ms: u64,
     #[serde(default = "d_3_f64")]
     pub health_check_interval_s: f64,
     #[serde(default)]
@@ -66,13 +98,15 @@ pub struct StonesConfig {
 impl Default for StonesConfig {
     fn default() -> Self {
         Self {
+            skip_via: SkipVia::default(),
             skip_on_no_match: None,
-            skip_wait_ms: 80,
-            burst_interval_ms: 120,
             stall_timeout_ms: 5000,
-            burst_pause_every: 500,
-            burst_pause_ms: 3000,
             tap_fail_abort: 10,
+            abort_on_attack: true,
+            sync_ui_on_match: true,
+            sync_window_ms: 3000,
+            exit_after_match: true,
+            exit_delay_ms: 2500,
             health_check_interval_s: 3.0,
             verbose_output: false,
         }
@@ -115,12 +149,29 @@ impl TelegramConfig {
     }
 }
 
-fn d_80() -> u64 { 80 }
-fn d_120() -> u64 { 120 }
-fn d_500() -> u64 { 500 }
-fn d_3000() -> u64 { 3000 }
 fn d_5000() -> u64 { 5000 }
+fn d_3000() -> u64 { 3000 }
+fn d_2500() -> u64 { 2500 }
 fn d_10() -> u32 { 10 }
+fn d_true() -> bool { true }
 fn d_3_f64() -> f64 { 3.0 }
 fn d_5_f64() -> f64 { 5.0 }
 fn d_10_f64() -> f64 { 10.0 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_are_event_driven() {
+        let cfg = StonesConfig::default();
+        assert!(cfg.abort_on_attack, "по умолчанию не долбим дверь");
+        assert!(cfg.stall_timeout_ms >= 500, "watchdog должен быть не меньше 0.5 c");
+        assert!(cfg.tap_fail_abort >= 1);
+        assert_eq!(cfg.skip_via, SkipVia::Tap, "по умолчанию тап: он обновляет UI");
+        assert!(cfg.sync_ui_on_match, "на MATCH экран синхронизируем через flag=0");
+        assert!(cfg.sync_window_ms >= 200, "окно flag=0 должно быть не меньше 200 мс");
+        assert!(cfg.exit_after_match, "после MATCH модуль завершается сам");
+        assert!(cfg.exit_delay_ms >= 200, "задержка выхода должна дать клиенту обновиться");
+    }
+}

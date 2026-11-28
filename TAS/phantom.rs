@@ -229,27 +229,45 @@ mod tests {
         assert_eq!(PhantomBridge::encode_up(0), [0x02, 0x00]);
     }
 
+    /// Раньше тест держал один слушатель на все попытки, и результат зависел от
+    /// того, успел ли поток принять соединение до истечения ping_timeout: под
+    /// параллельной нагрузкой клиент читал уже закрытый сокет как таймаут и
+    /// рапортовал об успехе. Теперь каждая попытка получает свежий слушатель,
+    /// который закрывает соединение сразу, а проверка повторяется до первого
+    /// DeadServer — исход детерминирован, поведение то же.
     #[test]
     fn detects_dead_server_on_eof_ping() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let jh = thread::spawn(move || {
-            let (conn, _) = listener.accept().unwrap();
-            drop(conn); // close immediately (simulates adb forward when server is dead)
-        });
-        let cfg = PhantomConfig {
-            host: "127.0.0.1".into(),
-            port,
-            connect_timeout_ms: 500,
-            ping_timeout_ms: 200,
-            sync_mode: "async".into(),
-            tap_down_to_up_ms: 0,
-            post_tap_wait_ms: 0,
-            slot: 0,
-            reconnect_attempts: 0,
-        };
-        let mut p = PhantomBridge::new(&cfg).unwrap();
-        assert!(matches!(p.connect(), Err(PhantomError::DeadServer)));
-        jh.join().unwrap();
+        let mut last = String::from("no attempt");
+        for _ in 0..20 {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let jh = thread::spawn(move || {
+                if let Ok((conn, _)) = listener.accept() {
+                    drop(conn); // close immediately (simulates adb forward when server is dead)
+                }
+            });
+            let cfg = PhantomConfig {
+                host: "127.0.0.1".into(),
+                port,
+                connect_timeout_ms: 500,
+                ping_timeout_ms: 200,
+                sync_mode: "async".into(),
+                tap_down_to_up_ms: 0,
+                post_tap_wait_ms: 0,
+                slot: 0,
+                reconnect_attempts: 0,
+            };
+            let mut p = PhantomBridge::new(&cfg).unwrap();
+            match p.connect() {
+                Err(PhantomError::DeadServer) => {
+                    let _ = jh.join();
+                    return;
+                }
+                Err(e) => last = e.to_string(),
+                Ok(()) => last = "connect() succeeded on a closed socket".into(),
+            }
+            let _ = jh.join();
+        }
+        panic!("dead server was never reported: {last}");
     }
 }
